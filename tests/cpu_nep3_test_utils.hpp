@@ -1,0 +1,125 @@
+#pragma once
+
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace cpu_nep3_test {
+
+struct Frame {
+  std::vector<std::int32_t> types;
+  std::vector<double> positions_aos3;
+  double box[9] = {};
+  double reference_energy = 0.0;
+};
+
+inline std::unordered_map<std::string, std::int32_t> read_type_map(
+    const std::string& model_path) {
+  std::ifstream input(model_path);
+  std::string header;
+  std::getline(input, header);
+
+  std::istringstream stream(header);
+  std::string tag;
+  int num_types = 0;
+  stream >> tag >> num_types;
+
+  std::unordered_map<std::string, std::int32_t> map;
+  for (int index = 0; index < num_types; ++index) {
+    std::string symbol;
+    stream >> symbol;
+    map[symbol] = index;
+  }
+  return map;
+}
+
+inline bool parse_lattice(const std::string& comment, double* box) {
+  const std::string key = "Lattice=\"";
+  const std::size_t begin = comment.find(key);
+  if (begin == std::string::npos) {
+    return false;
+  }
+
+  const std::size_t values_begin = begin + key.size();
+  const std::size_t end = comment.find('"', values_begin);
+  if (end == std::string::npos) {
+    return false;
+  }
+
+  std::istringstream stream(comment.substr(values_begin, end - values_begin));
+  for (int index = 0; index < 9; ++index) {
+    if (!(stream >> box[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline bool parse_energy(const std::string& comment, double& energy) {
+  const std::string key = "energy=";
+  const std::size_t begin = comment.find(key);
+  if (begin == std::string::npos) {
+    return false;
+  }
+
+  std::istringstream stream(comment.substr(begin + key.size()));
+  stream >> energy;
+  return static_cast<bool>(stream);
+}
+
+inline Frame read_first_frame(
+    const std::string& xyz_path,
+    const std::unordered_map<std::string, std::int32_t>& type_map) {
+  std::ifstream input(xyz_path);
+  std::string line;
+  std::getline(input, line);
+
+  const int atom_count = std::stoi(line);
+  std::getline(input, line);
+
+  Frame frame;
+  frame.types.resize(static_cast<std::size_t>(atom_count));
+  frame.positions_aos3.resize(static_cast<std::size_t>(atom_count) * 3);
+  if (!parse_lattice(line, frame.box) ||
+      !parse_energy(line, frame.reference_energy)) {
+    std::exit(EXIT_FAILURE);
+  }
+
+  for (int atom = 0; atom < atom_count; ++atom) {
+    std::getline(input, line);
+    std::istringstream stream(line);
+    std::string symbol;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    stream >> symbol >> x >> y >> z;
+
+    const auto found = type_map.find(symbol);
+    if (found == type_map.end()) {
+      std::exit(EXIT_FAILURE);
+    }
+
+    frame.types[atom] = found->second;
+    frame.positions_aos3[3 * atom + 0] = x;
+    frame.positions_aos3[3 * atom + 1] = y;
+    frame.positions_aos3[3 * atom + 2] = z;
+  }
+
+  return frame;
+}
+
+inline bool all_finite(const std::vector<double>& values) {
+  for (double value : values) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace cpu_nep3_test

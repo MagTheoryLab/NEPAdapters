@@ -1,0 +1,26 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "pybind11>=2.12",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nep-adapters"
+version = "0.1.0"
+description = "CPU-first NEP runtime adapters for Python and LAMMPS frontends"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+wheel.packages = ["frontends/python/nep_adapters"]
+
+[tool.scikit-build.cmake.define]
+BUILD_SHARED_LIBS = "OFF"
+NEP_ADAPTERS_BUILD_TESTS = "OFF"
+NEP_ADAPTERS_BUILD_BENCHMARKS = "OFF"
+NEP_ADAPTERS_ENABLE_PYTHON = "ON"
+NEP_ADAPTERS_ENABLE_LAMMPS = "OFF"
