@@ -37,7 +37,7 @@ extern "C" void lammpsplugin_init(void* lmp, void* handle, void* regfunc) {
       lmp,
       handle,
       register_plugin,
-      "nep/adapters/cpu",
+      "nep/cpu",
       "NEPAdapters CPU pair style",
       reinterpret_cast<lammpsplugin_factory1*>(&pair_nep_adapters_cpu_creator));
 }

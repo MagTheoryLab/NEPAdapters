@@ -25,6 +25,6 @@ Each case should document:
 CTest labels for future LAMMPS runs should include
 `bench;performance;frontend;lammps`.
 
-The current CPU milestone only compiles the `nep/adapters/cpu` pair/plugin. A
+The current CPU milestone only compiles the `nep/cpu` pair/plugin. A
 real MD benchmark should be added here once a local LAMMPS executable with
 `PLUGIN` is part of the test environment.

@@ -148,6 +148,21 @@ NepaStatus nepa_find_force_batch(
   }
 }
 
+NepaStatus nepa_find_force_lammps_neighbors(
+    NepaModel* model,
+    const NepaLammpsNeighborInput* input,
+    NepaLammpsNeighborResult* result) {
+  if (model == nullptr || input == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+
+  try {
+    return model->impl->find_force_lammps_neighbors(*input, *result);
+  } catch (const std::exception&) {
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
 void nepa_free_model(NepaModel* model) {
   delete model;
 }

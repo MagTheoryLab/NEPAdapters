@@ -1,7 +1,7 @@
 /* -*- c++ -*- */
 #ifdef PAIR_CLASS
 // clang-format off
-PairStyle(nep/adapters/cpu,PairNEPAdaptersCPU);
+PairStyle(nep/cpu,PairNEPAdaptersCPU);
 // clang-format on
 #else
 
@@ -38,13 +38,12 @@ class PairNEPAdaptersCPU : public Pair {
   std::string model_filename_;
   double cutoff_ = 0.0;
 
-  std::vector<int> types_;
-  std::vector<double> positions_;
-  std::vector<double> forces_;
+  std::vector<int> sanitized_numneigh_;
+  std::vector<int*> sanitized_firstneigh_;
+  std::vector<std::vector<int>> sanitized_neighbors_;
   std::vector<double> potential_;
   std::vector<double> virials_per_atom_;
-  double box_[9] = {};
-  int pbc_[3] = {1, 1, 1};
+  std::vector<double*> virial_rows_;
 };
 
 }  // namespace LAMMPS_NS

@@ -11,11 +11,13 @@ source package fallback for older LAMMPS builds.
 
 Current CPU target:
 
-- pair style: `nep/adapters/cpu`
+- pair style: `nep/cpu`
 - backend: `cpu_nep3`
 - runtime plugin: `nepadaptersplugin.so`
-- scope: one MPI rank. Multi-rank LAMMPS needs the external-neighbor engine path
-  before it can be claimed correct.
+- compute path: LAMMPS neighbor lists are forwarded through the
+  external-neighbor runtime API to `NEP::compute_for_lammps`.
+- MPI status: local `mpirun -np 1/2/4` smoke has been validated for energy,
+  force, per-atom energy, `stress/atom`, and `centroid/stress/atom`.
 
 Local smoke test:
 
@@ -32,6 +34,6 @@ Plugin usage after building:
 
 ```lammps
 plugin load /path/to/nepadaptersplugin.so
-pair_style nep/adapters/cpu
+pair_style nep/cpu
 pair_coeff * * nep.txt Fe
 ```

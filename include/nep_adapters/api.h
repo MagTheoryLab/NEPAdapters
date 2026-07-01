@@ -70,9 +70,33 @@ typedef struct NepaFindForceResult {
   double* energy_per_structure;
   double* potential_per_atom;
   double* forces_aos3;
+  /* 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_row_major9;
+  /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_per_atom_row_major9;
 } NepaFindForceResult;
+
+typedef struct NepaLammpsNeighborInput {
+  int nlocal;
+  int inum;
+  int* ilist;
+  int* numneigh;
+  int** firstneigh;
+  int* types;
+  int* type_map;
+  double** positions;
+} NepaLammpsNeighborInput;
+
+typedef struct NepaLammpsNeighborResult {
+  double* total_potential;
+  /* 6 components in LAMMPS order: xx, yy, zz, xy, xz, yz. */
+  double* total_virial6;
+  double* potential_per_atom;
+  double** forces;
+  /* Per-atom 9 components in NEP compute_for_lammps() order:
+     xx, yy, zz, xy, xz, yz, yx, zx, zy. */
+  double** virials_per_atom9;
+} NepaLammpsNeighborResult;
 
 NEP_ADAPTERS_API int nepa_api_version(void);
 NEP_ADAPTERS_API int nepa_backend_count(void);
@@ -88,6 +112,10 @@ NEP_ADAPTERS_API NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindForceResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_neighbors(
+    NepaModel* model,
+    const NepaLammpsNeighborInput* input,
+    NepaLammpsNeighborResult* result);
 NEP_ADAPTERS_API void nepa_free_model(NepaModel* model);
 NEP_ADAPTERS_API const char* nepa_status_message(NepaStatus status);
 

@@ -132,6 +132,36 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  int ilist[] = {0};
+  int numneigh[] = {0};
+  int* firstneigh[] = {nullptr};
+  int type_map[] = {0};
+  double* x[] = {positions};
+  double total_potential = 0.0;
+  double total_virial[6] = {};
+  double* f[] = {forces};
+
+  NepaLammpsNeighborInput lammps_input{};
+  lammps_input.nlocal = 1;
+  lammps_input.inum = 1;
+  lammps_input.ilist = ilist;
+  lammps_input.numneigh = numneigh;
+  lammps_input.firstneigh = firstneigh;
+  lammps_input.types = types;
+  lammps_input.type_map = type_map;
+  lammps_input.positions = x;
+
+  NepaLammpsNeighborResult lammps_result{};
+  lammps_result.total_potential = &total_potential;
+  lammps_result.total_virial6 = total_virial;
+  lammps_result.forces = f;
+
+  if (nepa_find_force_lammps_neighbors(model, &lammps_input, &lammps_result) !=
+      NEPA_STATUS_UNSUPPORTED) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+
   nepa_free_model(model);
 
   if (std::strcmp(nepa_status_message(NEPA_STATUS_OK), "ok") != 0) {

@@ -55,9 +55,19 @@ same call pattern.
 
 LAMMPS pair styles should live under `frontends/lammps/`. They may support a
 runtime plugin and/or a source package, but both are frontends over the same core
-runtime and engines. The current CPU LAMMPS pair uses the public batch runtime
-API and is intentionally limited to one MPI rank; multi-rank LAMMPS should enter
-through an external-neighbor engine contract.
+runtime and engines. The CPU LAMMPS pair enters through the LAMMPS-shaped
+external-neighbor contract and the `cpu_nep3` engine forwards that path to the
+underlying NEP CPU `compute_for_lammps` implementation. The Python frontend must
+continue to use the regular batch `compute` path and should not inherit LAMMPS
+neighbor-list or ghost-atom conventions.
+
+LAMMPS pair-style names are user-facing and should not expose the internal
+adapter framework name. The convention is:
+
+- `nep/cpu`: ordinary NEP through the CPU backend.
+- `nep/gpu`: ordinary NEP through the GPU backend.
+- `nep/spin/cpu`: spin NEP through the CPU backend.
+- `nep/spin/gpu`: spin NEP through the GPU backend.
 
 ## Public API vs Engine SPI
 
@@ -98,7 +108,8 @@ LAMMPS integration should be buildable by users who download this repository:
 2. Keep `cpu_nep3` as the oracle-engine boundary.
 3. Expose Python through pybind11 with NumPy arrays and no Python-side shape
    conversions after native return.
-4. Expose a CPU LAMMPS pair/plugin for one-rank correctness smoke.
+4. Expose a CPU LAMMPS pair/plugin through `compute_for_lammps` and external
+   neighbor lists.
 5. Record correctness, parity, and OpenMP atom scaling in a generated report.
 
 ## Test And Benchmark Strategy
@@ -122,6 +133,12 @@ LAMMPS performance work should run real LAMMPS input decks under
 current CPU report only includes LAMMPS compile/plugin smoke until a local LAMMPS
 runtime benchmark target exists. CUDA performance work should keep Nsight Systems / Nsight Compute commands
 reproducible rather than hiding profiler settings in ad hoc scripts.
+
+Multi-rank LAMMPS correctness should start from a backend-neutral C++ domain
+decomposition contract: full-system reference, rank-local owned atoms, ghost
+atoms, compact external-neighbor lists, ghost-force foldback, and virial
+reduction. CPU and CUDA engines can each provide runners for that same contract;
+CUDA-specific tests should be introduced only when they call a CUDA backend.
 
 ## Red Lines
 

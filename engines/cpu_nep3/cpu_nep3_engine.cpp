@@ -26,6 +26,7 @@ class CpuNep3Model : public nep_adapters::Model {
     }
     out.capabilities =
         nep_adapters::to_mask(nep_adapters::Capability::batch_find_force) |
+        nep_adapters::to_mask(nep_adapters::Capability::external_neighbors) |
         nep_adapters::to_mask(nep_adapters::Capability::virial);
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
     return NEPA_STATUS_OK;
@@ -115,6 +116,43 @@ class CpuNep3Model : public nep_adapters::Model {
     }
   }
 
+  NepaStatus find_force_lammps_neighbors(
+      const NepaLammpsNeighborInput& input,
+      NepaLammpsNeighborResult& result) override {
+    if (input.nlocal < 0 || input.inum < 0 || input.ilist == nullptr ||
+        input.numneigh == nullptr || input.firstneigh == nullptr ||
+        input.types == nullptr || input.type_map == nullptr ||
+        input.positions == nullptr || result.total_potential == nullptr ||
+        result.total_virial6 == nullptr || result.forces == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+
+    try {
+      double total_potential = 0.0;
+      double total_virial[6] = {};
+      nep_.compute_for_lammps(
+          input.nlocal,
+          input.inum,
+          input.ilist,
+          input.numneigh,
+          input.firstneigh,
+          input.types,
+          input.type_map,
+          input.positions,
+          total_potential,
+          total_virial,
+          result.potential_per_atom,
+          result.forces,
+          result.virials_per_atom9);
+
+      *result.total_potential = total_potential;
+      std::copy(total_virial, total_virial + 6, result.total_virial6);
+      return NEPA_STATUS_OK;
+    } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+
  private:
   static bool valid_batch(const NepaStructureBatch& batch) {
     return batch.num_structures > 0 && batch.total_atoms > 0 &&
@@ -133,6 +171,7 @@ class CpuNep3Engine : public nep_adapters::Engine {
         "cpu_nep3",
         "external",
         nep_adapters::to_mask(nep_adapters::Capability::batch_find_force) |
+            nep_adapters::to_mask(nep_adapters::Capability::external_neighbors) |
             nep_adapters::to_mask(nep_adapters::Capability::virial)};
   }
 

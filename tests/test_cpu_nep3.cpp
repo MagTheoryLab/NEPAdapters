@@ -1,4 +1,5 @@
 #include "nep_adapters/api.h"
+#include "nep_adapters/capability.hpp"
 #include "nep_adapters/engines/cpu_nep3.hpp"
 
 #include "cpu_nep3_test_utils.hpp"
@@ -32,6 +33,13 @@ int main() {
   NepaModelInfo model_info{};
   if (nepa_model_info(model, &model_info) != NEPA_STATUS_OK ||
       model_info.cutoff_max <= 0.0 || model_info.num_types <= 0) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+  if (!nep_adapters::has_capability(
+          model_info.capabilities, nep_adapters::Capability::batch_find_force) ||
+      !nep_adapters::has_capability(
+          model_info.capabilities, nep_adapters::Capability::external_neighbors)) {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }

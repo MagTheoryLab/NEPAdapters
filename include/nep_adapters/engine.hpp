@@ -27,6 +27,14 @@ class Model {
   virtual NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) = 0;
+
+  virtual NepaStatus find_force_lammps_neighbors(
+      const NepaLammpsNeighborInput& input,
+      NepaLammpsNeighborResult& result) {
+    (void)input;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
 };
 
 class Engine {

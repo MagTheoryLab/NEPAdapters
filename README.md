@@ -47,7 +47,7 @@ The project must not let one frontend or one engine define the whole design:
 - `frontends/python/`: Python package boundary. M2 uses a minimal pybind11
   frontend over the C ABI and returns NumPy arrays directly.
 - `frontends/lammps/`: LAMMPS pair/plugin boundary. The current CPU pair style is
-  `nep/adapters/cpu`; CUDA/Kokkos styles are intentionally deferred.
+  `nep/cpu`; CUDA/Kokkos styles are intentionally deferred.
 - `tests/`: contract, parity, and fixture tests.
 - `benchmarks/`: throughput and scaling probes for engines/frontends.
 - `docs/design.md`: architecture notes and staged plan.
