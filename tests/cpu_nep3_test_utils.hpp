@@ -14,8 +14,12 @@ namespace cpu_nep3_test {
 struct Frame {
   std::vector<std::int32_t> types;
   std::vector<double> positions_aos3;
+  std::vector<double> reference_forces_aos3;
   double box[9] = {};
   double reference_energy = 0.0;
+  double reference_virial_row_major9[9] = {};
+  bool has_reference_forces = false;
+  bool has_reference_virial = false;
 };
 
 inline std::unordered_map<std::string, std::int32_t> read_type_map(
@@ -72,6 +76,32 @@ inline bool parse_energy(const std::string& comment, double& energy) {
   return static_cast<bool>(stream);
 }
 
+inline bool parse_quoted_doubles(
+    const std::string& comment,
+    const std::string& key,
+    double* values,
+    int count) {
+  const std::string prefix = key + "=\"";
+  const std::size_t begin = comment.find(prefix);
+  if (begin == std::string::npos) {
+    return false;
+  }
+
+  const std::size_t values_begin = begin + prefix.size();
+  const std::size_t end = comment.find('"', values_begin);
+  if (end == std::string::npos) {
+    return false;
+  }
+
+  std::istringstream stream(comment.substr(values_begin, end - values_begin));
+  for (int index = 0; index < count; ++index) {
+    if (!(stream >> values[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 inline Frame read_first_frame(
     const std::string& xyz_path,
     const std::unordered_map<std::string, std::int32_t>& type_map) {
@@ -85,10 +115,13 @@ inline Frame read_first_frame(
   Frame frame;
   frame.types.resize(static_cast<std::size_t>(atom_count));
   frame.positions_aos3.resize(static_cast<std::size_t>(atom_count) * 3);
+  frame.reference_forces_aos3.resize(static_cast<std::size_t>(atom_count) * 3);
   if (!parse_lattice(line, frame.box) ||
       !parse_energy(line, frame.reference_energy)) {
     std::exit(EXIT_FAILURE);
   }
+  frame.has_reference_virial =
+      parse_quoted_doubles(line, "virial", frame.reference_virial_row_major9, 9);
 
   for (int atom = 0; atom < atom_count; ++atom) {
     std::getline(input, line);
@@ -97,7 +130,13 @@ inline Frame read_first_frame(
     double x = 0.0;
     double y = 0.0;
     double z = 0.0;
-    stream >> symbol >> x >> y >> z;
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    stream >> symbol >> x >> y >> z >> fx >> fy >> fz;
+    if (!stream) {
+      std::exit(EXIT_FAILURE);
+    }
 
     const auto found = type_map.find(symbol);
     if (found == type_map.end()) {
@@ -108,7 +147,11 @@ inline Frame read_first_frame(
     frame.positions_aos3[3 * atom + 0] = x;
     frame.positions_aos3[3 * atom + 1] = y;
     frame.positions_aos3[3 * atom + 2] = z;
+    frame.reference_forces_aos3[3 * atom + 0] = fx;
+    frame.reference_forces_aos3[3 * atom + 1] = fy;
+    frame.reference_forces_aos3[3 * atom + 2] = fz;
   }
+  frame.has_reference_forces = true;
 
   return frame;
 }

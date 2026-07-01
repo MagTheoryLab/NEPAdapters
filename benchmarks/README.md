@@ -56,6 +56,16 @@ The report benchmark is intentionally single-process and OpenMP-only:
 python3 tools/generate_test_report.py --openmp-threads 4
 ```
 
+LAMMPS MPI correctness can be included in the same report when a local LAMMPS
+binary and plugin are available:
+
+```sh
+python3 tools/generate_test_report.py \
+  --lammps-source-dir /path/to/lammps \
+  --lmp-executable /path/to/lmp \
+  --lammps-plugin /path/to/nepadaptersplugin.so
+```
+
 For a heavier local scaling sweep, pass explicit supercell factors:
 
 ```sh

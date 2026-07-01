@@ -37,21 +37,23 @@ set_target_properties(
     OUTPUT_NAME "_native"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/nep_adapters"
 )
-add_custom_command(
-  TARGET nep_adapters_python_native
-  POST_BUILD
+add_custom_target(
+  nep_adapters_python_package ALL
   COMMAND
     "${CMAKE_COMMAND}" -E copy_directory
     "${CMAKE_CURRENT_LIST_DIR}/nep_adapters"
     "${CMAKE_CURRENT_BINARY_DIR}/nep_adapters"
 )
+add_dependencies(nep_adapters_python_package nep_adapters_python_native)
 
 install(
   TARGETS nep_adapters_python_native
   LIBRARY DESTINATION nep_adapters
 )
 
-if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu_nep3)
+if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu_nep3
+   AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+   AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz")
   add_test(
     NAME nep_adapters_python_cpu_nep3_smoke_test
     COMMAND
@@ -63,6 +65,34 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu_ne
     PROPERTIES
       LABELS "smoke;frontend;python;cpu_nep3"
       ENVIRONMENT
-        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_NEP89_MODEL_PATH};NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_NEP89_XYZ_PATH}"
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
+  )
+
+  add_test(
+    NAME nep_adapters_python_calculator_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_calculator.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_calculator_test
+    PROPERTIES
+      LABELS "smoke;frontend;python;calculator;cpu_nep3"
+      ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
+  )
+
+  add_test(
+    NAME nep_adapters_python_ase_calculator_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_ase_calculator.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_ase_calculator_test
+    PROPERTIES
+      LABELS "smoke;frontend;python;ase;calculator;cpu_nep3"
+      ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
   )
 endif()

@@ -22,6 +22,8 @@ The design has three layers:
 - Engines implement the core engine SPI and must not depend on frontends.
 - Frontends consume the public runtime API and must not include engine internals.
 - CUDA must not be a hard dependency of the CPU-only Python package.
+- ASE must remain an optional Python adapter, not a dependency of the core
+  calculator package.
 
 ## Engine Strategy
 
@@ -48,7 +50,8 @@ Python and LAMMPS have different shapes and should not force each other into the
 same call pattern.
 
 - Python primarily wants model loading, batch prediction, optional descriptors,
-  and automatic or explicit engine selection.
+  optional descriptors, automatic or explicit engine selection, and direct
+  NumPy arrays.
 - LAMMPS primarily wants a pair/plugin frontend that translates LAMMPS atom,
   box, type-map, neighbor-list, energy, force, and virial conventions into core
   views.
@@ -110,14 +113,19 @@ LAMMPS integration should be buildable by users who download this repository:
    conversions after native return.
 4. Expose a CPU LAMMPS pair/plugin through `compute_for_lammps` and external
    neighbor lists.
-5. Record correctness, parity, and OpenMP atom scaling in a generated report.
+5. Record correctness, parity, LAMMPS MPI smoke, and OpenMP atom scaling in a
+   generated report.
+6. Keep small golden-label fixtures in `tests/fixtures/`; they are repository
+   test data and must not be packaged into Python wheels.
 
 ## Test And Benchmark Strategy
 
 Testing has two separate jobs:
 
 - correctness: API/SPI contracts, smoke tests, parity against `cpu_nep3`, and
-  frontend integration tests;
+  frontend integration tests. The default CPU/Python/LAMMPS correctness tests
+  must also compare against committed golden labels in
+  `tests/fixtures/cpu_nep3_baseline/`;
 - performance: throughput, scaling, and profiler-backed bottleneck evidence.
 
 CTest is the top-level dispatcher for native tests and benchmarks. Tests must
@@ -126,13 +134,16 @@ use labels such as `contract`, `smoke`, `parity`, `frontend`, `engine`,
 select the right slice without inventing new runners.
 
 Python-specific tests should use the `mysci` conda environment and the pybind11
-frontend should exchange NumPy arrays directly with native code. Python
+frontend should exchange NumPy arrays directly with native code. The default
+calculator facade should not import ASE; the optional `nep_adapters.ase` module
+owns ASE `Calculator` and `SinglePointCalculator` integration. Python
 performance work should use `pytest-benchmark` once broader Python APIs exist.
 LAMMPS performance work should run real LAMMPS input decks under
 `benchmarks/lammps/`; the repository should not grow a duplicate MD driver. The
-current CPU report only includes LAMMPS compile/plugin smoke until a local LAMMPS
-runtime benchmark target exists. CUDA performance work should keep Nsight Systems / Nsight Compute commands
-reproducible rather than hiding profiler settings in ad hoc scripts.
+current CPU report includes LAMMPS compile/plugin smoke plus local
+`mpirun -np 1/2/4` correctness smoke. CUDA performance work should keep Nsight
+Systems / Nsight Compute commands reproducible rather than hiding profiler
+settings in ad hoc scripts.
 
 Multi-rank LAMMPS correctness should start from a backend-neutral C++ domain
 decomposition contract: full-system reference, rank-local owned atoms, ghost

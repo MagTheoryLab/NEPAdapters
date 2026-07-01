@@ -14,6 +14,11 @@ dependencies = [
   "numpy",
 ]
 
+[project.optional-dependencies]
+ase = [
+  "ase",
+]
+
 [tool.scikit-build]
 cmake.version = ">=3.20"
 wheel.packages = ["frontends/python/nep_adapters"]

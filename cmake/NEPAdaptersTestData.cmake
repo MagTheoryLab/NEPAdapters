@@ -3,6 +3,7 @@ set(NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR "" CACHE PATH
 
 if(NOT NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR)
   foreach(_candidate IN ITEMS
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/cpu_nep3_baseline"
       "${PROJECT_SOURCE_DIR}/../NepTrainKit/tests/data/nep")
     if(EXISTS "${_candidate}/nep.txt" AND EXISTS "${_candidate}/train.xyz")
       set(NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR "${_candidate}" CACHE PATH

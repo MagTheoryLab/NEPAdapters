@@ -18,6 +18,19 @@ add_test(
 set_tests_properties(nep_adapters_domain_decomp_contract_test PROPERTIES
   LABELS "contract;domain_decomp;lammps")
 
+add_executable(nep_adapters_virial_order_test test_virial_order.cpp)
+target_link_libraries(
+  nep_adapters_virial_order_test
+  PRIVATE
+    NEPAdapters::nep_adapters
+)
+
+add_test(
+  NAME nep_adapters_virial_order_test
+  COMMAND nep_adapters_virial_order_test)
+set_tests_properties(nep_adapters_virial_order_test PROPERTIES
+  LABELS "contract;virial")
+
 if(TARGET NEPAdapters::cpu_nep3 AND
    EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt" AND
    EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz")

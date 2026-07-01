@@ -1,5 +1,6 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cpu_nep3.hpp"
+#include "nep_adapters/virial_order.hpp"
 
 #include "cpu_nep3_test_utils.hpp"
 #include "nep.h"
@@ -173,6 +174,16 @@ double max_abs_diff6(const double lhs[6], const double rhs[6]) {
   return max_diff;
 }
 
+void reference_lammps_virial6(
+    const cpu_nep3_test::Frame& frame,
+    double out[6]) {
+  for (int component = 0; component < 6; ++component) {
+    out[component] = nep_adapters::lammps_voigt6_from_nep_compute_raw9(
+        frame.reference_virial_row_major9,
+        component);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -201,15 +212,29 @@ int main() {
   const double force_diff = max_abs_diff(adapter.forces, oracle.forces);
   const double atom_virial_diff =
       max_abs_diff(adapter.virials_per_atom9, oracle.virials_per_atom9);
+  double reference_virial6[6] = {};
+  reference_lammps_virial6(frame, reference_virial6);
+  const double baseline_energy_diff =
+      std::abs(adapter.total_potential - frame.reference_energy);
+  const double baseline_force_diff =
+      max_abs_diff(adapter.forces, frame.reference_forces_aos3);
+  const double baseline_virial_diff =
+      max_abs_diff6(adapter.total_virial6, reference_virial6);
 
   if (energy_diff > tolerance || virial_diff > tolerance ||
       potential_diff > tolerance || force_diff > tolerance ||
-      atom_virial_diff > tolerance) {
+      atom_virial_diff > tolerance || !frame.has_reference_forces ||
+      !frame.has_reference_virial || baseline_energy_diff > tolerance ||
+      baseline_force_diff > tolerance ||
+      baseline_virial_diff > tolerance) {
     std::cerr << "cpu_nep3 LAMMPS-neighbor parity failed: energy_diff="
               << energy_diff << " virial_diff=" << virial_diff
               << " potential_diff=" << potential_diff
               << " force_diff=" << force_diff
               << " atom_virial_diff=" << atom_virial_diff
+              << " baseline_energy_diff=" << baseline_energy_diff
+              << " baseline_force_diff=" << baseline_force_diff
+              << " baseline_virial_diff=" << baseline_virial_diff
               << " tolerance=" << tolerance << '\n';
     return EXIT_FAILURE;
   }

@@ -2,6 +2,7 @@
 
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cpu_nep3.hpp"
+#include "nep_adapters/virial_order.hpp"
 
 #include "atom.h"
 #include "error.h"
@@ -21,25 +22,6 @@
 using namespace LAMMPS_NS;
 
 namespace {
-
-double lammps_raw_virial_component(const double raw9[9], int component) {
-  // NEP::compute_for_lammps raw9 order is xx, yy, zz, xy, xz, yz, yx, zx, zy.
-  switch (component) {
-    case 0:
-      return raw9[0];
-    case 1:
-      return raw9[1];
-    case 2:
-      return raw9[2];
-    case 3:
-      return 0.5 * (raw9[3] + raw9[6]);
-    case 4:
-      return 0.5 * (raw9[4] + raw9[7]);
-    case 5:
-      return 0.5 * (raw9[5] + raw9[8]);
-  }
-  return 0.0;
-}
 
 std::vector<std::string> read_nep_elements(const std::string& model_path) {
   std::ifstream input(model_path.c_str());
@@ -306,7 +288,8 @@ void PairNEPAdaptersCPU::compute(int eflag, int vflag) {
     for (int i = 0; i < nvirial; ++i) {
       const double* raw9 = virials_per_atom_.data() + 9 * static_cast<std::size_t>(i);
       for (int component = 0; component < 6; ++component) {
-        vatom[i][component] += lammps_raw_virial_component(raw9, component);
+        vatom[i][component] +=
+            nep_adapters::lammps_voigt6_from_lammps_raw9(raw9, component);
       }
     }
   }

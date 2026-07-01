@@ -1,41 +1,11 @@
 import math
 import os
 import sys
-from pathlib import Path
 
 import nep_adapters
 import numpy as np
 
-
-def read_type_map(model_path):
-    header = Path(model_path).read_text(encoding="utf-8").splitlines()[0].split()
-    count = int(header[1])
-    return {symbol: index for index, symbol in enumerate(header[2:2 + count])}
-
-
-def parse_lattice(comment):
-    key = 'Lattice="'
-    begin = comment.index(key) + len(key)
-    end = comment.index('"', begin)
-    return [float(value) for value in comment[begin:end].split()]
-
-
-def read_first_structure(xyz_path, type_map):
-    with open(xyz_path, encoding="utf-8") as handle:
-        atom_count = int(handle.readline())
-        comment = handle.readline()
-        box = parse_lattice(comment)
-        types = []
-        positions = []
-        for _ in range(atom_count):
-            fields = handle.readline().split()
-            types.append(type_map[fields[0]])
-            positions.append(tuple(float(value) for value in fields[1:4]))
-    return (
-        np.asarray(types, dtype=np.int32),
-        np.asarray(positions, dtype=np.float64),
-        np.asarray(box, dtype=np.float64),
-    )
+from baseline_utils import read_labeled_structure, read_type_map
 
 
 def main():
@@ -47,7 +17,11 @@ def main():
     if "cpu_nep3" not in {info.name for info in infos}:
         raise AssertionError("cpu_nep3 backend is not registered")
 
-    types, positions, box = read_first_structure(xyz_path, read_type_map(model_path))
+    structure = read_labeled_structure(xyz_path)
+    type_map = read_type_map(model_path)
+    types = np.asarray([type_map[symbol] for symbol in structure.symbols], dtype=np.int32)
+    positions = structure.positions
+    box = structure.cell.reshape(9)
     atom_counts = np.asarray([len(types)], dtype=np.int32)
     with nep_adapters.load_model("cpu_nep3", model_path) as model:
         info = model.model_info()
@@ -81,6 +55,18 @@ def main():
         raise AssertionError("calculate() and find_force() forces differ")
     if abs(float(np.sum(potentials)) - float(energy)) > 1.0e-10:
         raise AssertionError("per-atom potentials do not sum to structure energy")
+    if abs(float(np.sum(potentials)) - structure.energy) > 1.0e-10:
+        raise AssertionError("calculate() energy differs from fixed baseline label")
+    if not np.allclose(calc_forces, structure.forces, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("calculate() forces differ from fixed baseline labels")
+    if not np.allclose(calc_virials.sum(axis=0), structure.virial, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("calculate() virial differs from fixed baseline label")
+    if abs(float(energy) - structure.energy) > 1.0e-10:
+        raise AssertionError("energy differs from fixed baseline label")
+    if not np.allclose(forces, structure.forces, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("forces differ from fixed baseline labels")
+    if not np.allclose(virial, structure.virial, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("virial differs from fixed baseline label")
 
     print(
         "python cpu_nep3 smoke:",

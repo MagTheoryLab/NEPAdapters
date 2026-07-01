@@ -12,6 +12,14 @@ Current label meanings:
 - `large_model`: tests that use a large model such as `nep89`.
 - `domain_decomp`: backend-neutral local/ghost/foldback semantics for future
   multi-rank LAMMPS paths.
+- `calculator`: Python calculator facade tests.
+- `ase`: optional ASE adapter smoke tests. These skip cleanly when ASE is not
+  installed.
+
+The default `cpu_nep3` tests use `tests/fixtures/cpu_nep3_baseline/`. That
+fixture contains the model, fixed structure, and golden `energy`, `force`, and
+`virial` labels. The labels are repository test data only; they are not part of
+the Python wheel.
 
 For `cpu_nep3`, parity compares the public adapter path against direct calls to
 the underlying NEP CPU class. That keeps the test focused on adapter-owned
@@ -29,3 +37,11 @@ LAMMPS. It compares a full-system reference against two synthetic rank-local
 systems with ghost atoms, then folds ghost force contributions and reduces
 virials. CPU and CUDA external-neighbor runners should reuse this contract shape
 when those backends are added.
+
+`nep_adapters_virial_order_test` fixes the component-order contract between the
+regular NEP `compute` path and the LAMMPS `compute_for_lammps` path.
+
+`tools/run_lammps_mpi_smoke.py` runs the local LAMMPS plugin under
+`mpirun -np 1/2/4` and compares multi-rank output against the 1-rank reference
+for forces, per-atom energy, per-atom stress, total potential energy, and
+pressure components.

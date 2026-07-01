@@ -129,7 +129,7 @@ def auto_scale_sweep(
         )
         throughput = result["atom_steps_per_second"]
         if throughput > best_throughput:
-          best_throughput = throughput
+            best_throughput = throughput
         results.append(result)
         previous = results[-2] if len(results) >= 2 else None
         if (
@@ -162,6 +162,7 @@ def write_report(
     saturated,
     conditions_path,
     commands,
+    lammps_mpi_payload,
 ):
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     passed = sum(1 for test in correctness_tests if test["status"] == "passed")
@@ -260,6 +261,30 @@ def write_report(
             ]
         )
 
+    lines.extend(["", "## LAMMPS MPI Smoke", ""])
+    if lammps_mpi_payload is None:
+        lines.append(
+            "LAMMPS MPI smoke was not run. Pass `--lmp-executable` to include "
+            "`mpirun -np 1/2/4` correctness evidence."
+        )
+    else:
+        lines.extend(
+            [
+                "| Case | MPI ranks | Force diff | Eatom diff | Stress diff | PE diff | Press diff |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for case in lammps_mpi_payload["cases"]:
+            for row in case["comparisons"]:
+                lines.append(
+                    f"| `{case['name']}` | {row['np']} "
+                    f"| {row['max_force_component_diff']:.3e} "
+                    f"| {row['max_eatom_diff']:.3e} "
+                    f"| {row['max_stress_component_diff']:.3e} "
+                    f"| {row['pe_diff']:.3e} "
+                    f"| {row['max_press_component_diff']:.3e} |"
+                )
+
     lines.extend(["", "## Commands", ""])
     for command in commands:
         lines.extend(["```sh", command, "```", ""])
@@ -299,6 +324,9 @@ def main():
         default="/Users/superbing/miniconda3/envs/mysci/bin/python",
     )
     parser.add_argument("--lammps-source-dir", default="")
+    parser.add_argument("--lmp-executable", default="")
+    parser.add_argument("--lammps-plugin", default="")
+    parser.add_argument("--mpirun", default="/opt/homebrew/bin/mpirun")
     parser.add_argument("--jobs", default="2")
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
@@ -320,7 +348,7 @@ def main():
     report_dir.mkdir(parents=True, exist_ok=True)
 
     commands = [
-        f"cmake -S . -B {build_dir} -DBUILD_SHARED_LIBS=ON -DNEP_ADAPTERS_BUILD_TESTS=ON -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON -DNEP_ADAPTERS_ENABLE_PYTHON=ON -DNEP_ADAPTERS_ENABLE_LAMMPS=ON -DPython3_EXECUTABLE={args.python_executable}",
+        f"cmake -S . -B {build_dir} -DBUILD_SHARED_LIBS=ON -DNEP_ADAPTERS_BUILD_TESTS=ON -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON -DNEP_ADAPTERS_ENABLE_PYTHON=ON -DNEP_ADAPTERS_ENABLE_LAMMPS=ON -DPython3_EXECUTABLE={args.python_executable} -DNEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_nep3_baseline'}",
         f"cmake --build {build_dir} -j{args.jobs}",
         f"ctest --test-dir {build_dir} -LE bench --output-on-failure",
         f"ctest --test-dir {build_dir} -L bench --output-on-failure",
@@ -338,6 +366,7 @@ def main():
         "-DNEP_ADAPTERS_ENABLE_PYTHON=ON",
         "-DNEP_ADAPTERS_ENABLE_LAMMPS=ON",
         f"-DPython3_EXECUTABLE={args.python_executable}",
+        f"-DNEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_nep3_baseline'}",
     ]
     configure_args.append("-DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON")
     commands[0] += " -DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON"
@@ -443,6 +472,41 @@ def main():
         fixed_scale = bench_results[-1]["replicate"] if bench_results else "none"
         saturated = False
 
+    lammps_mpi_payload = None
+    if args.lmp_executable:
+        plugin_path = (
+            Path(args.lammps_plugin).resolve()
+            if args.lammps_plugin
+            else build_dir / "frontends" / "lammps" / "nepadaptersplugin.so"
+        )
+        model_env = os.environ.get("NEP_ADAPTERS_NEP89_MODEL_PATH", "")
+        model_path = Path(model_env) if model_env else Path()
+        if not model_env or not model_path.exists():
+            model_path = (repo / "tests/fixtures/cpu_nep3_baseline/nep.txt").resolve()
+        lammps_json = report_dir / "lammps_mpi_smoke.json"
+        lammps_md = report_dir / "lammps_mpi_smoke.md"
+        command = [
+            args.python_executable,
+            str(repo / "tools" / "run_lammps_mpi_smoke.py"),
+            "--lmp",
+            str(Path(args.lmp_executable).resolve()),
+            "--plugin",
+            str(plugin_path),
+            "--model",
+            str(model_path.resolve()),
+            "--mpirun",
+            args.mpirun,
+            "--work-dir",
+            str(build_dir / "lammps_mpi_smoke"),
+            "--json-output",
+            str(lammps_json),
+            "--markdown-output",
+            str(lammps_md),
+        ]
+        commands.append(" ".join(command))
+        run_command(command, cwd=repo)
+        lammps_mpi_payload = json.loads(lammps_json.read_text(encoding="utf-8"))
+
     write_report(
         output,
         build_dir,
@@ -454,6 +518,7 @@ def main():
         saturated,
         conditions_output,
         commands,
+        lammps_mpi_payload,
     )
     write_conditions(conditions_output, bench_results, fixed_scale, saturated, args)
 

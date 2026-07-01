@@ -4,12 +4,37 @@
 
 #include "cpu_nep3_test_utils.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <numeric>
 #include <string>
 #include <vector>
+
+namespace {
+
+double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return INFINITY;
+  }
+  double max_diff = 0.0;
+  for (std::size_t index = 0; index < lhs.size(); ++index) {
+    max_diff = std::max(max_diff, std::abs(lhs[index] - rhs[index]));
+  }
+  return max_diff;
+}
+
+double max_abs_diff9(const double lhs[9], const double rhs[9]) {
+  double max_diff = 0.0;
+  for (int index = 0; index < 9; ++index) {
+    max_diff = std::max(max_diff, std::abs(lhs[index] - rhs[index]));
+  }
+  return max_diff;
+}
+
+}  // namespace
 
 int main() {
   const std::string data_dir = NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR;
@@ -89,6 +114,21 @@ int main() {
     if (!std::isfinite(component)) {
       return EXIT_FAILURE;
     }
+  }
+
+  constexpr double tolerance = 1.0e-10;
+  const double energy_diff = std::abs(energy[0] - frame.reference_energy);
+  const double force_diff = max_abs_diff(forces, frame.reference_forces_aos3);
+  const double virial_diff =
+      max_abs_diff9(virial, frame.reference_virial_row_major9);
+  if (!frame.has_reference_forces || !frame.has_reference_virial ||
+      energy_diff > tolerance || force_diff > tolerance ||
+      virial_diff > tolerance) {
+    std::cerr << "cpu_nep3 baseline failed: energy_diff=" << energy_diff
+              << " force_diff=" << force_diff
+              << " virial_diff=" << virial_diff
+              << " tolerance=" << tolerance << '\n';
+    return EXIT_FAILURE;
   }
 
   return EXIT_SUCCESS;

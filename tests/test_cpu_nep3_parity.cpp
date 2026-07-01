@@ -164,6 +164,36 @@ double max_abs_diff(
   return max_diff;
 }
 
+std::vector<double> repeat_forces(
+    const cpu_nep3_test::Frame& frame,
+    int structure_count) {
+  std::vector<double> values;
+  values.reserve(
+      static_cast<std::size_t>(structure_count) *
+      frame.reference_forces_aos3.size());
+  for (int structure = 0; structure < structure_count; ++structure) {
+    values.insert(
+        values.end(),
+        frame.reference_forces_aos3.begin(),
+        frame.reference_forces_aos3.end());
+  }
+  return values;
+}
+
+std::vector<double> repeat_virials(
+    const cpu_nep3_test::Frame& frame,
+    int structure_count) {
+  std::vector<double> values;
+  values.reserve(static_cast<std::size_t>(structure_count) * 9);
+  for (int structure = 0; structure < structure_count; ++structure) {
+    values.insert(
+        values.end(),
+        frame.reference_virial_row_major9,
+        frame.reference_virial_row_major9 + 9);
+  }
+  return values;
+}
+
 }  // namespace
 
 int main() {
@@ -187,12 +217,37 @@ int main() {
   const double force_diff = max_abs_diff(adapter.forces_aos3, oracle.forces_aos3);
   const double virial_diff =
       max_abs_diff(adapter.virials_row_major9, oracle.virials_row_major9);
+  double baseline_energy_diff = 0.0;
+  double baseline_force_diff = 0.0;
+  double baseline_virial_diff = 0.0;
+  const bool has_baseline_labels =
+      frame.has_reference_forces && frame.has_reference_virial;
+  if (has_baseline_labels) {
+    const std::vector<double> expected_energy(
+        static_cast<std::size_t>(structure_count),
+        frame.reference_energy);
+    const std::vector<double> expected_forces =
+        repeat_forces(frame, structure_count);
+    const std::vector<double> expected_virials =
+        repeat_virials(frame, structure_count);
+    baseline_energy_diff = max_abs_diff(adapter.energy, expected_energy);
+    baseline_force_diff = max_abs_diff(adapter.forces_aos3, expected_forces);
+    baseline_virial_diff =
+        max_abs_diff(adapter.virials_row_major9, expected_virials);
+  }
 
   if (energy_diff > tolerance || force_diff > tolerance ||
-      virial_diff > tolerance) {
+      virial_diff > tolerance ||
+      (has_baseline_labels &&
+       (baseline_energy_diff > tolerance ||
+        baseline_force_diff > tolerance ||
+        baseline_virial_diff > tolerance))) {
     std::cerr << "cpu_nep3 parity failed: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " virial_diff=" << virial_diff
+              << " baseline_energy_diff=" << baseline_energy_diff
+              << " baseline_force_diff=" << baseline_force_diff
+              << " baseline_virial_diff=" << baseline_virial_diff
               << " tolerance=" << tolerance << '\n';
     return EXIT_FAILURE;
   }

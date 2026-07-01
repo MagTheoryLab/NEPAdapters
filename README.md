@@ -45,10 +45,14 @@ The project must not let one frontend or one engine define the whole design:
 - `engines/cuda/`: planned CUDA engine, currently corresponding to the maintained
   NEP_GPU direction.
 - `frontends/python/`: Python package boundary. M2 uses a minimal pybind11
-  frontend over the C ABI and returns NumPy arrays directly.
+  frontend over the C ABI, a NumPy-first calculator facade, and an optional
+  `nep_adapters.ase` adapter.
 - `frontends/lammps/`: LAMMPS pair/plugin boundary. The current CPU pair style is
   `nep/cpu`; CUDA/Kokkos styles are intentionally deferred.
 - `tests/`: contract, parity, and fixture tests.
+  - `tests/fixtures/cpu_nep3_baseline/`: committed CPU baseline model,
+    structure, and golden labels for correctness tests. This is repository test
+    data and is not included in the Python package.
 - `benchmarks/`: throughput and scaling probes for engines/frontends.
 - `docs/design.md`: architecture notes and staged plan.
 
@@ -65,9 +69,9 @@ The useful CPU baseline is:
 4. Build a LAMMPS CPU pair/plugin frontend over the same runtime.
 5. Generate a correctness and OpenMP throughput report for the CPU baseline.
 
-The LAMMPS CPU pair is currently a one-MPI-rank frontend. Multi-rank LAMMPS
-support should be added through an external-neighbor engine path, not by hiding
-LAMMPS-specific arrays inside the generic Python batch API.
+The LAMMPS CPU pair uses `compute_for_lammps` through the external-neighbor
+engine path. Local `mpirun -np 1/2/4` smoke tests compare 1-rank and multi-rank
+energy, force, per-atom energy, `stress/atom`, and `centroid/stress/atom`.
 
 ## Tests And Benchmarks
 
@@ -121,3 +125,7 @@ python -m build --wheel
 The build currently needs a NEP CPU source tree. On this workstation CMake
 auto-detects `../NepTrainKit/src/nep_cpu`; elsewhere pass
 `-Ccmake.define.NEP_ADAPTERS_CPU_NEP3_SOURCE_DIR=/path/to/nep_cpu`.
+
+The default package depends on NumPy, not ASE. The optional ASE interface is
+available as `nep_adapters.ase` and can be requested with the `ase` extra.
+Repository fixtures under `tests/fixtures/` are not packaged into the wheel.
