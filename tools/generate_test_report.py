@@ -162,6 +162,7 @@ def write_report(
     saturated,
     conditions_path,
     commands,
+    lammps_baseline_payload,
     lammps_mpi_payload,
 ):
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -258,6 +259,25 @@ def write_report(
                 f"({'saturation detected' if saturated else 'scan cap reached before saturation'}).",
                 "- no performance pass/fail threshold is applied yet; this report records "
                 "baseline evidence for later CPU/GPU/LAMMPS comparisons.",
+            ]
+        )
+
+    lines.extend(["", "## LAMMPS Baseline Smoke", ""])
+    if lammps_baseline_payload is None:
+        lines.append(
+            "LAMMPS baseline smoke was not run. Pass `--lmp-executable` to "
+            "compare the plugin against the committed golden-label fixture."
+        )
+    else:
+        result = lammps_baseline_payload["result"]
+        lines.extend(
+            [
+                "| Quantity | Diff |",
+                "| --- | ---: |",
+                f"| energy | {result['energy_diff']:.3e} |",
+                f"| per-atom energy sum | {result['eatom_sum_diff']:.3e} |",
+                f"| max force component | {result['max_force_component_diff']:.3e} |",
+                f"| max virial component | {result['max_virial_component_diff']:.3e} |",
             ]
         )
 
@@ -368,6 +388,10 @@ def main():
         f"-DPython3_EXECUTABLE={args.python_executable}",
         f"-DNEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_nep3_baseline'}",
     ]
+    if args.lmp_executable:
+        lmp_path = Path(args.lmp_executable).resolve()
+        configure_args.append(f"-DNEP_ADAPTERS_LAMMPS_EXECUTABLE={lmp_path}")
+        commands[0] += f" -DNEP_ADAPTERS_LAMMPS_EXECUTABLE={lmp_path}"
     configure_args.append("-DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON")
     commands[0] += " -DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON"
 
@@ -472,6 +496,7 @@ def main():
         fixed_scale = bench_results[-1]["replicate"] if bench_results else "none"
         saturated = False
 
+    lammps_baseline_payload = None
     lammps_mpi_payload = None
     if args.lmp_executable:
         plugin_path = (
@@ -483,6 +508,33 @@ def main():
         model_path = Path(model_env) if model_env else Path()
         if not model_env or not model_path.exists():
             model_path = (repo / "tests/fixtures/cpu_nep3_baseline/nep.txt").resolve()
+        fixture_path = (repo / "tests/fixtures/cpu_nep3_baseline/train.xyz").resolve()
+        baseline_json = report_dir / "lammps_baseline_smoke.json"
+        baseline_md = report_dir / "lammps_baseline_smoke.md"
+        baseline_command = [
+            args.python_executable,
+            str(repo / "tools" / "run_lammps_baseline_smoke.py"),
+            "--lmp",
+            str(Path(args.lmp_executable).resolve()),
+            "--plugin",
+            str(plugin_path),
+            "--model",
+            str(model_path.resolve()),
+            "--fixture",
+            str(fixture_path),
+            "--work-dir",
+            str(build_dir / "lammps_baseline_smoke"),
+            "--json-output",
+            str(baseline_json),
+            "--markdown-output",
+            str(baseline_md),
+        ]
+        commands.append(" ".join(baseline_command))
+        run_command(baseline_command, cwd=repo)
+        lammps_baseline_payload = json.loads(
+            baseline_json.read_text(encoding="utf-8")
+        )
+
         lammps_json = report_dir / "lammps_mpi_smoke.json"
         lammps_md = report_dir / "lammps_mpi_smoke.md"
         command = [
@@ -518,6 +570,7 @@ def main():
         saturated,
         conditions_output,
         commands,
+        lammps_baseline_payload,
         lammps_mpi_payload,
     )
     write_conditions(conditions_output, bench_results, fixed_scale, saturated, args)

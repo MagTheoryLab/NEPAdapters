@@ -72,6 +72,8 @@ The useful CPU baseline is:
 The LAMMPS CPU pair uses `compute_for_lammps` through the external-neighbor
 engine path. Local `mpirun -np 1/2/4` smoke tests compare 1-rank and multi-rank
 energy, force, per-atom energy, `stress/atom`, and `centroid/stress/atom`.
+When a local `lmp` executable is provided, the plugin is also tested directly
+against the committed baseline fixture through `pair_style nep/cpu`.
 
 ## Tests And Benchmarks
 

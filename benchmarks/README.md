@@ -66,6 +66,9 @@ python3 tools/generate_test_report.py \
   --lammps-plugin /path/to/nepadaptersplugin.so
 ```
 
+When `--lmp-executable` is provided, the report also runs the real LAMMPS
+baseline smoke against `tests/fixtures/cpu_nep3_baseline/` before the MPI smoke.
+
 For a heavier local scaling sweep, pass explicit supercell factors:
 
 ```sh

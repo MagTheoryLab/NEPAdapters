@@ -1,5 +1,7 @@
 set(NEP_ADAPTERS_LAMMPS_SOURCE_DIR "" CACHE PATH
   "Path to a LAMMPS source tree containing src/pair.h")
+set(NEP_ADAPTERS_LAMMPS_EXECUTABLE "" CACHE FILEPATH
+  "Optional LAMMPS executable used for runtime plugin smoke tests")
 
 if(NOT NEP_ADAPTERS_LAMMPS_SOURCE_DIR)
   foreach(_candidate IN ITEMS
@@ -7,6 +9,18 @@ if(NOT NEP_ADAPTERS_LAMMPS_SOURCE_DIR)
     if(EXISTS "${_candidate}/src/pair.h")
       set(NEP_ADAPTERS_LAMMPS_SOURCE_DIR "${_candidate}" CACHE PATH
         "Path to a LAMMPS source tree containing src/pair.h" FORCE)
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(NOT NEP_ADAPTERS_LAMMPS_EXECUTABLE)
+  foreach(_candidate IN ITEMS
+      "${PROJECT_SOURCE_DIR}/build-local-lammps-mpi/lmp"
+      "${PROJECT_SOURCE_DIR}/../lammps/build/lmp")
+    if(EXISTS "${_candidate}")
+      set(NEP_ADAPTERS_LAMMPS_EXECUTABLE "${_candidate}" CACHE FILEPATH
+        "Optional LAMMPS executable used for runtime plugin smoke tests" FORCE)
       break()
     endif()
   endforeach()
@@ -99,6 +113,8 @@ if(EXISTS "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/lammpsplugin.h")
 endif()
 
 if(NEP_ADAPTERS_BUILD_TESTS)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+
   add_test(
     NAME nep_adapters_lammps_frontend_compile_test
     COMMAND
@@ -119,5 +135,25 @@ if(NEP_ADAPTERS_BUILD_TESTS)
     )
     set_tests_properties(nep_adapters_lammps_plugin_compile_test PROPERTIES
       LABELS "smoke;frontend;lammps;plugin")
+
+    if(Python3_Interpreter_FOUND AND
+       EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
+       EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt" AND
+       EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz")
+      add_test(
+        NAME nep_adapters_lammps_plugin_baseline_test
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/run_lammps_baseline_smoke.py"
+          --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+          --plugin "$<TARGET_FILE:nepadaptersplugin>"
+          --model "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+          --fixture "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
+          --work-dir "${CMAKE_BINARY_DIR}/lammps_baseline_smoke"
+      )
+      set_tests_properties(nep_adapters_lammps_plugin_baseline_test PROPERTIES
+        LABELS "smoke;frontend;lammps;plugin;baseline"
+        DEPENDS "nep_adapters_lammps_plugin_compile_test")
+    endif()
   endif()
 endif()

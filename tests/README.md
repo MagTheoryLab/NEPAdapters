@@ -32,6 +32,12 @@ raw 9-component per-atom virials are passed through the adapter and compared
 against direct `NEP::compute_for_lammps`. Python/batch tests continue to use
 the regular `compute`-backed API.
 
+`nep_adapters_lammps_plugin_baseline_test` is a real LAMMPS runtime test. It is
+registered when `NEP_ADAPTERS_LAMMPS_EXECUTABLE` points to an `lmp` binary. It
+loads `nepadaptersplugin.so`, runs `pair_style nep/cpu` on the committed baseline
+fixture, and compares total energy, per-atom energy sum, forces, and virial from
+`stress/atom` against the golden labels.
+
 `nep_adapters_domain_decomp_contract_test` is pure C++. It does not call CUDA or
 LAMMPS. It compares a full-system reference against two synthetic rank-local
 systems with ghost atoms, then folds ghost force contributions and reduces
