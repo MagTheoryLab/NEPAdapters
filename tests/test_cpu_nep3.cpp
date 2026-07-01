@@ -64,7 +64,10 @@ int main() {
   if (!nep_adapters::has_capability(
           model_info.capabilities, nep_adapters::Capability::batch_find_force) ||
       !nep_adapters::has_capability(
-          model_info.capabilities, nep_adapters::Capability::external_neighbors)) {
+          model_info.capabilities, nep_adapters::Capability::external_neighbors) ||
+      !nep_adapters::has_capability(
+          model_info.capabilities, nep_adapters::Capability::descriptors) ||
+      model_info.descriptor_dim <= 0) {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }
@@ -94,8 +97,15 @@ int main() {
   result.virials_row_major9 = virial;
 
   const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  std::vector<double> descriptors(
+      static_cast<std::size_t>(atom_count) * model_info.descriptor_dim,
+      0.0);
+  NepaFindDescriptorResult descriptor_result{};
+  descriptor_result.descriptors = descriptors.data();
+  const NepaStatus descriptor_status =
+      nepa_find_descriptors(model, &batch, &descriptor_result);
   nepa_free_model(model);
-  if (status != NEPA_STATUS_OK) {
+  if (status != NEPA_STATUS_OK || descriptor_status != NEPA_STATUS_OK) {
     return EXIT_FAILURE;
   }
 
@@ -121,12 +131,20 @@ int main() {
   const double force_diff = max_abs_diff(forces, frame.reference_forces_aos3);
   const double virial_diff =
       max_abs_diff9(virial, frame.reference_virial_row_major9);
+  const cpu_nep3_test::Matrix expected_descriptors =
+      cpu_nep3_test::read_matrix(data_dir + "/descriptor.txt");
+  const double descriptor_diff =
+      max_abs_diff(descriptors, expected_descriptors.values);
   if (!frame.has_reference_forces || !frame.has_reference_virial ||
+      expected_descriptors.rows != static_cast<std::size_t>(atom_count) ||
+      expected_descriptors.cols !=
+          static_cast<std::size_t>(model_info.descriptor_dim) ||
       energy_diff > tolerance || force_diff > tolerance ||
-      virial_diff > tolerance) {
+      virial_diff > tolerance || descriptor_diff > tolerance) {
     std::cerr << "cpu_nep3 baseline failed: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " virial_diff=" << virial_diff
+              << " descriptor_diff=" << descriptor_diff
               << " tolerance=" << tolerance << '\n';
     return EXIT_FAILURE;
   }

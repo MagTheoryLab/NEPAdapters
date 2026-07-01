@@ -28,6 +28,14 @@ class Model {
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) = 0;
 
+  virtual NepaStatus find_descriptors(
+      const NepaStructureBatch& batch,
+      NepaFindDescriptorResult& result) {
+    (void)batch;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
   virtual NepaStatus find_force_lammps_neighbors(
       const NepaLammpsNeighborInput& input,
       NepaLammpsNeighborResult& result) {

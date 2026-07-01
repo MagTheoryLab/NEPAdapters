@@ -19,6 +19,7 @@ struct Prediction {
   std::vector<double> energy;
   std::vector<double> forces_aos3;
   std::vector<double> virials_row_major9;
+  std::vector<double> descriptors;
 };
 
 std::vector<double> positions_to_soa(const cpu_nep3_test::Frame& frame) {
@@ -46,6 +47,9 @@ Prediction run_oracle(
   prediction.virials_row_major9.resize(
       static_cast<std::size_t>(structure_count) * 9,
       0.0);
+  prediction.descriptors.resize(
+      static_cast<std::size_t>(structure_count) * atom_count * nep.annmb.dim,
+      0.0);
 
   const std::vector<double> positions_soa = positions_to_soa(frame);
   std::vector<double> box(frame.box, frame.box + 9);
@@ -54,8 +58,10 @@ Prediction run_oracle(
     std::vector<double> potential(atom_count, 0.0);
     std::vector<double> force_soa(atom_count * 3, 0.0);
     std::vector<double> virial_soa(atom_count * 9, 0.0);
+    std::vector<double> descriptor_soa(atom_count * nep.annmb.dim, 0.0);
 
     nep.compute(frame.types, box, positions_soa, potential, force_soa, virial_soa);
+    nep.find_descriptor(frame.types, box, positions_soa, descriptor_soa);
 
     prediction.energy[structure] =
         std::accumulate(potential.begin(), potential.end(), 0.0);
@@ -68,6 +74,10 @@ Prediction run_oracle(
           force_soa[atom_count + atom];
       prediction.forces_aos3[3 * (atom_offset + atom) + 2] =
           force_soa[2 * atom_count + atom];
+      for (std::size_t component = 0; component < nep.annmb.dim; ++component) {
+        prediction.descriptors[(atom_offset + atom) * nep.annmb.dim + component] =
+            descriptor_soa[component * atom_count + atom];
+      }
     }
 
     for (std::size_t component = 0; component < 9; ++component) {
@@ -90,6 +100,13 @@ Prediction run_adapter(
   NepaModel* model = nullptr;
   if (nepa_load_model("cpu_nep3", model_path.c_str(), &model) != NEPA_STATUS_OK ||
       model == nullptr) {
+    std::exit(EXIT_FAILURE);
+  }
+
+  NepaModelInfo model_info{};
+  if (nepa_model_info(model, &model_info) != NEPA_STATUS_OK ||
+      model_info.descriptor_dim <= 0) {
+    nepa_free_model(model);
     std::exit(EXIT_FAILURE);
   }
 
@@ -135,6 +152,9 @@ Prediction run_adapter(
   prediction.virials_row_major9.resize(
       static_cast<std::size_t>(structure_count) * 9,
       0.0);
+  prediction.descriptors.resize(
+      static_cast<std::size_t>(total_atoms) * model_info.descriptor_dim,
+      0.0);
 
   NepaFindForceResult result{};
   result.energy_per_structure = prediction.energy.data();
@@ -142,8 +162,12 @@ Prediction run_adapter(
   result.virials_row_major9 = prediction.virials_row_major9.data();
 
   const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  NepaFindDescriptorResult descriptor_result{};
+  descriptor_result.descriptors = prediction.descriptors.data();
+  const NepaStatus descriptor_status =
+      nepa_find_descriptors(model, &batch, &descriptor_result);
   nepa_free_model(model);
-  if (status != NEPA_STATUS_OK) {
+  if (status != NEPA_STATUS_OK || descriptor_status != NEPA_STATUS_OK) {
     std::exit(EXIT_FAILURE);
   }
 
@@ -217,6 +241,8 @@ int main() {
   const double force_diff = max_abs_diff(adapter.forces_aos3, oracle.forces_aos3);
   const double virial_diff =
       max_abs_diff(adapter.virials_row_major9, oracle.virials_row_major9);
+  const double descriptor_diff =
+      max_abs_diff(adapter.descriptors, oracle.descriptors);
   double baseline_energy_diff = 0.0;
   double baseline_force_diff = 0.0;
   double baseline_virial_diff = 0.0;
@@ -237,6 +263,7 @@ int main() {
   }
 
   if (energy_diff > tolerance || force_diff > tolerance ||
+      descriptor_diff > tolerance ||
       virial_diff > tolerance ||
       (has_baseline_labels &&
        (baseline_energy_diff > tolerance ||
@@ -245,6 +272,7 @@ int main() {
     std::cerr << "cpu_nep3 parity failed: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " virial_diff=" << virial_diff
+              << " descriptor_diff=" << descriptor_diff
               << " baseline_energy_diff=" << baseline_energy_diff
               << " baseline_force_diff=" << baseline_force_diff
               << " baseline_virial_diff=" << baseline_virial_diff

@@ -67,3 +67,14 @@ def read_labeled_structure(xyz_path):
         forces=np.asarray(forces, dtype=np.float64),
         virial=virial,
     )
+
+
+def read_descriptor_fixture(path):
+    with open(path, encoding="utf-8") as handle:
+        fields = handle.readline().split()
+        if fields[:2] != ["#", "shape"] or len(fields) != 4:
+            raise ValueError("descriptor fixture header must be '# shape <rows> <cols>'")
+        rows = int(fields[2])
+        cols = int(fields[3])
+        values = np.loadtxt(handle, dtype=np.float64)
+    return np.asarray(values, dtype=np.float64).reshape(rows, cols)

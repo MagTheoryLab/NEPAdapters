@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -20,6 +21,12 @@ struct Frame {
   double reference_virial_row_major9[9] = {};
   bool has_reference_forces = false;
   bool has_reference_virial = false;
+};
+
+struct Matrix {
+  std::size_t rows = 0;
+  std::size_t cols = 0;
+  std::vector<double> values;
 };
 
 inline std::unordered_map<std::string, std::int32_t> read_type_map(
@@ -154,6 +161,27 @@ inline Frame read_first_frame(
   frame.has_reference_forces = true;
 
   return frame;
+}
+
+inline Matrix read_matrix(const std::string& path) {
+  std::ifstream input(path);
+  std::string marker;
+  std::string shape;
+  Matrix matrix;
+  input >> marker >> shape >> matrix.rows >> matrix.cols;
+  if (!input || marker != "#" || shape != "shape" ||
+      matrix.rows == 0 || matrix.cols == 0) {
+    std::exit(EXIT_FAILURE);
+  }
+
+  matrix.values.resize(matrix.rows * matrix.cols, 0.0);
+  for (double& value : matrix.values) {
+    input >> value;
+    if (!input) {
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  return matrix;
 }
 
 inline bool all_finite(const std::vector<double>& values) {

@@ -53,7 +53,8 @@ install(
 
 if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu_nep3
    AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
-   AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz")
+   AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
+   AND EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/descriptor.txt")
   add_test(
     NAME nep_adapters_python_cpu_nep3_smoke_test
     COMMAND

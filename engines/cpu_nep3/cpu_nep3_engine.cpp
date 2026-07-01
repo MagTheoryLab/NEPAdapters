@@ -27,8 +27,10 @@ class CpuNep3Model : public nep_adapters::Model {
     out.capabilities =
         nep_adapters::to_mask(nep_adapters::Capability::batch_find_force) |
         nep_adapters::to_mask(nep_adapters::Capability::external_neighbors) |
-        nep_adapters::to_mask(nep_adapters::Capability::virial);
+        nep_adapters::to_mask(nep_adapters::Capability::virial) |
+        nep_adapters::to_mask(nep_adapters::Capability::descriptors);
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
+    out.descriptor_dim = static_cast<std::int32_t>(nep_.annmb.dim);
     return NEPA_STATUS_OK;
   }
 
@@ -116,6 +118,70 @@ class CpuNep3Model : public nep_adapters::Model {
     }
   }
 
+  NepaStatus find_descriptors(
+      const NepaStructureBatch& batch,
+      NepaFindDescriptorResult& result) override {
+    if (!valid_batch(batch) || result.descriptors == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+
+    const std::int32_t descriptor_dim =
+        static_cast<std::int32_t>(nep_.annmb.dim);
+    if (descriptor_dim <= 0) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+
+    try {
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        const std::int32_t atom_count = batch.atom_counts[structure];
+        const std::int32_t atom_offset = batch.atom_offsets[structure];
+        if (atom_count <= 0 || atom_offset < 0 ||
+            atom_offset + atom_count > batch.total_atoms) {
+          return NEPA_STATUS_INVALID_ARGUMENT;
+        }
+
+        std::vector<int> types(static_cast<std::size_t>(atom_count));
+        std::vector<double> positions_soa(static_cast<std::size_t>(atom_count) * 3);
+        std::vector<double> box(9);
+        std::vector<double> descriptor_soa(
+            static_cast<std::size_t>(atom_count) * descriptor_dim,
+            0.0);
+
+        for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+          const std::int32_t global_atom = atom_offset + atom;
+          types[atom] = batch.types[global_atom];
+          positions_soa[atom] =
+              batch.positions_aos3[3 * global_atom + 0];
+          positions_soa[static_cast<std::size_t>(atom_count) + atom] =
+              batch.positions_aos3[3 * global_atom + 1];
+          positions_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+              batch.positions_aos3[3 * global_atom + 2];
+        }
+
+        std::copy_n(
+            batch.boxes_row_major9 + static_cast<std::size_t>(structure) * 9,
+            9,
+            box.data());
+
+        nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+
+        for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+          const std::int32_t global_atom = atom_offset + atom;
+          for (std::int32_t component = 0; component < descriptor_dim; ++component) {
+            result.descriptors[
+                static_cast<std::size_t>(global_atom) * descriptor_dim + component] =
+                descriptor_soa[
+                    static_cast<std::size_t>(component) * atom_count + atom];
+          }
+        }
+      }
+
+      return NEPA_STATUS_OK;
+    } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+
   NepaStatus find_force_lammps_neighbors(
       const NepaLammpsNeighborInput& input,
       NepaLammpsNeighborResult& result) override {
@@ -172,7 +238,8 @@ class CpuNep3Engine : public nep_adapters::Engine {
         "external",
         nep_adapters::to_mask(nep_adapters::Capability::batch_find_force) |
             nep_adapters::to_mask(nep_adapters::Capability::external_neighbors) |
-            nep_adapters::to_mask(nep_adapters::Capability::virial)};
+            nep_adapters::to_mask(nep_adapters::Capability::virial) |
+            nep_adapters::to_mask(nep_adapters::Capability::descriptors)};
   }
 
   NepaStatus load_model(

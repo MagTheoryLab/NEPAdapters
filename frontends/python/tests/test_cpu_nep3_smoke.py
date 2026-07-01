@@ -5,7 +5,7 @@ import sys
 import nep_adapters
 import numpy as np
 
-from baseline_utils import read_labeled_structure, read_type_map
+from baseline_utils import read_descriptor_fixture, read_labeled_structure, read_type_map
 
 
 def main():
@@ -18,6 +18,9 @@ def main():
         raise AssertionError("cpu_nep3 backend is not registered")
 
     structure = read_labeled_structure(xyz_path)
+    expected_descriptors = read_descriptor_fixture(
+        os.path.join(os.path.dirname(xyz_path), "descriptor.txt")
+    )
     type_map = read_type_map(model_path)
     types = np.asarray([type_map[symbol] for symbol in structure.symbols], dtype=np.int32)
     positions = structure.positions
@@ -25,7 +28,7 @@ def main():
     atom_counts = np.asarray([len(types)], dtype=np.int32)
     with nep_adapters.load_model("cpu_nep3", model_path) as model:
         info = model.model_info()
-        if info["cutoff_max"] <= 0.0 or info["num_types"] <= 0:
+        if info["cutoff_max"] <= 0.0 or info["num_types"] <= 0 or info["descriptor_dim"] <= 0:
             raise AssertionError("invalid model metadata")
         potentials, calc_forces, calc_virials = model.calculate(
             types,
@@ -33,6 +36,7 @@ def main():
             positions,
             atom_counts,
         )
+        descriptors = model.descriptors(types, box, positions, atom_counts)
         energy, forces, virial = model.find_force(types, positions, box)
         energy_again, forces_again, _ = model.find_force(types, positions, box)
 
@@ -51,6 +55,12 @@ def main():
         raise AssertionError("force array shape mismatch")
     if calc_virials.shape != (len(types), 9):
         raise AssertionError("virial array shape mismatch")
+    if descriptors.shape != expected_descriptors.shape:
+        raise AssertionError("descriptor array shape mismatch")
+    if descriptors.shape[1] != info["descriptor_dim"]:
+        raise AssertionError("descriptor_dim metadata mismatch")
+    if not np.allclose(descriptors, expected_descriptors, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("descriptors differ from fixed baseline labels")
     if not np.allclose(calc_forces, forces, rtol=0.0, atol=1.0e-10):
         raise AssertionError("calculate() and find_force() forces differ")
     if abs(float(np.sum(potentials)) - float(energy)) > 1.0e-10:

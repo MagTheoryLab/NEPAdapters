@@ -28,6 +28,114 @@ struct BackendInfo {
   std::uint64_t capabilities = 0;
 };
 
+struct PreparedBatch {
+  std::int32_t structure_count = 0;
+  std::int32_t total_atoms = 0;
+  std::vector<std::int32_t> offsets;
+  std::vector<double> boxes_for_batch;
+  std::vector<std::int32_t> default_pbc;
+  py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> pbc_array;
+  const std::int32_t* atom_counts = nullptr;
+  const std::int32_t* types = nullptr;
+  const double* positions = nullptr;
+  const double* boxes = nullptr;
+  const std::int32_t* pbc = nullptr;
+};
+
+PreparedBatch prepare_batch(
+    py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>& types,
+    py::array_t<double, py::array::c_style | py::array::forcecast>& boxes,
+    py::array_t<double, py::array::c_style | py::array::forcecast>& positions,
+    py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>& atom_counts,
+    py::object pbc_object) {
+  py::buffer_info type_info = types.request();
+  py::buffer_info box_info = boxes.request();
+  py::buffer_info position_info = positions.request();
+  py::buffer_info atom_count_info = atom_counts.request();
+
+  if (type_info.ndim != 1) {
+    throw std::invalid_argument("types must be a 1D int32 array");
+  }
+  if (position_info.ndim != 2 || position_info.shape[1] != 3) {
+    throw std::invalid_argument("positions must have shape (natoms, 3)");
+  }
+  if (atom_count_info.ndim != 1) {
+    throw std::invalid_argument("atom_counts must be a 1D int32 array");
+  }
+  if (position_info.shape[0] != type_info.shape[0]) {
+    throw std::invalid_argument("types and positions atom counts differ");
+  }
+
+  PreparedBatch prepared;
+  prepared.structure_count = static_cast<std::int32_t>(atom_count_info.shape[0]);
+  prepared.total_atoms = static_cast<std::int32_t>(type_info.shape[0]);
+  if (prepared.structure_count <= 0 || prepared.total_atoms <= 0) {
+    throw std::invalid_argument("empty batches are not supported");
+  }
+
+  prepared.atom_counts = static_cast<const std::int32_t*>(atom_count_info.ptr);
+  prepared.offsets.resize(static_cast<std::size_t>(prepared.structure_count), 0);
+  std::int32_t cursor = 0;
+  for (std::int32_t i = 0; i < prepared.structure_count; ++i) {
+    if (prepared.atom_counts[i] <= 0) {
+      throw std::invalid_argument("atom_counts must be positive");
+    }
+    prepared.offsets[static_cast<std::size_t>(i)] = cursor;
+    cursor += prepared.atom_counts[i];
+  }
+  if (cursor != prepared.total_atoms) {
+    throw std::invalid_argument("sum(atom_counts) must equal len(types)");
+  }
+
+  if (!((box_info.ndim == 1 && box_info.size == 9) ||
+        (box_info.ndim == 2 && box_info.shape[0] == prepared.structure_count &&
+         box_info.shape[1] == 9))) {
+    throw std::invalid_argument("boxes must have shape (9,) or (nstructures, 9)");
+  }
+
+  prepared.types = static_cast<const std::int32_t*>(type_info.ptr);
+  prepared.positions = static_cast<const double*>(position_info.ptr);
+  prepared.boxes = static_cast<const double*>(box_info.ptr);
+  if (box_info.ndim == 1 && prepared.structure_count > 1) {
+    prepared.boxes_for_batch.resize(
+        static_cast<std::size_t>(prepared.structure_count) * 9);
+    for (std::int32_t i = 0; i < prepared.structure_count; ++i) {
+      std::copy(
+          prepared.boxes,
+          prepared.boxes + 9,
+          prepared.boxes_for_batch.data() + 9 * i);
+    }
+    prepared.boxes = prepared.boxes_for_batch.data();
+  }
+
+  prepared.default_pbc.assign(
+      static_cast<std::size_t>(prepared.structure_count) * 3,
+      1);
+  prepared.pbc = prepared.default_pbc.data();
+  if (!pbc_object.is_none()) {
+    prepared.pbc_array = py::cast<
+        py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
+        pbc_object);
+    py::buffer_info pbc_info = prepared.pbc_array.request();
+    if (!((pbc_info.ndim == 1 && pbc_info.size == 3) ||
+          (pbc_info.ndim == 2 && pbc_info.shape[0] == prepared.structure_count &&
+           pbc_info.shape[1] == 3))) {
+      throw std::invalid_argument("pbc must have shape (3,) or (nstructures, 3)");
+    }
+    if (pbc_info.ndim == 1 && prepared.structure_count > 1) {
+      const auto* one_pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
+      for (std::int32_t i = 0; i < prepared.structure_count; ++i) {
+        std::copy(one_pbc, one_pbc + 3, prepared.default_pbc.data() + 3 * i);
+      }
+      prepared.pbc = prepared.default_pbc.data();
+    } else {
+      prepared.pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
+    }
+  }
+
+  return prepared;
+}
+
 class PyModel {
  public:
   explicit PyModel(NepaModel* model) : model_(model, nepa_free_model) {}
@@ -45,6 +153,7 @@ class PyModel {
     out["cutoff_max"] = info.cutoff_max;
     out["capabilities"] = info.capabilities;
     out["num_types"] = info.num_types;
+    out["descriptor_dim"] = info.descriptor_dim;
     return out;
   }
 
@@ -58,102 +167,26 @@ class PyModel {
       throw std::runtime_error("model is closed");
     }
 
-    py::buffer_info type_info = types.request();
-    py::buffer_info box_info = boxes.request();
-    py::buffer_info position_info = positions.request();
-    py::buffer_info atom_count_info = atom_counts.request();
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
 
-    if (type_info.ndim != 1) {
-      throw std::invalid_argument("types must be a 1D int32 array");
-    }
-    if (position_info.ndim != 2 || position_info.shape[1] != 3) {
-      throw std::invalid_argument("positions must have shape (natoms, 3)");
-    }
-    if (atom_count_info.ndim != 1) {
-      throw std::invalid_argument("atom_counts must be a 1D int32 array");
-    }
-    if (position_info.shape[0] != type_info.shape[0]) {
-      throw std::invalid_argument("types and positions atom counts differ");
-    }
-
-    const auto structure_count = static_cast<std::int32_t>(atom_count_info.shape[0]);
-    const auto total_atoms = static_cast<std::int32_t>(type_info.shape[0]);
-    if (structure_count <= 0 || total_atoms <= 0) {
-      throw std::invalid_argument("empty batches are not supported");
-    }
-
-    const std::int32_t* atom_count_ptr =
-        static_cast<const std::int32_t*>(atom_count_info.ptr);
-    std::vector<std::int32_t> offsets(static_cast<std::size_t>(structure_count), 0);
-    std::int32_t cursor = 0;
-    for (std::int32_t i = 0; i < structure_count; ++i) {
-      if (atom_count_ptr[i] <= 0) {
-        throw std::invalid_argument("atom_counts must be positive");
-      }
-      offsets[static_cast<std::size_t>(i)] = cursor;
-      cursor += atom_count_ptr[i];
-    }
-    if (cursor != total_atoms) {
-      throw std::invalid_argument("sum(atom_counts) must equal len(types)");
-    }
-
-    if (!((box_info.ndim == 1 && box_info.size == 9) ||
-          (box_info.ndim == 2 && box_info.shape[0] == structure_count &&
-           box_info.shape[1] == 9))) {
-      throw std::invalid_argument("boxes must have shape (9,) or (nstructures, 9)");
-    }
-
-    std::vector<double> boxes_for_batch;
-    const double* boxes_ptr = static_cast<const double*>(box_info.ptr);
-    if (box_info.ndim == 1 && structure_count > 1) {
-      boxes_for_batch.resize(static_cast<std::size_t>(structure_count) * 9);
-      for (std::int32_t i = 0; i < structure_count; ++i) {
-        std::copy(boxes_ptr, boxes_ptr + 9, boxes_for_batch.data() + 9 * i);
-      }
-      boxes_ptr = boxes_for_batch.data();
-    }
-
-    std::vector<std::int32_t> default_pbc(static_cast<std::size_t>(structure_count) * 3, 1);
-    const std::int32_t* pbc_ptr = default_pbc.data();
-    py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> pbc_array;
-    if (!pbc_object.is_none()) {
-      pbc_array = py::cast<
-          py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
-          pbc_object);
-      py::buffer_info pbc_info = pbc_array.request();
-      if (!((pbc_info.ndim == 1 && pbc_info.size == 3) ||
-            (pbc_info.ndim == 2 && pbc_info.shape[0] == structure_count &&
-             pbc_info.shape[1] == 3))) {
-        throw std::invalid_argument("pbc must have shape (3,) or (nstructures, 3)");
-      }
-      if (pbc_info.ndim == 1 && structure_count > 1) {
-        default_pbc.clear();
-        default_pbc.resize(static_cast<std::size_t>(structure_count) * 3);
-        const auto* one_pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
-        for (std::int32_t i = 0; i < structure_count; ++i) {
-          std::copy(one_pbc, one_pbc + 3, default_pbc.data() + 3 * i);
-        }
-        pbc_ptr = default_pbc.data();
-      } else {
-        pbc_ptr = static_cast<const std::int32_t*>(pbc_info.ptr);
-      }
-    }
-
-    py::array_t<double> potentials(static_cast<py::ssize_t>(total_atoms));
-    py::array_t<double> forces({total_atoms, static_cast<std::int32_t>(3)});
-    py::array_t<double> virials({total_atoms, static_cast<std::int32_t>(9)});
-    std::vector<double> energies(static_cast<std::size_t>(structure_count), 0.0);
-    std::vector<double> structure_virials(static_cast<std::size_t>(structure_count) * 9, 0.0);
+    py::array_t<double> potentials(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
+    std::vector<double> energies(static_cast<std::size_t>(input.structure_count), 0.0);
+    std::vector<double> structure_virials(
+        static_cast<std::size_t>(input.structure_count) * 9,
+        0.0);
 
     NepaStructureBatch batch{};
-    batch.num_structures = structure_count;
-    batch.total_atoms = total_atoms;
-    batch.atom_counts = atom_count_ptr;
-    batch.atom_offsets = offsets.data();
-    batch.types = static_cast<const std::int32_t*>(type_info.ptr);
-    batch.positions_aos3 = static_cast<const double*>(position_info.ptr);
-    batch.boxes_row_major9 = boxes_ptr;
-    batch.pbc_flags3 = pbc_ptr;
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
 
     NepaFindForceResult result{};
     result.energy_per_structure = energies.data();
@@ -167,6 +200,52 @@ class PyModel {
       check_status(nepa_find_force_batch(model_.get(), &batch, &result));
     }
     return py::make_tuple(potentials, forces, virials);
+  }
+
+  py::array_t<double> descriptors(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    if (!model_) {
+      throw std::runtime_error("model is closed");
+    }
+
+    NepaModelInfo info{};
+    check_status(nepa_model_info(model_.get(), &info));
+    if ((info.capabilities & NEPA_CAPABILITY_DESCRIPTORS) == 0u ||
+        info.descriptor_dim <= 0) {
+      throw std::runtime_error("descriptors are unsupported by this model");
+    }
+
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+
+    py::array_t<double> descriptors({
+        input.total_atoms,
+        info.descriptor_dim,
+    });
+
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+
+    NepaFindDescriptorResult result{};
+    result.descriptors = static_cast<double*>(descriptors.request().ptr);
+
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_descriptors(model_.get(), &batch, &result));
+    }
+
+    return descriptors;
   }
 
   py::tuple find_force(
@@ -272,6 +351,14 @@ PYBIND11_MODULE(_native, module) {
           py::arg("types"),
           py::arg("positions"),
           py::arg("box"),
+          py::arg("pbc") = py::none())
+      .def(
+          "descriptors",
+          &PyModel::descriptors,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
           py::arg("pbc") = py::none())
       .def("close", &PyModel::close)
       .def(

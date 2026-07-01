@@ -18,13 +18,13 @@ Current label meanings:
 
 The default `cpu_nep3` tests use `tests/fixtures/cpu_nep3_baseline/`. That
 fixture contains the model, fixed structure, and golden `energy`, `force`, and
-`virial` labels. The labels are repository test data only; they are not part of
-the Python wheel.
+`virial` labels plus a per-atom `descriptor.txt` matrix. The labels are
+repository test data only; they are not part of the Python wheel.
 
 For `cpu_nep3`, parity compares the public adapter path against direct calls to
 the underlying NEP CPU class. That keeps the test focused on adapter-owned
 boundaries: type mapping, AoS/SoA conversion, batch offsets, energy reduction,
-and virial reduction.
+virial reduction, and descriptor layout conversion.
 
 `nep_adapters_cpu_nep3_lammps_neighbors_test` covers the LAMMPS-shaped path:
 `ilist`, `numneigh`, `firstneigh`, `type_map`, `double** x`, `double** f`, and

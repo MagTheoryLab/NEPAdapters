@@ -132,6 +132,15 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  double descriptor[] = {0.0};
+  NepaFindDescriptorResult descriptor_result{};
+  descriptor_result.descriptors = descriptor;
+  if (nepa_find_descriptors(model, &batch, &descriptor_result) !=
+      NEPA_STATUS_UNSUPPORTED) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+
   int ilist[] = {0};
   int numneigh[] = {0};
   int* firstneigh[] = {nullptr};

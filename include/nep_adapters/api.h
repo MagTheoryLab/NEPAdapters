@@ -53,6 +53,7 @@ typedef struct NepaModelInfo {
   double cutoff_max;
   uint64_t capabilities;
   int32_t num_types;
+  int32_t descriptor_dim;
 } NepaModelInfo;
 
 typedef struct NepaStructureBatch {
@@ -75,6 +76,11 @@ typedef struct NepaFindForceResult {
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_per_atom_row_major9;
 } NepaFindForceResult;
+
+typedef struct NepaFindDescriptorResult {
+  /* Row-major per-atom descriptors with shape (total_atoms, descriptor_dim). */
+  double* descriptors;
+} NepaFindDescriptorResult;
 
 typedef struct NepaLammpsNeighborInput {
   int nlocal;
@@ -112,6 +118,10 @@ NEP_ADAPTERS_API NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindForceResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_descriptors(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaFindDescriptorResult* result);
 NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_neighbors(
     NepaModel* model,
     const NepaLammpsNeighborInput* input,

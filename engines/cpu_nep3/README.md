@@ -16,8 +16,7 @@ Optimizations belong in `engines/cpu_opt/`, not here.
 
 Current M0 scope:
 
-- supported: model load, batch energy, force, and summed virial for ordinary
-  potential models;
+- supported: model load, batch energy, force, summed virial, per-atom virial,
+  descriptors, and the LAMMPS neighbor-list path for ordinary potential models;
 - tested: bundled small NEP fixture and bundled `nep89.txt` large model smoke;
-- not yet exposed: descriptors, spin, charge, external neighbor lists, and
-  Python bindings.
+- not yet exposed: spin and charge.

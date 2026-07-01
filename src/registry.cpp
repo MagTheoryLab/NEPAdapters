@@ -148,6 +148,21 @@ NepaStatus nepa_find_force_batch(
   }
 }
 
+NepaStatus nepa_find_descriptors(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaFindDescriptorResult* result) {
+  if (model == nullptr || batch == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+
+  try {
+    return model->impl->find_descriptors(*batch, *result);
+  } catch (const std::exception&) {
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
 NepaStatus nepa_find_force_lammps_neighbors(
     NepaModel* model,
     const NepaLammpsNeighborInput* input,

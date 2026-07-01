@@ -33,7 +33,8 @@ set_tests_properties(nep_adapters_virial_order_test PROPERTIES
 
 if(TARGET NEPAdapters::cpu_nep3 AND
    EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt" AND
-   EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz")
+   EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz" AND
+   EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/descriptor.txt")
   add_executable(nep_adapters_cpu_nep3_smoke_test test_cpu_nep3.cpp)
   target_link_libraries(
     nep_adapters_cpu_nep3_smoke_test

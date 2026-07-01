@@ -92,6 +92,7 @@ class NEPCalculator:
         self.type_dict = _read_type_map(self.model_path)
         self.element_list = list(self.type_dict)
         self.model: Model = load_model(backend, str(self.model_path))
+        self.descriptor_dim = int(self.model.model_info().get("descriptor_dim", 0))
         self.initialized = True
 
     def close(self) -> None:
@@ -179,6 +180,44 @@ class NEPCalculator:
         atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
         return self.predict_arrays(types, positions, boxes, atom_counts, pbc)
 
+    def predict_descriptors_arrays(
+        self,
+        types,
+        positions,
+        boxes,
+        atom_counts=None,
+        pbc=None,
+    ) -> np.ndarray:
+        types_array = np.ascontiguousarray(types, dtype=np.int32)
+        positions_array = np.ascontiguousarray(positions, dtype=np.float64)
+        if atom_counts is None:
+            atom_counts_array = np.asarray([len(types_array)], dtype=np.int32)
+        else:
+            atom_counts_array = np.ascontiguousarray(atom_counts, dtype=np.int32)
+        if len(atom_counts_array) == 0:
+            return np.empty((0, self.descriptor_dim), dtype=np.float64)
+        boxes_array = np.ascontiguousarray(boxes, dtype=np.float64)
+        if boxes_array.ndim == 1 and len(atom_counts_array) > 1:
+            boxes_array = np.tile(boxes_array.reshape(1, 9), (len(atom_counts_array), 1))
+        return np.asarray(
+            self.model.descriptors(
+                types_array,
+                boxes_array,
+                positions_array,
+                atom_counts_array,
+                pbc,
+            ),
+            dtype=np.float64,
+        )
+
+    def predict_descriptors(self, structures) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, self.descriptor_dim), dtype=np.float64)
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
+        return self.predict_descriptors_arrays(types, positions, boxes, atom_counts, pbc)
+
     def calculate(self, structures, mean_virial: bool = True):
         prediction = self.predict_structures(structures)
         return (
@@ -187,11 +226,23 @@ class NEPCalculator:
             prediction.virial_blocks(mean=mean_virial),
         )
 
-    def get_descriptor(self, _structure) -> np.ndarray:
-        return np.asarray([], dtype=np.float32)
+    def get_descriptor(self, structure) -> np.ndarray:
+        return self.get_structures_descriptor([structure], mean_descriptor=False)
 
-    def get_structures_descriptor(self, _structures, mean_descriptor: bool = True) -> np.ndarray:
-        return np.asarray([], dtype=np.float32)
+    def get_structures_descriptor(self, structures, mean_descriptor: bool = True) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, self.descriptor_dim), dtype=np.float32)
+        descriptors = self.predict_descriptors(structure_list).astype(np.float32, copy=False)
+        if not mean_descriptor:
+            return descriptors
+
+        atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
+        offsets = np.r_[0, np.cumsum(atom_counts)]
+        return np.asarray(
+            [descriptors[offsets[i] : offsets[i + 1]].mean(axis=0) for i in range(len(atom_counts))],
+            dtype=np.float32,
+        )
 
 
 NepCalculator = NEPCalculator

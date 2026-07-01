@@ -7,6 +7,8 @@ This fixture is committed test data, not Python package data.
   and `virial` fields are golden labels generated from the current trusted
   `cpu_nep3` adapter path. Future CPU/CUDA/Python/LAMMPS tests compare
   against these values instead of only comparing two live code paths.
+- `descriptor.txt` contains the per-atom descriptor matrix for the same
+  structure, stored as row-major `(natoms, descriptor_dim)` test data.
 
 Regenerate this fixture only when the baseline physics contract is intentionally
 changed and the new values have been reviewed.

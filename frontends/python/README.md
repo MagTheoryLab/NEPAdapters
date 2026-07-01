@@ -14,8 +14,9 @@ calculator shape and returns three NumPy arrays directly:
 - forces, shape `(natoms, 3)`;
 - per-atom virial, shape `(natoms, 9)`.
 
-`Model.model_info()` returns cutoff and capability metadata without running a
-calculation.
+`Model.descriptors()` returns per-atom descriptors directly as a NumPy array
+with shape `(natoms, descriptor_dim)`. `Model.model_info()` returns cutoff,
+capability, and `descriptor_dim` metadata without running a calculation.
 
 The higher-level `NEPCalculator` facade is also NumPy-first and does not require
 ASE. It accepts duck-typed structures with `get_chemical_symbols()` or `symbols`,
@@ -32,6 +33,11 @@ dataclass:
 `NEPCalculator.calculate(structures)` returns `(energy, force_blocks,
 virial_blocks)` for NepTrainKit-style callers. Empty batches return empty arrays
 and empty block lists.
+
+`NEPCalculator.get_descriptor(structure)` returns per-atom descriptors for one
+structure. `get_structures_descriptor(structures, mean_descriptor=True)` mirrors
+NepTrainKit's descriptor helper: with `mean_descriptor=True` it returns one mean
+descriptor per structure, otherwise it returns the concatenated per-atom matrix.
 
 ASE support is optional and lives in `nep_adapters.ase`. Importing
 `nep_adapters` does not import ASE. Users who want an ASE calculator can install
