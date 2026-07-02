@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -213,6 +214,96 @@ double distance_squared(const std::vector<double>& positions, int i, const Vec3&
   return dx * dx + dy * dy + dz * dz;
 }
 
+struct CartesianCellList {
+  double cutoff = 1.0;
+  Vec3 origin;
+  int nx = 1;
+  int ny = 1;
+  int nz = 1;
+  const std::vector<double>* positions = nullptr;
+  std::vector<std::vector<int>> cells;
+
+  std::size_t cell_index(int ix, int iy, int iz) const {
+    return (static_cast<std::size_t>(ix) * ny + iy) * nz + iz;
+  }
+
+  int coord(double value, double min_value, int count) const {
+    const int index = static_cast<int>(std::floor((value - min_value) / cutoff));
+    return index < 0 ? index : std::min(index, count - 1);
+  }
+
+  void build(const std::vector<double>& source_positions, int count, double cutoff_in) {
+    positions = &source_positions;
+    cutoff = cutoff_in;
+    Vec3 lo = {
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+    };
+    Vec3 hi = {
+        -std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(),
+        -std::numeric_limits<double>::max(),
+    };
+    for (int atom = 0; atom < count; ++atom) {
+      const double x = source_positions[3 * static_cast<std::size_t>(atom) + 0];
+      const double y = source_positions[3 * static_cast<std::size_t>(atom) + 1];
+      const double z = source_positions[3 * static_cast<std::size_t>(atom) + 2];
+      lo.x = std::min(lo.x, x);
+      lo.y = std::min(lo.y, y);
+      lo.z = std::min(lo.z, z);
+      hi.x = std::max(hi.x, x);
+      hi.y = std::max(hi.y, y);
+      hi.z = std::max(hi.z, z);
+    }
+
+    origin = {lo.x - cutoff, lo.y - cutoff, lo.z - cutoff};
+    nx = std::max(1, static_cast<int>(std::floor((hi.x - origin.x + cutoff) / cutoff)) + 1);
+    ny = std::max(1, static_cast<int>(std::floor((hi.y - origin.y + cutoff) / cutoff)) + 1);
+    nz = std::max(1, static_cast<int>(std::floor((hi.z - origin.z + cutoff) / cutoff)) + 1);
+    cells.assign(static_cast<std::size_t>(nx) * ny * nz, {});
+    for (int atom = 0; atom < count; ++atom) {
+      const int ix = coord(source_positions[3 * static_cast<std::size_t>(atom) + 0], origin.x, nx);
+      const int iy = coord(source_positions[3 * static_cast<std::size_t>(atom) + 1], origin.y, ny);
+      const int iz = coord(source_positions[3 * static_cast<std::size_t>(atom) + 2], origin.z, nz);
+      cells[cell_index(ix, iy, iz)].push_back(atom);
+    }
+  }
+
+  template <class Callback>
+  void for_nearby_cells(const Vec3& position, Callback&& callback) const {
+    const int cx = coord(position.x, origin.x, nx);
+    const int cy = coord(position.y, origin.y, ny);
+    const int cz = coord(position.z, origin.z, nz);
+    const int ix0 = std::max(0, cx - 1);
+    const int iy0 = std::max(0, cy - 1);
+    const int iz0 = std::max(0, cz - 1);
+    const int ix1 = std::min(nx - 1, cx + 1);
+    const int iy1 = std::min(ny - 1, cy + 1);
+    const int iz1 = std::min(nz - 1, cz + 1);
+    if (ix0 > ix1 || iy0 > iy1 || iz0 > iz1) {
+      return;
+    }
+    for (int ix = ix0; ix <= ix1; ++ix) {
+      for (int iy = iy0; iy <= iy1; ++iy) {
+        for (int iz = iz0; iz <= iz1; ++iz) {
+          for (int atom : cells[cell_index(ix, iy, iz)]) {
+            callback(atom);
+          }
+        }
+      }
+    }
+  }
+
+  bool has_atom_within(const Vec3& position, double cutoff_sq) const {
+    bool found = false;
+    for_nearby_cells(position, [&](int atom) {
+      found = found || distance_squared(*positions, atom, position) < cutoff_sq;
+    });
+    return found;
+  }
+};
+
 Vec3 fractional_position(const double* box, const Vec3& position) {
   const double a00 = box[0];
   const double a01 = box[1];
@@ -287,6 +378,7 @@ LammpsInputStorage make_lammps_input(
   input.types.reserve(frame.types.size() * 27);
 
   std::vector<int> local_atoms;
+  std::vector<char> is_local_atom(static_cast<std::size_t>(system_atoms), 0);
   local_atoms.reserve(frame.types.size());
   for (int atom = 0; atom < system_atoms; ++atom) {
     const Vec3 position = {
@@ -295,6 +387,7 @@ LammpsInputStorage make_lammps_input(
         frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2],
     };
     if (belongs_to_rank(frame.box, position, rank_grid, coords)) {
+      is_local_atom[static_cast<std::size_t>(atom)] = 1;
       local_atoms.push_back(atom);
       input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
       input.positions.push_back(position.x);
@@ -311,6 +404,8 @@ LammpsInputStorage make_lammps_input(
   input.ilist.resize(static_cast<std::size_t>(input.nlocal));
 
   const double cutoff_sq = cutoff * cutoff;
+  CartesianCellList local_cells;
+  local_cells.build(input.positions, input.nlocal, cutoff);
   const Vec3 a = box_vector(frame.box, 0);
   const Vec3 b = box_vector(frame.box, 1);
   const Vec3 c = box_vector(frame.box, 2);
@@ -331,11 +426,7 @@ LammpsInputStorage make_lammps_input(
               frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1] + shift.y,
               frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2] + shift.z,
           };
-          bool used = false;
-          for (int local = 0; local < input.nlocal && !used; ++local) {
-            used = distance_squared(input.positions, local, ghost_position) < cutoff_sq;
-          }
-          if (!used) {
+          if (!local_cells.has_atom_within(ghost_position, cutoff_sq)) {
             continue;
           }
           input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
@@ -348,7 +439,7 @@ LammpsInputStorage make_lammps_input(
   }
 
   for (int atom = 0; atom < system_atoms; ++atom) {
-    if (std::find(local_atoms.begin(), local_atoms.end(), atom) != local_atoms.end()) {
+    if (is_local_atom[static_cast<std::size_t>(atom)]) {
       continue;
     }
     const Vec3 ghost_position = {
@@ -356,11 +447,7 @@ LammpsInputStorage make_lammps_input(
         frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1],
         frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2],
     };
-    bool used = false;
-    for (int local = 0; local < input.nlocal && !used; ++local) {
-      used = distance_squared(input.positions, local, ghost_position) < cutoff_sq;
-    }
-    if (!used) {
+    if (!local_cells.has_atom_within(ghost_position, cutoff_sq)) {
       continue;
     }
     input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
@@ -389,11 +476,18 @@ LammpsInputStorage make_lammps_input(
     input.ilist[static_cast<std::size_t>(atom)] = atom;
   }
 
+  CartesianCellList all_cells;
+  all_cells.build(input.positions, input.nall, cutoff);
   for (int i = 0; i < input.nlocal; ++i) {
     std::vector<int>& neighbors = input.neighbors[static_cast<std::size_t>(i)];
-    for (int j = 0; j < input.nall; ++j) {
+    const Vec3 position_i = {
+        input.positions[3 * static_cast<std::size_t>(i) + 0],
+        input.positions[3 * static_cast<std::size_t>(i) + 1],
+        input.positions[3 * static_cast<std::size_t>(i) + 2],
+    };
+    all_cells.for_nearby_cells(position_i, [&](int j) {
       if (i == j) {
-        continue;
+        return;
       }
       const double dx = input.positions[3 * static_cast<std::size_t>(j) + 0] -
                         input.positions[3 * static_cast<std::size_t>(i) + 0];
@@ -404,7 +498,8 @@ LammpsInputStorage make_lammps_input(
       if (dx * dx + dy * dy + dz * dz < cutoff_sq) {
         neighbors.push_back(j);
       }
-    }
+    });
+    std::sort(neighbors.begin(), neighbors.end());
     input.numneigh[static_cast<std::size_t>(i)] = static_cast<int>(neighbors.size());
     input.neighbor_count += neighbors.size();
     input.max_neighbors =
@@ -563,10 +658,15 @@ int main(int argc, char** argv) {
 
   LammpsInputStorage lammps_input;
   LammpsResultStorage lammps_result;
+  double setup_seconds = 0.0;
   if (mode == Mode::lammps) {
+    const auto setup_started = std::chrono::steady_clock::now();
     lammps_input = make_lammps_input(
         frame, model_info.num_types, model_info.cutoff_max, rank_grid, rank_id);
     lammps_result = make_lammps_result(lammps_input.nall);
+    const auto setup_finished = std::chrono::steady_clock::now();
+    setup_seconds =
+        std::chrono::duration<double>(setup_finished - setup_started).count();
   }
 
   auto run_once = [&]() {
@@ -663,6 +763,7 @@ int main(int argc, char** argv) {
             << "\"warmup\":" << warmup << ','
             << "\"iterations\":" << iterations << ','
             << "\"total_iterations\":" << total_iterations << ','
+            << "\"setup_seconds\":" << setup_seconds << ','
             << "\"seconds\":" << seconds << ','
             << "\"evals_per_second\":" << evals_per_second << ','
             << "\"atom_steps_per_second\":" << atom_steps_per_second
