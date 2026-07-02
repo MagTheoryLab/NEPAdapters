@@ -31,6 +31,22 @@ bool run_find_force(
   return nepa_find_force_batch(model, &batch, &result) == NEPA_STATUS_OK;
 }
 
+void set_phase_timer_env(bool enabled) {
+#if defined(_WIN32)
+  if (enabled) {
+    _putenv_s("NEP_CPU_PHASE_TIMER", "1");
+  } else {
+    _putenv_s("NEP_CPU_PHASE_TIMER", "");
+  }
+#else
+  if (enabled) {
+    setenv("NEP_CPU_PHASE_TIMER", "1", 1);
+  } else {
+    unsetenv("NEP_CPU_PHASE_TIMER");
+  }
+#endif
+}
+
 enum class Mode {
   batch,
   lammps,
@@ -444,6 +460,7 @@ int main(int argc, char** argv) {
   int rank_id = 0;
   std::string engine_name = "cpu_nep3";
   Mode mode = Mode::batch;
+  bool phase_timer = false;
 
   for (int arg = 1; arg < argc; ++arg) {
     if (std::strcmp(argv[arg], "--iterations") == 0 && arg + 1 < argc) {
@@ -460,6 +477,8 @@ int main(int argc, char** argv) {
       engine_name = argv[++arg];
     } else if (std::strcmp(argv[arg], "--mode") == 0 && arg + 1 < argc) {
       mode = parse_mode(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--phase-timer") == 0) {
+      phase_timer = true;
     } else if (arg == 1 && argv[arg][0] != '-') {
       // Backward-compatible positional iteration count.
       iterations = std::atoi(argv[arg]);
@@ -467,7 +486,8 @@ int main(int argc, char** argv) {
       std::cerr << "Usage: " << argv[0]
                 << " [--engine NAME] [--mode batch|lammps]"
                 << " [--iterations N] [--warmup N]"
-                << " [--replicate NxMxK] [--rank-grid NxMxK] [--rank-id N]\n";
+                << " [--replicate NxMxK] [--rank-grid NxMxK] [--rank-id N]"
+                << " [--phase-timer]\n";
       return EXIT_FAILURE;
     }
   }
@@ -556,6 +576,9 @@ int main(int argc, char** argv) {
     return run_lammps_force(model, lammps_input, lammps_result);
   };
 
+  if (phase_timer) {
+    set_phase_timer_env(false);
+  }
   for (int i = 0; i < warmup; ++i) {
     if (!run_once()) {
       nepa_free_model(model);
@@ -563,6 +586,9 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (phase_timer) {
+    set_phase_timer_env(true);
+  }
   const auto started = std::chrono::steady_clock::now();
   for (int i = 0; i < iterations; ++i) {
     if (!run_once()) {
@@ -571,6 +597,9 @@ int main(int argc, char** argv) {
     }
   }
   const auto finished = std::chrono::steady_clock::now();
+  if (phase_timer) {
+    set_phase_timer_env(false);
+  }
 
   const std::vector<double>& checked_forces =
       mode == Mode::batch ? forces : lammps_result.forces;

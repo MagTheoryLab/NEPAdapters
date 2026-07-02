@@ -22,7 +22,7 @@ target_include_directories(
   PRIVATE
     "${PROJECT_SOURCE_DIR}/tests"
 )
-if(NEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP)
+if(NEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP OR NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP)
   find_package(OpenMP REQUIRED COMPONENTS CXX)
   if(TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(nep_adapters_bench_cpu_nep89 PRIVATE OpenMP::OpenMP_CXX)
