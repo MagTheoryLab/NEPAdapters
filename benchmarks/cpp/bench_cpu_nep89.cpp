@@ -42,6 +42,8 @@ struct Replicate {
   int nz = 1;
 };
 
+using RankGrid = Replicate;
+
 Replicate parse_replicate(const std::string& text) {
   Replicate replicate;
   char x1 = '\0';
@@ -54,6 +56,18 @@ Replicate parse_replicate(const std::string& text) {
     std::exit(EXIT_FAILURE);
   }
   return replicate;
+}
+
+int rank_count(const RankGrid& grid) {
+  return grid.nx * grid.ny * grid.nz;
+}
+
+Replicate rank_coords(const RankGrid& grid, int rank_id) {
+  return {
+      rank_id % grid.nx,
+      (rank_id / grid.nx) % grid.ny,
+      rank_id / (grid.nx * grid.ny),
+  };
 }
 
 Mode parse_mode(const std::string& text) {
@@ -183,21 +197,102 @@ double distance_squared(const std::vector<double>& positions, int i, const Vec3&
   return dx * dx + dy * dy + dz * dz;
 }
 
+Vec3 fractional_position(const double* box, const Vec3& position) {
+  const double a00 = box[0];
+  const double a01 = box[1];
+  const double a02 = box[2];
+  const double a10 = box[3];
+  const double a11 = box[4];
+  const double a12 = box[5];
+  const double a20 = box[6];
+  const double a21 = box[7];
+  const double a22 = box[8];
+  const double det =
+      a00 * (a11 * a22 - a12 * a21) -
+      a01 * (a10 * a22 - a12 * a20) +
+      a02 * (a10 * a21 - a11 * a20);
+  if (std::abs(det) <= 0.0) {
+    std::cerr << "Invalid zero-volume benchmark box\n";
+    std::exit(EXIT_FAILURE);
+  }
+  const double inv_det = 1.0 / det;
+  return {
+      ((a11 * a22 - a12 * a21) * position.x +
+       (a02 * a21 - a01 * a22) * position.y +
+       (a01 * a12 - a02 * a11) * position.z) *
+          inv_det,
+      ((a12 * a20 - a10 * a22) * position.x +
+       (a00 * a22 - a02 * a20) * position.y +
+       (a02 * a10 - a00 * a12) * position.z) *
+          inv_det,
+      ((a10 * a21 - a11 * a20) * position.x +
+       (a01 * a20 - a00 * a21) * position.y +
+       (a00 * a11 - a01 * a10) * position.z) *
+          inv_det,
+  };
+}
+
+double wrap_fraction(double value) {
+  value -= std::floor(value);
+  return value >= 1.0 ? value - 1.0 : value;
+}
+
+int rank_bin(double fraction, int count) {
+  int bin = static_cast<int>(std::floor(wrap_fraction(fraction) * count));
+  return std::min(count - 1, std::max(0, bin));
+}
+
+bool belongs_to_rank(
+    const double* box,
+    const Vec3& position,
+    const RankGrid& grid,
+    const Replicate& coords) {
+  const Vec3 fraction = fractional_position(box, position);
+  return rank_bin(fraction.x, grid.nx) == coords.nx &&
+         rank_bin(fraction.y, grid.ny) == coords.ny &&
+         rank_bin(fraction.z, grid.nz) == coords.nz;
+}
+
 LammpsInputStorage make_lammps_input(
     const cpu_nep3_test::Frame& frame,
     std::int32_t num_types,
-    double cutoff) {
+    double cutoff,
+    const RankGrid& rank_grid,
+    int rank_id) {
+  if (rank_id < 0 || rank_id >= rank_count(rank_grid)) {
+    std::cerr << "Invalid --rank-id for --rank-grid\n";
+    std::exit(EXIT_FAILURE);
+  }
+
   LammpsInputStorage input;
-  input.nlocal = static_cast<int>(frame.types.size());
-  input.ilist.resize(static_cast<std::size_t>(input.nlocal));
+  const Replicate coords = rank_coords(rank_grid, rank_id);
+  const int system_atoms = static_cast<int>(frame.types.size());
   input.positions.reserve(frame.positions_aos3.size() * 27);
   input.types.reserve(frame.types.size() * 27);
-  input.positions = frame.positions_aos3;
-  input.types.resize(static_cast<std::size_t>(input.nlocal));
-  for (int atom = 0; atom < input.nlocal; ++atom) {
-    input.types[static_cast<std::size_t>(atom)] =
-        frame.types[static_cast<std::size_t>(atom)] + 1;
+
+  std::vector<int> local_atoms;
+  local_atoms.reserve(frame.types.size());
+  for (int atom = 0; atom < system_atoms; ++atom) {
+    const Vec3 position = {
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 0],
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1],
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2],
+    };
+    if (belongs_to_rank(frame.box, position, rank_grid, coords)) {
+      local_atoms.push_back(atom);
+      input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
+      input.positions.push_back(position.x);
+      input.positions.push_back(position.y);
+      input.positions.push_back(position.z);
+    }
   }
+
+  input.nlocal = static_cast<int>(local_atoms.size());
+  if (input.nlocal <= 0) {
+    std::cerr << "Selected rank owns no local atoms; choose a smaller --rank-grid or another --rank-id\n";
+    std::exit(EXIT_FAILURE);
+  }
+  input.ilist.resize(static_cast<std::size_t>(input.nlocal));
 
   const double cutoff_sq = cutoff * cutoff;
   const Vec3 a = box_vector(frame.box, 0);
@@ -214,7 +309,7 @@ LammpsInputStorage make_lammps_input(
           continue;
         }
         const Vec3 shift = scaled_shift(a, b, c, ia, ib, ic);
-        for (int atom = 0; atom < input.nlocal; ++atom) {
+        for (int atom = 0; atom < system_atoms; ++atom) {
           const Vec3 ghost_position = {
               frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 0] + shift.x,
               frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1] + shift.y,
@@ -234,6 +329,28 @@ LammpsInputStorage make_lammps_input(
         }
       }
     }
+  }
+
+  for (int atom = 0; atom < system_atoms; ++atom) {
+    if (std::find(local_atoms.begin(), local_atoms.end(), atom) != local_atoms.end()) {
+      continue;
+    }
+    const Vec3 ghost_position = {
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 0],
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1],
+        frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2],
+    };
+    bool used = false;
+    for (int local = 0; local < input.nlocal && !used; ++local) {
+      used = distance_squared(input.positions, local, ghost_position) < cutoff_sq;
+    }
+    if (!used) {
+      continue;
+    }
+    input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
+    input.positions.push_back(ghost_position.x);
+    input.positions.push_back(ghost_position.y);
+    input.positions.push_back(ghost_position.z);
   }
 
   input.nall = static_cast<int>(input.types.size());
@@ -323,6 +440,8 @@ int main(int argc, char** argv) {
   int iterations = 10;
   int warmup = 1;
   Replicate replicate;
+  RankGrid rank_grid;
+  int rank_id = 0;
   std::string engine_name = "cpu_nep3";
   Mode mode = Mode::batch;
 
@@ -333,6 +452,10 @@ int main(int argc, char** argv) {
       warmup = std::atoi(argv[++arg]);
     } else if (std::strcmp(argv[arg], "--replicate") == 0 && arg + 1 < argc) {
       replicate = parse_replicate(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--rank-grid") == 0 && arg + 1 < argc) {
+      rank_grid = parse_replicate(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--rank-id") == 0 && arg + 1 < argc) {
+      rank_id = std::atoi(argv[++arg]);
     } else if (std::strcmp(argv[arg], "--engine") == 0 && arg + 1 < argc) {
       engine_name = argv[++arg];
     } else if (std::strcmp(argv[arg], "--mode") == 0 && arg + 1 < argc) {
@@ -344,7 +467,7 @@ int main(int argc, char** argv) {
       std::cerr << "Usage: " << argv[0]
                 << " [--engine NAME] [--mode batch|lammps]"
                 << " [--iterations N] [--warmup N]"
-                << " [--replicate NxMxK]\n";
+                << " [--replicate NxMxK] [--rank-grid NxMxK] [--rank-id N]\n";
       return EXIT_FAILURE;
     }
   }
@@ -421,7 +544,8 @@ int main(int argc, char** argv) {
   LammpsInputStorage lammps_input;
   LammpsResultStorage lammps_result;
   if (mode == Mode::lammps) {
-    lammps_input = make_lammps_input(frame, model_info.num_types, model_info.cutoff_max);
+    lammps_input = make_lammps_input(
+        frame, model_info.num_types, model_info.cutoff_max, rank_grid, rank_id);
     lammps_result = make_lammps_result(lammps_input.nall);
   }
 
@@ -467,11 +591,12 @@ int main(int argc, char** argv) {
   nepa_free_model(model);
 
   const int total_iterations = iterations;
+  const int active_atoms = mode == Mode::lammps ? lammps_input.nlocal : atom_count;
   const double seconds =
       std::chrono::duration<double>(finished - started).count();
   const double evals_per_second = static_cast<double>(total_iterations) / seconds;
   const double atom_steps_per_second =
-      static_cast<double>(total_iterations) * atom_count / seconds;
+      static_cast<double>(total_iterations) * active_atoms / seconds;
 #if NEP_ADAPTERS_BENCH_OPENMP_ENABLED
   const int omp_threads = omp_get_max_threads();
 #else
@@ -488,15 +613,20 @@ int main(int argc, char** argv) {
             << "\"omp_threads\":" << omp_threads << ','
             << "\"replicate\":\"" << replicate.nx << 'x' << replicate.ny
             << 'x' << replicate.nz << "\","
-            << "\"atoms\":" << atom_count << ','
-            << "\"nlocal\":" << atom_count << ','
+            << "\"rank_grid\":\"" << rank_grid.nx << 'x' << rank_grid.ny
+            << 'x' << rank_grid.nz << "\","
+            << "\"rank_id\":" << (mode == Mode::lammps ? rank_id : 0) << ','
+            << "\"rank_count\":" << (mode == Mode::lammps ? rank_count(rank_grid) : 1) << ','
+            << "\"atoms\":" << active_atoms << ','
+            << "\"system_atoms\":" << atom_count << ','
+            << "\"nlocal\":" << active_atoms << ','
             << "\"nall\":" << (mode == Mode::lammps ? lammps_input.nall : atom_count) << ','
             << "\"ghost_atoms\":" << (mode == Mode::lammps ? lammps_input.ghost_count : 0) << ','
             << "\"neighbor_count\":"
             << (mode == Mode::lammps ? lammps_input.neighbor_count : 0) << ','
             << "\"avg_neighbors\":"
-            << (mode == Mode::lammps && atom_count > 0
-                    ? static_cast<double>(lammps_input.neighbor_count) / atom_count
+            << (mode == Mode::lammps && active_atoms > 0
+                    ? static_cast<double>(lammps_input.neighbor_count) / active_atoms
                     : 0.0)
             << ','
             << "\"max_neighbors\":"

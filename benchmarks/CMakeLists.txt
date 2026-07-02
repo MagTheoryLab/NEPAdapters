@@ -52,7 +52,9 @@ add_test(
     --engine cpu_nep3
     --warmup 0
     --iterations 1
-    --replicate 1x1x1)
+    --replicate 1x1x1
+    --rank-grid 2x1x1
+    --rank-id 0)
 set_tests_properties(nep_adapters_bench_cpu_nep89_lammps PROPERTIES
   LABELS "bench;performance;engine;cpu_nep3;nep89;lammps"
   TIMEOUT 120)
@@ -65,7 +67,9 @@ if(TARGET NEPAdapters::cpu_opt)
       --engine cpu_opt
       --warmup 0
       --iterations 1
-      --replicate 1x1x1)
+      --replicate 1x1x1
+      --rank-grid 2x1x1
+      --rank-id 0)
   set_tests_properties(nep_adapters_bench_cpu_nep89_lammps_cpu_opt PROPERTIES
     LABELS "bench;performance;engine;cpu_opt;nep89;lammps"
     TIMEOUT 120)
