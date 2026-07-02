@@ -1,5 +1,8 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cpu_nep3.hpp"
+#if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CPU_OPT)
+#include "nep_adapters/engines/cpu_opt.hpp"
+#endif
 #include "nep_adapters/virial_order.hpp"
 
 #include "cpu_nep3_test_utils.hpp"
@@ -13,6 +16,10 @@
 #include <vector>
 
 namespace {
+
+#ifndef NEP_ADAPTERS_LAMMPS_ENGINE_NAME
+#define NEP_ADAPTERS_LAMMPS_ENGINE_NAME "cpu_nep3"
+#endif
 
 struct LammpsInputStorage {
   int nlocal = 0;
@@ -121,7 +128,7 @@ LammpsPrediction run_adapter(
     const std::string& model_path,
     LammpsInputStorage& input) {
   NepaModel* model = nullptr;
-  if (nepa_load_model("cpu_nep3", model_path.c_str(), &model) != NEPA_STATUS_OK ||
+  if (nepa_load_model(NEP_ADAPTERS_LAMMPS_ENGINE_NAME, model_path.c_str(), &model) != NEPA_STATUS_OK ||
       model == nullptr) {
     std::exit(EXIT_FAILURE);
   }
@@ -194,6 +201,11 @@ int main() {
   if (!nep_adapters::register_cpu_nep3_engine()) {
     return EXIT_FAILURE;
   }
+#if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CPU_OPT)
+  if (!nep_adapters::register_cpu_opt_engine()) {
+    return EXIT_FAILURE;
+  }
+#endif
 
   const auto type_map = cpu_nep3_test::read_type_map(model_path);
   const cpu_nep3_test::Frame frame =
@@ -227,7 +239,8 @@ int main() {
       !frame.has_reference_virial || baseline_energy_diff > tolerance ||
       baseline_force_diff > tolerance ||
       baseline_virial_diff > tolerance) {
-    std::cerr << "cpu_nep3 LAMMPS-neighbor parity failed: energy_diff="
+    std::cerr << NEP_ADAPTERS_LAMMPS_ENGINE_NAME
+              << " LAMMPS-neighbor parity failed: energy_diff="
               << energy_diff << " virial_diff=" << virial_diff
               << " potential_diff=" << potential_diff
               << " force_diff=" << force_diff

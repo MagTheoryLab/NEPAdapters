@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 
 /build*/
+/.build/
+/reports/
 /CMakeFiles/
 /CMakeCache.txt
 /Makefile
