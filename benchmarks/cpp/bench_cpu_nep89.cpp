@@ -1,8 +1,12 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cpu_nep3.hpp"
+#if NEP_ADAPTERS_BENCH_HAS_CPU_OPT
+#include "nep_adapters/engines/cpu_opt.hpp"
+#endif
 
 #include "cpu_nep3_test_utils.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +31,11 @@ bool run_find_force(
   return nepa_find_force_batch(model, &batch, &result) == NEPA_STATUS_OK;
 }
 
+enum class Mode {
+  batch,
+  lammps,
+};
+
 struct Replicate {
   int nx = 1;
   int ny = 1;
@@ -45,6 +54,21 @@ Replicate parse_replicate(const std::string& text) {
     std::exit(EXIT_FAILURE);
   }
   return replicate;
+}
+
+Mode parse_mode(const std::string& text) {
+  if (text == "batch") {
+    return Mode::batch;
+  }
+  if (text == "lammps") {
+    return Mode::lammps;
+  }
+  std::cerr << "Invalid --mode value: " << text << '\n';
+  std::exit(EXIT_FAILURE);
+}
+
+const char* mode_name(Mode mode) {
+  return mode == Mode::batch ? "batch" : "lammps";
 }
 
 cpu_nep3_test::Frame make_supercell(
@@ -95,12 +119,212 @@ cpu_nep3_test::Frame make_supercell(
   return supercell;
 }
 
+struct LammpsInputStorage {
+  int nlocal = 0;
+  int nall = 0;
+  int ghost_count = 0;
+  int max_neighbors = 0;
+  std::size_t neighbor_count = 0;
+  std::vector<int> ilist;
+  std::vector<int> numneigh;
+  std::vector<std::vector<int>> neighbors;
+  std::vector<int*> firstneigh;
+  std::vector<int> types;
+  std::vector<int> type_map;
+  std::vector<double> positions;
+  std::vector<double*> position_rows;
+};
+
+struct Vec3 {
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+};
+
+struct LammpsResultStorage {
+  double total_potential = 0.0;
+  double total_virial6[6] = {};
+  std::vector<double> forces;
+  std::vector<double*> force_rows;
+};
+
+Vec3 box_vector(const double* box, int column) {
+  return {
+      box[column],
+      box[3 + column],
+      box[6 + column],
+  };
+}
+
+Vec3 scaled_shift(const Vec3& a, const Vec3& b, const Vec3& c, int ia, int ib, int ic) {
+  return {
+      ia * a.x + ib * b.x + ic * c.x,
+      ia * a.y + ib * b.y + ic * c.y,
+      ia * a.z + ib * b.z + ic * c.z,
+  };
+}
+
+double norm(const Vec3& value) {
+  return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+}
+
+int image_range(const Vec3& vector, double cutoff) {
+  const double length = norm(vector);
+  if (length <= 0.0) {
+    return 0;
+  }
+  return std::max(1, static_cast<int>(std::ceil(cutoff / length)));
+}
+
+double distance_squared(const std::vector<double>& positions, int i, const Vec3& rhs) {
+  const double dx = rhs.x - positions[3 * static_cast<std::size_t>(i) + 0];
+  const double dy = rhs.y - positions[3 * static_cast<std::size_t>(i) + 1];
+  const double dz = rhs.z - positions[3 * static_cast<std::size_t>(i) + 2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
+LammpsInputStorage make_lammps_input(
+    const cpu_nep3_test::Frame& frame,
+    std::int32_t num_types,
+    double cutoff) {
+  LammpsInputStorage input;
+  input.nlocal = static_cast<int>(frame.types.size());
+  input.ilist.resize(static_cast<std::size_t>(input.nlocal));
+  input.positions.reserve(frame.positions_aos3.size() * 27);
+  input.types.reserve(frame.types.size() * 27);
+  input.positions = frame.positions_aos3;
+  input.types.resize(static_cast<std::size_t>(input.nlocal));
+  for (int atom = 0; atom < input.nlocal; ++atom) {
+    input.types[static_cast<std::size_t>(atom)] =
+        frame.types[static_cast<std::size_t>(atom)] + 1;
+  }
+
+  const double cutoff_sq = cutoff * cutoff;
+  const Vec3 a = box_vector(frame.box, 0);
+  const Vec3 b = box_vector(frame.box, 1);
+  const Vec3 c = box_vector(frame.box, 2);
+  const int range_a = image_range(a, cutoff);
+  const int range_b = image_range(b, cutoff);
+  const int range_c = image_range(c, cutoff);
+
+  for (int ia = -range_a; ia <= range_a; ++ia) {
+    for (int ib = -range_b; ib <= range_b; ++ib) {
+      for (int ic = -range_c; ic <= range_c; ++ic) {
+        if (ia == 0 && ib == 0 && ic == 0) {
+          continue;
+        }
+        const Vec3 shift = scaled_shift(a, b, c, ia, ib, ic);
+        for (int atom = 0; atom < input.nlocal; ++atom) {
+          const Vec3 ghost_position = {
+              frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 0] + shift.x,
+              frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 1] + shift.y,
+              frame.positions_aos3[3 * static_cast<std::size_t>(atom) + 2] + shift.z,
+          };
+          bool used = false;
+          for (int local = 0; local < input.nlocal && !used; ++local) {
+            used = distance_squared(input.positions, local, ghost_position) < cutoff_sq;
+          }
+          if (!used) {
+            continue;
+          }
+          input.types.push_back(frame.types[static_cast<std::size_t>(atom)] + 1);
+          input.positions.push_back(ghost_position.x);
+          input.positions.push_back(ghost_position.y);
+          input.positions.push_back(ghost_position.z);
+        }
+      }
+    }
+  }
+
+  input.nall = static_cast<int>(input.types.size());
+  input.ghost_count = input.nall - input.nlocal;
+  input.numneigh.assign(static_cast<std::size_t>(input.nall), 0);
+  input.neighbors.resize(static_cast<std::size_t>(input.nlocal));
+  input.firstneigh.assign(static_cast<std::size_t>(input.nall), nullptr);
+  input.position_rows.resize(static_cast<std::size_t>(input.nall));
+  input.type_map.assign(static_cast<std::size_t>(num_types + 1), -1);
+
+  for (std::int32_t type = 0; type < num_types; ++type) {
+    input.type_map[static_cast<std::size_t>(type + 1)] = type;
+  }
+
+  for (int atom = 0; atom < input.nall; ++atom) {
+    input.position_rows[static_cast<std::size_t>(atom)] =
+        input.positions.data() + 3 * static_cast<std::size_t>(atom);
+  }
+  for (int atom = 0; atom < input.nlocal; ++atom) {
+    input.ilist[static_cast<std::size_t>(atom)] = atom;
+  }
+
+  for (int i = 0; i < input.nlocal; ++i) {
+    std::vector<int>& neighbors = input.neighbors[static_cast<std::size_t>(i)];
+    for (int j = 0; j < input.nall; ++j) {
+      if (i == j) {
+        continue;
+      }
+      const double dx = input.positions[3 * static_cast<std::size_t>(j) + 0] -
+                        input.positions[3 * static_cast<std::size_t>(i) + 0];
+      const double dy = input.positions[3 * static_cast<std::size_t>(j) + 1] -
+                        input.positions[3 * static_cast<std::size_t>(i) + 1];
+      const double dz = input.positions[3 * static_cast<std::size_t>(j) + 2] -
+                        input.positions[3 * static_cast<std::size_t>(i) + 2];
+      if (dx * dx + dy * dy + dz * dz < cutoff_sq) {
+        neighbors.push_back(j);
+      }
+    }
+    input.numneigh[static_cast<std::size_t>(i)] = static_cast<int>(neighbors.size());
+    input.neighbor_count += neighbors.size();
+    input.max_neighbors =
+        std::max(input.max_neighbors, static_cast<int>(neighbors.size()));
+    input.firstneigh[static_cast<std::size_t>(i)] =
+        neighbors.empty() ? nullptr : neighbors.data();
+  }
+
+  return input;
+}
+
+LammpsResultStorage make_lammps_result(int nall) {
+  LammpsResultStorage result;
+  result.forces.assign(static_cast<std::size_t>(nall) * 3, 0.0);
+  result.force_rows.resize(static_cast<std::size_t>(nall));
+  for (int atom = 0; atom < nall; ++atom) {
+    result.force_rows[static_cast<std::size_t>(atom)] =
+        result.forces.data() + 3 * static_cast<std::size_t>(atom);
+  }
+  return result;
+}
+
+bool run_lammps_force(
+    NepaModel* model,
+    LammpsInputStorage& input,
+    LammpsResultStorage& storage) {
+  std::fill(storage.forces.begin(), storage.forces.end(), 0.0);
+  NepaLammpsNeighborInput lammps_input{};
+  lammps_input.nlocal = input.nlocal;
+  lammps_input.inum = input.nlocal;
+  lammps_input.ilist = input.ilist.data();
+  lammps_input.numneigh = input.numneigh.data();
+  lammps_input.firstneigh = input.firstneigh.data();
+  lammps_input.types = input.types.data();
+  lammps_input.type_map = input.type_map.data();
+  lammps_input.positions = input.position_rows.data();
+
+  NepaLammpsNeighborResult result{};
+  result.total_potential = &storage.total_potential;
+  result.total_virial6 = storage.total_virial6;
+  result.forces = storage.force_rows.data();
+  return nepa_find_force_lammps_neighbors(model, &lammps_input, &result) ==
+         NEPA_STATUS_OK;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   int iterations = 10;
   int warmup = 1;
   Replicate replicate;
+  std::string engine_name = "cpu_nep3";
+  Mode mode = Mode::batch;
 
   for (int arg = 1; arg < argc; ++arg) {
     if (std::strcmp(argv[arg], "--iterations") == 0 && arg + 1 < argc) {
@@ -109,12 +333,18 @@ int main(int argc, char** argv) {
       warmup = std::atoi(argv[++arg]);
     } else if (std::strcmp(argv[arg], "--replicate") == 0 && arg + 1 < argc) {
       replicate = parse_replicate(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--engine") == 0 && arg + 1 < argc) {
+      engine_name = argv[++arg];
+    } else if (std::strcmp(argv[arg], "--mode") == 0 && arg + 1 < argc) {
+      mode = parse_mode(argv[++arg]);
     } else if (arg == 1 && argv[arg][0] != '-') {
       // Backward-compatible positional iteration count.
       iterations = std::atoi(argv[arg]);
     } else {
       std::cerr << "Usage: " << argv[0]
-                << " [--iterations N] [--warmup N] [--replicate NxMxK]\n";
+                << " [--engine NAME] [--mode batch|lammps]"
+                << " [--iterations N] [--warmup N]"
+                << " [--replicate NxMxK]\n";
       return EXIT_FAILURE;
     }
   }
@@ -122,6 +352,16 @@ int main(int argc, char** argv) {
   if (iterations <= 0 || warmup < 0) {
     return EXIT_FAILURE;
   }
+  if (engine_name != "cpu_nep3" && engine_name != "cpu_opt") {
+    std::cerr << "Unsupported --engine value: " << engine_name << '\n';
+    return EXIT_FAILURE;
+  }
+#if !NEP_ADAPTERS_BENCH_HAS_CPU_OPT
+  if (engine_name == "cpu_opt") {
+    std::cerr << "cpu_opt benchmark requested but cpu_opt was not built\n";
+    return EXIT_FAILURE;
+  }
+#endif
 
   const std::string model_path = NEP_ADAPTERS_NEP89_MODEL_PATH;
   const std::string xyz_path = NEP_ADAPTERS_NEP89_XYZ_PATH;
@@ -129,6 +369,11 @@ int main(int argc, char** argv) {
   if (!nep_adapters::register_cpu_nep3_engine()) {
     return EXIT_FAILURE;
   }
+#if NEP_ADAPTERS_BENCH_HAS_CPU_OPT
+  if (!nep_adapters::register_cpu_opt_engine()) {
+    return EXIT_FAILURE;
+  }
+#endif
 
   const auto type_map = cpu_nep3_test::read_type_map(model_path);
   cpu_nep3_test::Frame frame =
@@ -139,8 +384,14 @@ int main(int argc, char** argv) {
       static_cast<std::int32_t>(frame.types.size());
 
   NepaModel* model = nullptr;
-  if (nepa_load_model("cpu_nep3", model_path.c_str(), &model) != NEPA_STATUS_OK ||
+  if (nepa_load_model(engine_name.c_str(), model_path.c_str(), &model) != NEPA_STATUS_OK ||
       model == nullptr) {
+    return EXIT_FAILURE;
+  }
+  NepaModelInfo model_info{};
+  if (nepa_model_info(model, &model_info) != NEPA_STATUS_OK ||
+      model_info.cutoff_max <= 0.0 || model_info.num_types <= 0) {
+    nepa_free_model(model);
     return EXIT_FAILURE;
   }
 
@@ -167,8 +418,22 @@ int main(int argc, char** argv) {
   result.forces_aos3 = forces.data();
   result.virials_row_major9 = virial;
 
+  LammpsInputStorage lammps_input;
+  LammpsResultStorage lammps_result;
+  if (mode == Mode::lammps) {
+    lammps_input = make_lammps_input(frame, model_info.num_types, model_info.cutoff_max);
+    lammps_result = make_lammps_result(lammps_input.nall);
+  }
+
+  auto run_once = [&]() {
+    if (mode == Mode::batch) {
+      return run_find_force(model, batch, result);
+    }
+    return run_lammps_force(model, lammps_input, lammps_result);
+  };
+
   for (int i = 0; i < warmup; ++i) {
-    if (!run_find_force(model, batch, result)) {
+    if (!run_once()) {
       nepa_free_model(model);
       return EXIT_FAILURE;
     }
@@ -176,19 +441,24 @@ int main(int argc, char** argv) {
 
   const auto started = std::chrono::steady_clock::now();
   for (int i = 0; i < iterations; ++i) {
-    if (!run_find_force(model, batch, result)) {
+    if (!run_once()) {
       nepa_free_model(model);
       return EXIT_FAILURE;
     }
   }
   const auto finished = std::chrono::steady_clock::now();
 
+  const std::vector<double>& checked_forces =
+      mode == Mode::batch ? forces : lammps_result.forces;
+  const double checked_energy =
+      mode == Mode::batch ? energy[0] : lammps_result.total_potential;
+
   const double force_l1 = std::accumulate(
-      forces.begin(),
-      forces.end(),
+      checked_forces.begin(),
+      checked_forces.end(),
       0.0,
       [](double sum, double value) { return sum + std::abs(value); });
-  if (!std::isfinite(energy[0]) || !cpu_nep3_test::all_finite(forces) ||
+  if (!std::isfinite(checked_energy) || !cpu_nep3_test::all_finite(checked_forces) ||
       force_l1 <= 0.0) {
     nepa_free_model(model);
     return EXIT_FAILURE;
@@ -208,14 +478,29 @@ int main(int argc, char** argv) {
   const int omp_threads = 1;
 #endif
 
-  std::cout << "{\"benchmark\":\"cpu_nep3_nep89_find_force_batch\","
-            << "\"engine\":\"cpu_nep3\","
+  std::cout << "{\"benchmark\":\""
+            << (mode == Mode::batch ? "nep89_find_force_batch" : "nep89_lammps_neighbors")
+            << "\","
+            << "\"engine\":\"" << engine_name << "\","
+            << "\"mode\":\"" << mode_name(mode) << "\","
             << "\"model\":\"nep89\","
             << "\"openmp_enabled\":" << NEP_ADAPTERS_BENCH_OPENMP_ENABLED << ','
             << "\"omp_threads\":" << omp_threads << ','
             << "\"replicate\":\"" << replicate.nx << 'x' << replicate.ny
             << 'x' << replicate.nz << "\","
             << "\"atoms\":" << atom_count << ','
+            << "\"nlocal\":" << atom_count << ','
+            << "\"nall\":" << (mode == Mode::lammps ? lammps_input.nall : atom_count) << ','
+            << "\"ghost_atoms\":" << (mode == Mode::lammps ? lammps_input.ghost_count : 0) << ','
+            << "\"neighbor_count\":"
+            << (mode == Mode::lammps ? lammps_input.neighbor_count : 0) << ','
+            << "\"avg_neighbors\":"
+            << (mode == Mode::lammps && atom_count > 0
+                    ? static_cast<double>(lammps_input.neighbor_count) / atom_count
+                    : 0.0)
+            << ','
+            << "\"max_neighbors\":"
+            << (mode == Mode::lammps ? lammps_input.max_neighbors : 0) << ','
             << "\"warmup\":" << warmup << ','
             << "\"iterations\":" << iterations << ','
             << "\"total_iterations\":" << total_iterations << ','
