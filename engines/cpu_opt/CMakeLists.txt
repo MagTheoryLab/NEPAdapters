@@ -43,6 +43,10 @@ target_include_directories(
 target_compile_features(nep_adapters_cpu_opt PUBLIC cxx_std_17)
 set_target_properties(nep_adapters_cpu_opt PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
+  target_compile_options(nep_adapters_cpu_opt PRIVATE -Mnovect)
+endif()
+
 target_compile_definitions(
   nep_adapters_cpu_opt
   PRIVATE
