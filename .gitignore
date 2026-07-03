@@ -5,6 +5,7 @@ __pycache__/
 /build*/
 /.build/
 /reports/
+/tmp/
 /CMakeFiles/
 /CMakeCache.txt
 /Makefile

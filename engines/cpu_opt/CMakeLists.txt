@@ -15,9 +15,6 @@ option(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP "Build cpu_opt with OpenMP when availa
 option(NEP_ADAPTERS_CPU_OPT_ENABLE_BATCH_ANN
   "Enable type-grouped CBLAS batch ANN kernels in cpu_opt when a CBLAS provider is available"
   ON)
-option(NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL
-  "Use a portable fused ANN micro-kernel in cpu_opt instead of CBLAS/scalar fallback"
-  OFF)
 if(APPLE)
   set(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT ON)
 else()
@@ -60,10 +57,6 @@ endif()
 
 if(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE)
   target_compile_definitions(nep_adapters_cpu_opt PRIVATE USE_TABLE_FOR_RADIAL_FUNCTIONS)
-endif()
-
-if(NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL)
-  target_compile_definitions(nep_adapters_cpu_opt PRIVATE NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL=1)
 endif()
 
 if(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP)
