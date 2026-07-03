@@ -5,11 +5,11 @@ change later; the important boundary is:
 
 - `core`: stable NEP runtime semantics, public data views, capability reporting,
   errors, and engine dispatch.
-- `engines`: concrete CPU/CUDA implementations.
+- `engines`: concrete CPU implementations.
 - `frontends`: Python, LAMMPS, and future software integrations.
 
 This repository is not just a thin adapter around external code. It should be
-able to ship as a CPU-only Python package, optionally build CUDA engines, and let
+able to ship as a CPU-only Python package and let
 users compile LAMMPS pair/plugin integrations against the same runtime.
 
 ## Ownership
@@ -17,7 +17,7 @@ users compile LAMMPS pair/plugin integrations against the same runtime.
 The project owns:
 
 - A public API for model loading and prediction.
-- A narrow engine SPI used by CPU/CUDA implementations.
+- A narrow engine SPI used by CPU implementations.
 - Capability-driven dispatch across engines.
 - Compatibility and parity tests across engines.
 - Packaging policy for Python wheels, native libraries, and LAMMPS integrations.
@@ -26,7 +26,6 @@ The project must not let one frontend or one engine define the whole design:
 
 - LAMMPS pair styles are frontends, not engines.
 - Python bindings are frontends, not the runtime.
-- CUDA dependencies stay in the CUDA engine and CUDA-enabled packages.
 - The core runtime must remain buildable without CUDA, Python, or LAMMPS.
 
 ## Layout
@@ -36,28 +35,22 @@ The project must not let one frontend or one engine define the whole design:
   - `engine.hpp`: C++ engine SPI and registration entry.
   - `views.hpp`: frontend/engine data-view vocabulary.
   - `capability.hpp`: capability flags and helpers.
-  - `backend.hpp`: transitional compatibility include for the old name.
 - `src/`: core registry and API implementation.
 - `engines/cpu_nep3/`: adapter for the official/existing NEP CPU class, used
   first as the CPU reference engine and parity oracle. The `nep3` name is
   historical; this is the current NEP CPU code path exposed by that class.
 - `engines/cpu_opt/`: planned optimized CPU engine for OpenMP/SIMD/layout work.
-- `engines/cuda/`: planned CUDA engine, currently corresponding to the maintained
-  NEP_GPU direction.
 - `frontends/python/`: Python package boundary. M2 uses a minimal pybind11
   frontend over the C ABI, a NumPy-first calculator facade, and an optional
   `nep_adapters.ase` adapter.
 - `frontends/lammps/`: LAMMPS pair/plugin boundary. The current CPU pair style is
-  `nep/cpu`; CUDA/Kokkos styles are intentionally deferred.
+  `nep/cpu`.
 - `tests/`: contract, parity, and fixture tests.
   - `tests/fixtures/cpu_nep3_baseline/`: committed CPU baseline model,
     structure, and golden labels for correctness tests. This is repository test
     data and is not included in the Python package.
 - `benchmarks/`: throughput and scaling probes for engines/frontends.
 - `docs/design.md`: architecture notes and staged plan.
-
-Legacy `backends/` and `adapters/` directories are kept only as transitional
-notes until the new layout is filled in.
 
 ## Current CPU Milestone
 

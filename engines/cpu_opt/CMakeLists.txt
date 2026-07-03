@@ -1,4 +1,4 @@
-set(NEP_ADAPTERS_CPU_OPT_SOURCE_DIR "/Users/superbing/Desktop/Workspace/NEP_CPU/src" CACHE PATH
+set(NEP_ADAPTERS_CPU_OPT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/native" CACHE PATH
   "Path to the optimized NEP CPU source directory containing nep.cpp and nep.h")
 
 if(NOT EXISTS "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/nep.h" OR

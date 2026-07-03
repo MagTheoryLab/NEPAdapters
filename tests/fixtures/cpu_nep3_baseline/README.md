@@ -5,7 +5,7 @@ This fixture is committed test data, not Python package data.
 - `nep.txt` is the small Te/Pb NEP model used by the CPU baseline tests.
 - `train.xyz` contains one fixed labelled structure. The `energy`, `force`,
   and `virial` fields are golden labels generated from the current trusted
-  `cpu_nep3` adapter path. Future CPU/CUDA/Python/LAMMPS tests compare
+  `cpu_nep3` adapter path. Future CPU/Python/LAMMPS tests compare
   against these values instead of only comparing two live code paths.
 - `descriptor.txt` contains the per-atom descriptor matrix for the same
   structure, stored as row-major `(natoms, descriptor_dim)` test data.

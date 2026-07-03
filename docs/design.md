@@ -10,7 +10,7 @@ The design has three layers:
 
 - `core`: model/runtime semantics, data views, capability reporting, error
   handling, and dispatch.
-- `engines`: compute implementations such as `cpu_nep3`, `cpu_opt`, and `cuda`.
+- `engines`: compute implementations such as `cpu_nep3` and `cpu_opt`.
 - `frontends`: Python bindings, LAMMPS pair/plugin code, and future software
   integrations.
 
@@ -18,10 +18,9 @@ The design has three layers:
 
 - LAMMPS is a frontend, not an engine.
 - Python is a frontend, not the runtime.
-- The core target must not include or link CUDA, Python, or LAMMPS.
+- The core target must not include or link Python or LAMMPS.
 - Engines implement the core engine SPI and must not depend on frontends.
 - Frontends consume the public runtime API and must not include engine internals.
-- CUDA must not be a hard dependency of the CPU-only Python package.
 - ASE must remain an optional Python adapter, not a dependency of the core
   calculator package.
 
@@ -38,11 +37,8 @@ Planned engines:
   that class. It is the correctness baseline, not the performance target.
 - `cpu_opt`: optimized CPU implementation for OpenMP/SIMD/layout/algorithm work.
   It must pass parity against `cpu_nep3`.
-- `cuda`: maintained CUDA implementation, corresponding to the NEP_GPU direction.
-  It must pass parity against `cpu_nep3` within declared tolerances.
-
 This avoids repeating the official CPU implementation while still allowing
-independent CPU and CUDA engineering.
+independent CPU engineering.
 
 ## Frontend Strategy
 
@@ -80,7 +76,7 @@ M0 skeleton, the public vocabulary is split across `api.h`, `views.hpp`, and
 `capability.hpp`.
 
 Engine SPI is what engine authors implement. It lives in `engine.hpp` and may
-change during v0 while CPU and CUDA implementations are still being shaped.
+change during v0 while CPU implementations are still being shaped.
 
 For v0, the existing C API in `include/nep_adapters/api.h` is experimental. Do
 not freeze ABI until spin, charge, descriptors, external-neighbor input,
@@ -91,13 +87,7 @@ owned-neighbor construction, and device input have clear data-view contracts.
 The default Python package should be CPU-only:
 
 - build core + `cpu_nep3` + possibly `cpu_opt`;
-- not require CUDA;
 - not include LAMMPS.
-
-CUDA support should be optional:
-
-- source build with CUDA enabled first;
-- separate CUDA wheel/package only if the dependency policy is explicit.
 
 LAMMPS integration should be buildable by users who download this repository:
 
@@ -130,7 +120,7 @@ Testing has two separate jobs:
 
 CTest is the top-level dispatcher for native tests and benchmarks. Tests must
 use labels such as `contract`, `smoke`, `parity`, `frontend`, `engine`,
-`python`, `lammps`, `cuda`, `bench`, and `performance` so CI and local runs can
+`python`, `lammps`, `bench`, and `performance` so CI and local runs can
 select the right slice without inventing new runners.
 
 Python-specific tests should use the `mysci` conda environment and the pybind11
@@ -141,24 +131,21 @@ performance work should use `pytest-benchmark` once broader Python APIs exist.
 LAMMPS performance work should run real LAMMPS input decks under
 `benchmarks/lammps/`; the repository should not grow a duplicate MD driver. The
 current CPU report includes LAMMPS compile/plugin smoke plus local
-`mpirun -np 1/2/4` correctness smoke. CUDA performance work should keep Nsight
-Systems / Nsight Compute commands reproducible rather than hiding profiler
-settings in ad hoc scripts.
+`mpirun -np 1/2/4` correctness smoke.
 
 Multi-rank LAMMPS correctness should start from a backend-neutral C++ domain
 decomposition contract: full-system reference, rank-local owned atoms, ghost
 atoms, compact external-neighbor lists, ghost-force foldback, and virial
-reduction. CPU and CUDA engines can each provide runners for that same contract;
-CUDA-specific tests should be introduced only when they call a CUDA backend.
+reduction. Engines can each provide runners for that same contract.
 
 ## Red Lines
 
 - Do not make LAMMPS neighbor-list shape define the Python batch API.
 - Do not make a base Python wheel depend on CUDA libraries.
-- Do not mix Python, LAMMPS, or CUDA headers into core.
+- Do not mix Python or LAMMPS headers into core.
 - Do not rewrite the CPU reference engine if the official/existing NEP CPU class
   can serve as the oracle.
-- Do not make `cpu_opt` or `cuda` depend on `cpu_nep3` outside tests.
+- Do not make `cpu_opt` depend on `cpu_nep3` outside tests.
 - Do not expose engine SPI types through the public API.
 - Do not mix correctness pass/fail thresholds with machine-specific benchmark
   baselines. Record throughput first; add regression gates only with explicit

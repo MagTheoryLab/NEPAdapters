@@ -38,11 +38,11 @@ loads `nepadaptersplugin.so`, runs `pair_style nep/cpu` on the committed baselin
 fixture, and compares total energy, per-atom energy sum, forces, and virial from
 `stress/atom` against the golden labels.
 
-`nep_adapters_domain_decomp_contract_test` is pure C++. It does not call CUDA or
-LAMMPS. It compares a full-system reference against two synthetic rank-local
+`nep_adapters_domain_decomp_contract_test` is pure C++. It does not call LAMMPS.
+It compares a full-system reference against two synthetic rank-local
 systems with ghost atoms, then folds ghost force contributions and reduces
-virials. CPU and CUDA external-neighbor runners should reuse this contract shape
-when those backends are added.
+virials. External-neighbor runners should reuse this contract shape when engines
+are added.
 
 `nep_adapters_virial_order_test` fixes the component-order contract between the
 regular NEP `compute` path and the LAMMPS `compute_for_lammps` path.

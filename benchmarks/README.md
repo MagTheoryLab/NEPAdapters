@@ -9,8 +9,6 @@ Use standard runners where they already fit:
   the `bench` label.
 - Python frontend benchmarks should use `pytest-benchmark` once the Python
   frontend exists.
-- CUDA profiling should keep Nsight Systems / Nsight Compute commands in
-  runnable scripts or documented command files instead of custom profiler logic.
 - LAMMPS benchmarks should be real LAMMPS input cases under `benchmarks/lammps/`.
 
 Current local run:
