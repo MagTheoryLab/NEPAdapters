@@ -18,17 +18,6 @@ option(NEP_ADAPTERS_CPU_OPT_ENABLE_BATCH_ANN
 option(NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL
   "Use a portable fused ANN micro-kernel in cpu_opt instead of CBLAS/scalar fallback"
   OFF)
-option(NEP_ADAPTERS_CPU_OPT_PREFER_AVX512
-  "Prefer the AVX512 Lmax4 edge SIMD kernel over the default AVX2-width kernel when AVX512 is available"
-  OFF)
-if(APPLE)
-  set(NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE_DEFAULT OFF)
-else()
-  set(NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE_DEFAULT ON)
-endif()
-option(NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE
-  "Cache per-block ANN descriptor gathers inside the fused micro-kernel"
-  ${NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE_DEFAULT})
 if(APPLE)
   set(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT ON)
 else()
@@ -75,14 +64,6 @@ endif()
 
 if(NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL)
   target_compile_definitions(nep_adapters_cpu_opt PRIVATE NEP_ADAPTERS_CPU_OPT_USE_ANN_MICROKERNEL=1)
-endif()
-
-if(NEP_ADAPTERS_CPU_OPT_PREFER_AVX512)
-  target_compile_definitions(nep_adapters_cpu_opt PRIVATE NEP_ADAPTERS_CPU_OPT_PREFER_AVX512=1)
-endif()
-
-if(NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE)
-  target_compile_definitions(nep_adapters_cpu_opt PRIVATE NEP_ADAPTERS_CPU_OPT_USE_ANN_Q_BLOCK_CACHE=1)
 endif()
 
 if(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP)
