@@ -97,6 +97,25 @@ if(TARGET NEPAdapters::cpu_nep3 AND
 endif()
 
 if(TARGET NEPAdapters::cpu_nep3 AND
+   EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt" AND
+   EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in")
+  add_executable(nep_adapters_cpu_nep3_qnep_test test_cpu_nep3_qnep.cpp)
+  target_link_libraries(
+    nep_adapters_cpu_nep3_qnep_test
+    PRIVATE
+      NEPAdapters::cpu_nep3
+  )
+  target_compile_definitions(
+    nep_adapters_cpu_nep3_qnep_test
+    PRIVATE
+      NEP_ADAPTERS_QNEP_TEST_DATA_DIR="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}"
+  )
+  add_test(NAME nep_adapters_cpu_nep3_qnep_test COMMAND nep_adapters_cpu_nep3_qnep_test)
+  set_tests_properties(nep_adapters_cpu_nep3_qnep_test PROPERTIES
+    LABELS "smoke;engine;cpu_nep3;qnep")
+endif()
+
+if(TARGET NEPAdapters::cpu_nep3 AND
    TARGET NEPAdapters::cpu_opt AND
    EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt" AND
    EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz" AND

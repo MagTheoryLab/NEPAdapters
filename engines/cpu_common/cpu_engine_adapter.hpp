@@ -29,6 +29,9 @@ class CpuModel final : public Model {
                        to_mask(Capability::external_neighbors) |
                        to_mask(Capability::virial) |
                        to_mask(Capability::descriptors);
+    if (nep_.paramb.charge_mode > 0) {
+      out.capabilities |= to_mask(Capability::charge);
+    }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
     out.descriptor_dim = static_cast<std::int32_t>(nep_.annmb.dim);
     return NEPA_STATUS_OK;
@@ -73,7 +76,23 @@ class CpuModel final : public Model {
             9,
             box.data());
 
-        nep_.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+        std::vector<double> charge;
+        std::vector<double> bec_soa;
+        if (nep_.paramb.charge_mode > 0) {
+          charge.assign(static_cast<std::size_t>(atom_count), 0.0);
+          bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+          nep_.compute(
+              types,
+              box,
+              positions_soa,
+              potential,
+              force_soa,
+              virial_soa,
+              charge,
+              bec_soa);
+        } else {
+          nep_.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+        }
 
         result.energy_per_structure[structure] =
             std::accumulate(potential.begin(), potential.end(), 0.0);
@@ -93,6 +112,15 @@ class CpuModel final : public Model {
             for (std::int32_t component = 0; component < 9; ++component) {
               result.virials_per_atom_row_major9[9 * global_atom + component] =
                   virial_soa[static_cast<std::size_t>(component) * atom_count + atom];
+            }
+          }
+          if (result.charge_per_atom != nullptr && !charge.empty()) {
+            result.charge_per_atom[global_atom] = charge[atom];
+          }
+          if (result.bec_per_atom_row_major9 != nullptr && !bec_soa.empty()) {
+            for (std::int32_t component = 0; component < 9; ++component) {
+              result.bec_per_atom_row_major9[9 * global_atom + component] =
+                  bec_soa[static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
         }

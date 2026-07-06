@@ -75,6 +75,9 @@ typedef struct NepaFindForceResult {
   double* virials_row_major9;
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_per_atom_row_major9;
+  double* charge_per_atom;
+  /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  double* bec_per_atom_row_major9;
 } NepaFindForceResult;
 
 typedef struct NepaFindDescriptorResult {

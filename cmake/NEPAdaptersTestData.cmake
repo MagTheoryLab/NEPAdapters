@@ -17,6 +17,8 @@ set(NEP_ADAPTERS_NEP89_MODEL_PATH "" CACHE FILEPATH
   "Path to a nep89 model file for large-model tests and benchmarks")
 set(NEP_ADAPTERS_NEP89_XYZ_PATH "" CACHE FILEPATH
   "Path to an extxyz file compatible with the nep89 model")
+set(NEP_ADAPTERS_QNEP_TEST_DATA_DIR "" CACHE PATH
+  "Path to qNEP test data containing nep.txt and xyz.in")
 
 if(NOT NEP_ADAPTERS_NEP89_MODEL_PATH)
   foreach(_candidate IN ITEMS
@@ -24,6 +26,17 @@ if(NOT NEP_ADAPTERS_NEP89_MODEL_PATH)
     if(EXISTS "${_candidate}")
       set(NEP_ADAPTERS_NEP89_MODEL_PATH "${_candidate}" CACHE FILEPATH
         "Path to a nep89 model file for large-model tests and benchmarks" FORCE)
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(NOT NEP_ADAPTERS_QNEP_TEST_DATA_DIR)
+  foreach(_candidate IN ITEMS
+      "${PROJECT_SOURCE_DIR}/../NEP_CPU/test_qnep")
+    if(EXISTS "${_candidate}/nep.txt" AND EXISTS "${_candidate}/xyz.in")
+      set(NEP_ADAPTERS_QNEP_TEST_DATA_DIR "${_candidate}" CACHE PATH
+        "Path to qNEP test data containing nep.txt and xyz.in" FORCE)
       break()
     endif()
   endforeach()
