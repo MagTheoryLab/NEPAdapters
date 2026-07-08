@@ -93,6 +93,23 @@ double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& r
   return out;
 }
 
+std::vector<double> read_reference_vector(const std::string& path, const std::string& wanted) {
+  std::ifstream in(path);
+  std::string label;
+  std::size_t count = 0;
+  while (in >> label >> count) {
+    std::vector<double> values(count, 0.0);
+    for (double& value : values) {
+      in >> value;
+    }
+    if (label == wanted) {
+      return values;
+    }
+  }
+  std::cerr << "missing spin reference block: " << wanted << '\n';
+  std::exit(EXIT_FAILURE);
+}
+
 double expected_energy(const std::vector<double>& spins_aos3, double spin_baseline = 0.0) {
   double energy = 0.0;
   for (int atom = 0; atom < kAtomCount; ++atom) {
@@ -354,6 +371,89 @@ bool run_lammps_matches_batch_n(
               << " force_diff=" << force_diff
               << " mforce_diff=" << mforce_diff
               << " virial_diff=" << virial_diff << '\n';
+    return false;
+  }
+  return true;
+}
+
+bool check_spin_fixture_reference(NepaModel* model, const std::string& reference_path) {
+  constexpr int atom_count = 4;
+  const std::vector<double> positions = {
+      0.2, 0.2, 0.2,
+      3.7, 0.3, 0.2,
+      0.4, 3.6, 0.5,
+      1.8, 1.7, 3.5};
+  const std::vector<double> spins = {
+      1.0, 0.2, 0.0,
+      0.4, -0.3, 0.7,
+      -0.2, 0.8, 0.5,
+      0.6, 0.1, -0.4};
+  std::int32_t atom_counts[1] = {atom_count};
+  std::int32_t atom_offsets[1] = {0};
+  std::int32_t types[atom_count] = {0, 0, 0, 0};
+  double box[9] = {4.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0};
+  std::int32_t pbc[3] = {1, 1, 1};
+
+  NepaStructureBatch batch{};
+  batch.num_structures = 1;
+  batch.total_atoms = atom_count;
+  batch.atom_counts = atom_counts;
+  batch.atom_offsets = atom_offsets;
+  batch.types = types;
+  batch.positions_aos3 = positions.data();
+  batch.spins_aos3 = spins.data();
+  batch.boxes_row_major9 = box;
+  batch.pbc_flags3 = pbc;
+
+  NepaModelInfo info{};
+  if (nepa_model_info(model, &info) != NEPA_STATUS_OK || info.descriptor_dim != 88) {
+    return false;
+  }
+
+  std::vector<double> energy(1, 0.0);
+  std::vector<double> potential(atom_count, 0.0);
+  std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> mforces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> virial(9, 0.0);
+  NepaFindForceResult result{};
+  result.energy_per_structure = energy.data();
+  result.potential_per_atom = potential.data();
+  result.forces_aos3 = forces.data();
+  result.mforces_aos3 = mforces.data();
+  result.virials_row_major9 = virial.data();
+  if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  std::vector<double> descriptors(
+      static_cast<std::size_t>(atom_count) * info.descriptor_dim, 0.0);
+  NepaFindDescriptorResult descriptor_result{};
+  descriptor_result.descriptors = descriptors.data();
+  if (nepa_find_descriptors(model, &batch, &descriptor_result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  const double energy_diff =
+      max_abs_diff(energy, read_reference_vector(reference_path, "energy_total"));
+  const double potential_diff =
+      max_abs_diff(potential, read_reference_vector(reference_path, "energy_atom"));
+  const double force_diff =
+      max_abs_diff(forces, read_reference_vector(reference_path, "force"));
+  const double mforce_diff =
+      max_abs_diff(mforces, read_reference_vector(reference_path, "mforce"));
+  const double virial_diff =
+      max_abs_diff(virial, read_reference_vector(reference_path, "virial9"));
+  const double descriptor_diff =
+      max_abs_diff(descriptors, read_reference_vector(reference_path, "descriptor"));
+  if (energy_diff > 1.0e-10 || potential_diff > 1.0e-10 ||
+      force_diff > 1.0e-10 || mforce_diff > 1.0e-10 ||
+      virial_diff > 1.0e-9 || descriptor_diff > 1.0e-10) {
+    std::cerr << "spin fixture reference mismatch: energy_diff=" << energy_diff
+              << " potential_diff=" << potential_diff
+              << " force_diff=" << force_diff
+              << " mforce_diff=" << mforce_diff
+              << " virial_diff=" << virial_diff
+              << " descriptor_diff=" << descriptor_diff << '\n';
     return false;
   }
   return true;
@@ -629,7 +729,11 @@ int main() {
       nepa_load_model("cpu_opt", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &fixture_numeric_model) ==
           NEPA_STATUS_OK &&
       fixture_numeric_model != nullptr &&
-      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins);
+      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins)
+#ifdef NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE
+      && check_spin_fixture_reference(fixture_numeric_model, NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE)
+#endif
+      ;
   nepa_free_model(fixture_numeric_model);
 #else
   const bool fixture_numeric_ok = true;

@@ -4805,6 +4805,31 @@ void add_spin_vjp(
     grad_spin[static_cast<std::size_t>(2) * N + atom] += scale * sz;
   }
 
+  int geom_offset = 2 + 4 * C + C;
+  if (l_max >= 1) {
+    geom_offset += 3 * C;
+  }
+  for (int ell = 2; ell <= l_max; ++ell) {
+    geom_offset += C;
+  }
+  for (int atom = 0; atom < N; ++atom) {
+    if (!active(paramb.spin_dof_type_active, type[atom])) {
+      continue;
+    }
+    const std::array<double, 3> s = {spin(atom, 0), spin(atom, 1), spin(atom, 2)};
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(atom, geom_offset + c);
+      const double* g = block(cache.geom, atom, c, 9);
+      for (int a = 0; a < 3; ++a) {
+        double gs = 0.0;
+        for (int b = 0; b < 3; ++b) {
+          gs += (g[3 * a + b] + g[3 * b + a]) * s[b];
+        }
+        grad_spin[static_cast<std::size_t>(a) * N + atom] += alpha * gs;
+      }
+    }
+  }
+
 #if defined(_OPENMP)
   const int num_threads = omp_get_max_threads();
 #else
@@ -4996,14 +5021,11 @@ void add_spin_vjp(
       const double alpha = fp(edge.i, offset + c);
       const double* g = block(cache.geom, edge.i, c, 9);
       for (int a = 0; a < 3; ++a) {
-        double gs = 0.0;
         for (int b = 0; b < 3; ++b) {
-          gs += g[3 * a + b] * edge.si[b];
           const double gd = alpha * edge.si[a] * edge.si[b];
           grad_weight[c] += gd * rr[3 * a + b];
           ge9[3 * a + b] += gd * edge.weights[c];
         }
-        grad_si[a] += 2.0 * alpha * gs;
       }
     }
     add_stf_outer_vjp(ge9, edge.rhat, edge.rhat, grad_rhat, grad_rhat);

@@ -459,6 +459,7 @@ if(TARGET NEPAdapters::cpu_opt)
     nep_adapters_cpu_opt_spin_test
     PRIVATE
       NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+      NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
   )
   add_test(
     NAME nep_adapters_cpu_opt_spin_test
