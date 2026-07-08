@@ -3984,18 +3984,43 @@ void fill_spin_monomials(const std::array<double, 3>& u, double* m2, double* m3,
   const double x2 = x * x;
   const double y2 = y * y;
   const double z2 = z * z;
-  const double powx[5] = {1.0, x, x2, x2 * x, x2 * x2};
-  const double powy[5] = {1.0, y, y2, y2 * y, y2 * y2};
-  const double powz[5] = {1.0, z, z2, z2 * z, z2 * z2};
-  for (int k = 0; k < kSpinDeg2Count; ++k) {
-    m2[k] = powx[kSpinDeg2Exp[k][0]] * powy[kSpinDeg2Exp[k][1]] * powz[kSpinDeg2Exp[k][2]];
-  }
-  for (int k = 0; k < kSpinDeg3Count; ++k) {
-    m3[k] = powx[kSpinDeg3Exp[k][0]] * powy[kSpinDeg3Exp[k][1]] * powz[kSpinDeg3Exp[k][2]];
-  }
-  for (int k = 0; k < kSpinDeg4Count; ++k) {
-    m4[k] = powx[kSpinDeg4Exp[k][0]] * powy[kSpinDeg4Exp[k][1]] * powz[kSpinDeg4Exp[k][2]];
-  }
+  const double xy = x * y;
+  const double xz = x * z;
+  const double yz = y * z;
+  const double x3 = x2 * x;
+  const double y3 = y2 * y;
+  const double z3 = z2 * z;
+  m2[0] = x2;
+  m2[1] = y2;
+  m2[2] = z2;
+  m2[3] = xy;
+  m2[4] = xz;
+  m2[5] = yz;
+  m3[0] = x3;
+  m3[1] = y3;
+  m3[2] = z3;
+  m3[3] = x2 * y;
+  m3[4] = x2 * z;
+  m3[5] = x * y2;
+  m3[6] = y2 * z;
+  m3[7] = x * z2;
+  m3[8] = y * z2;
+  m3[9] = xy * z;
+  m4[0] = x2 * x2;
+  m4[1] = y2 * y2;
+  m4[2] = z2 * z2;
+  m4[3] = x3 * y;
+  m4[4] = x3 * z;
+  m4[5] = x * y3;
+  m4[6] = y3 * z;
+  m4[7] = x * z3;
+  m4[8] = y * z3;
+  m4[9] = x2 * y2;
+  m4[10] = x2 * z2;
+  m4[11] = y2 * z2;
+  m4[12] = x2 * yz;
+  m4[13] = y2 * xz;
+  m4[14] = z2 * xy;
 }
 
 double dot_spin_terms(const double* a, const double* b, const int count)
