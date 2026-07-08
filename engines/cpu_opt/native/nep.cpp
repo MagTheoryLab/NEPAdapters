@@ -1026,6 +1026,51 @@ struct LammpsThreadLocalScratchView {
 
 constexpr int kLammpsTotalVirialStride = 8;
 
+inline std::size_t lammps_vector_index(const int row, const int d, const int stride)
+{
+  (void)stride;
+  return static_cast<std::size_t>(row) * 3 + d;
+}
+
+inline std::size_t lammps_virial_index(const int row, const int d, const int stride)
+{
+  (void)stride;
+  return static_cast<std::size_t>(row) * 9 + d;
+}
+
+inline void add_lammps_force3(
+  double* force, const int row, const int stride, const double fx, const double fy, const double fz)
+{
+  force[lammps_vector_index(row, 0, stride)] += fx;
+  force[lammps_vector_index(row, 1, stride)] += fy;
+  force[lammps_vector_index(row, 2, stride)] += fz;
+}
+
+inline void add_lammps_virial9(
+  double* virial,
+  const int row,
+  const int stride,
+  const double v00,
+  const double v11,
+  const double v22,
+  const double v01,
+  const double v02,
+  const double v12,
+  const double v10,
+  const double v20,
+  const double v21)
+{
+  virial[lammps_virial_index(row, 0, stride)] += v00;
+  virial[lammps_virial_index(row, 1, stride)] += v11;
+  virial[lammps_virial_index(row, 2, stride)] += v22;
+  virial[lammps_virial_index(row, 3, stride)] += v01;
+  virial[lammps_virial_index(row, 4, stride)] += v02;
+  virial[lammps_virial_index(row, 5, stride)] += v12;
+  virial[lammps_virial_index(row, 6, stride)] += v10;
+  virial[lammps_virial_index(row, 7, stride)] += v20;
+  virial[lammps_virial_index(row, 8, stride)] += v21;
+}
+
 struct LammpsAngularEdgeCacheView {
   int num_centers = 0;
   int n_max_angular_plus_1 = 0;
@@ -1215,9 +1260,9 @@ void zero_lammps_thread_local_scratch(
       std::fill(local_force, local_force + static_cast<std::size_t>(3) * force_rows, 0.0);
     } else {
       for (int row : touched_rows) {
-        local_force[0 * force_rows + row] = 0.0;
-        local_force[1 * force_rows + row] = 0.0;
-        local_force[2 * force_rows + row] = 0.0;
+        local_force[lammps_vector_index(row, 0, force_rows)] = 0.0;
+        local_force[lammps_vector_index(row, 1, force_rows)] = 0.0;
+        local_force[lammps_vector_index(row, 2, force_rows)] = 0.0;
       }
     }
 
@@ -1228,9 +1273,9 @@ void zero_lammps_thread_local_scratch(
         std::fill(local_mforce, local_mforce + static_cast<std::size_t>(3) * force_rows, 0.0);
       } else {
         for (int row : touched_rows) {
-          local_mforce[0 * force_rows + row] = 0.0;
-          local_mforce[1 * force_rows + row] = 0.0;
-          local_mforce[2 * force_rows + row] = 0.0;
+          local_mforce[lammps_vector_index(row, 0, force_rows)] = 0.0;
+          local_mforce[lammps_vector_index(row, 1, force_rows)] = 0.0;
+          local_mforce[lammps_vector_index(row, 2, force_rows)] = 0.0;
         }
       }
     }
@@ -1240,10 +1285,9 @@ void zero_lammps_thread_local_scratch(
       if (scratch.dense_rows) {
         std::fill(local_virial, local_virial + static_cast<std::size_t>(9) * force_rows, 0.0);
       } else {
-        for (int d = 0; d < 9; ++d) {
-          double* local_virial_d = local_virial + static_cast<std::size_t>(d) * force_rows;
-          for (int row : touched_rows) {
-            local_virial_d[row] = 0.0;
+        for (int row : touched_rows) {
+          for (int d = 0; d < 9; ++d) {
+            local_virial[lammps_virial_index(row, d, force_rows)] = 0.0;
           }
         }
       }
@@ -1266,9 +1310,9 @@ void zero_lammps_mforce_scratch(const LammpsThreadLocalScratchView& scratch)
       std::fill(local_mforce, local_mforce + static_cast<std::size_t>(3) * force_rows, 0.0);
     } else {
       for (int row : touched_rows) {
-        local_mforce[0 * force_rows + row] = 0.0;
-        local_mforce[1 * force_rows + row] = 0.0;
-        local_mforce[2 * force_rows + row] = 0.0;
+        local_mforce[lammps_vector_index(row, 0, force_rows)] = 0.0;
+        local_mforce[lammps_vector_index(row, 1, force_rows)] = 0.0;
+        local_mforce[lammps_vector_index(row, 2, force_rows)] = 0.0;
       }
     }
   }
@@ -1294,10 +1338,10 @@ void reduce_lammps_thread_local_force_virial(
     double fy = 0.0;
     double fz = 0.0;
     for (int tid = 0; tid < num_threads; ++tid) {
-      const std::size_t base = (static_cast<std::size_t>(tid) * 3) * force_rows + n;
-      fx += scratch.force_private[base + static_cast<std::size_t>(0) * force_rows];
-      fy += scratch.force_private[base + static_cast<std::size_t>(1) * force_rows];
-      fz += scratch.force_private[base + static_cast<std::size_t>(2) * force_rows];
+      const std::size_t base = static_cast<std::size_t>(tid) * 3 * force_rows;
+      fx += scratch.force_private[base + lammps_vector_index(n, 0, force_rows)];
+      fy += scratch.force_private[base + lammps_vector_index(n, 1, force_rows)];
+      fz += scratch.force_private[base + lammps_vector_index(n, 2, force_rows)];
     }
     g_force[n][0] += fx;
     g_force[n][1] += fy;
@@ -1307,10 +1351,10 @@ void reduce_lammps_thread_local_force_virial(
       double my = 0.0;
       double mz = 0.0;
       for (int tid = 0; tid < num_threads; ++tid) {
-        const std::size_t base = (static_cast<std::size_t>(tid) * 3) * force_rows + n;
-        mx += scratch.mforce_private[base + static_cast<std::size_t>(0) * force_rows];
-        my += scratch.mforce_private[base + static_cast<std::size_t>(1) * force_rows];
-        mz += scratch.mforce_private[base + static_cast<std::size_t>(2) * force_rows];
+        const std::size_t base = static_cast<std::size_t>(tid) * 3 * force_rows;
+        mx += scratch.mforce_private[base + lammps_vector_index(n, 0, force_rows)];
+        my += scratch.mforce_private[base + lammps_vector_index(n, 1, force_rows)];
+        mz += scratch.mforce_private[base + lammps_vector_index(n, 2, force_rows)];
       }
       g_mforce[n][0] -= mx;
       g_mforce[n][1] -= my;
@@ -1337,8 +1381,8 @@ void reduce_lammps_thread_local_force_virial(
     for (int d = 0; d < 9; ++d) {
       double sum = 0.0;
       for (int tid = 0; tid < num_threads; ++tid) {
-        sum += scratch.virial_private[
-          (static_cast<std::size_t>(tid) * 9 + d) * force_rows + n];
+        const std::size_t base = static_cast<std::size_t>(tid) * 9 * force_rows;
+        sum += scratch.virial_private[base + lammps_virial_index(n, d, force_rows)];
       }
       g_virial[n][d] += sum;
     }
@@ -3108,9 +3152,7 @@ void find_force_radial_for_lammps(
             center_fx += f12[0];
             center_fy += f12[1];
             center_fz += f12[2];
-            local_force[0 * force_rows + n2] -= f12[0];
-            local_force[1 * force_rows + n2] -= f12[1];
-            local_force[2 * force_rows + n2] -= f12[2];
+            add_lammps_force3(local_force, n2, force_rows, -f12[0], -f12[1], -f12[2]);
 
             center_virial[0] -= r12[0] * f12[0]; // xx
             center_virial[1] -= r12[1] * f12[1]; // yy
@@ -3119,20 +3161,14 @@ void find_force_radial_for_lammps(
             center_virial[4] -= r12[0] * f12[2]; // xz
             center_virial[5] -= r12[1] * f12[2]; // yz
             if (local_virial) {
-              local_virial[0 * force_rows + n2] -= r12[0] * f12[0]; // xx
-              local_virial[1 * force_rows + n2] -= r12[1] * f12[1]; // yy
-              local_virial[2 * force_rows + n2] -= r12[2] * f12[2]; // zz
-              local_virial[3 * force_rows + n2] -= r12[0] * f12[1]; // xy
-              local_virial[4 * force_rows + n2] -= r12[0] * f12[2]; // xz
-              local_virial[5 * force_rows + n2] -= r12[1] * f12[2]; // yz
-              local_virial[6 * force_rows + n2] -= r12[1] * f12[0]; // yx
-              local_virial[7 * force_rows + n2] -= r12[2] * f12[0]; // zx
-              local_virial[8 * force_rows + n2] -= r12[2] * f12[1]; // zy
+              add_lammps_virial9(
+                local_virial, n2, force_rows,
+                -r12[0] * f12[0], -r12[1] * f12[1], -r12[2] * f12[2],
+                -r12[0] * f12[1], -r12[0] * f12[2], -r12[1] * f12[2],
+                -r12[1] * f12[0], -r12[2] * f12[0], -r12[2] * f12[1]);
             }
           }
-          local_force[0 * force_rows + n1] += center_fx;
-          local_force[1 * force_rows + n1] += center_fy;
-          local_force[2 * force_rows + n1] += center_fz;
+          add_lammps_force3(local_force, n1, force_rows, center_fx, center_fy, center_fz);
           for (int d = 0; d < 6; ++d) {
             local_total_virial[d] += center_virial[d];
           }
@@ -3200,12 +3236,8 @@ void find_force_radial_for_lammps(
             }
 #endif
 
-            local_force[0 * force_rows + n1] += f12[0];
-            local_force[1 * force_rows + n1] += f12[1];
-            local_force[2 * force_rows + n1] += f12[2];
-            local_force[0 * force_rows + n2] -= f12[0];
-            local_force[1 * force_rows + n2] -= f12[1];
-            local_force[2 * force_rows + n2] -= f12[2];
+            add_lammps_force3(local_force, n1, force_rows, f12[0], f12[1], f12[2]);
+            add_lammps_force3(local_force, n2, force_rows, -f12[0], -f12[1], -f12[2]);
 
             local_total_virial[0] -= r12[0] * f12[0]; // xx
             local_total_virial[1] -= r12[1] * f12[1]; // yy
@@ -3214,15 +3246,11 @@ void find_force_radial_for_lammps(
             local_total_virial[4] -= r12[0] * f12[2]; // xz
             local_total_virial[5] -= r12[1] * f12[2]; // yz
             if (local_virial) {
-              local_virial[0 * force_rows + n2] -= r12[0] * f12[0]; // xx
-              local_virial[1 * force_rows + n2] -= r12[1] * f12[1]; // yy
-              local_virial[2 * force_rows + n2] -= r12[2] * f12[2]; // zz
-              local_virial[3 * force_rows + n2] -= r12[0] * f12[1]; // xy
-              local_virial[4 * force_rows + n2] -= r12[0] * f12[2]; // xz
-              local_virial[5 * force_rows + n2] -= r12[1] * f12[2]; // yz
-              local_virial[6 * force_rows + n2] -= r12[1] * f12[0]; // yx
-              local_virial[7 * force_rows + n2] -= r12[2] * f12[0]; // zx
-              local_virial[8 * force_rows + n2] -= r12[2] * f12[1]; // zy
+              add_lammps_virial9(
+                local_virial, n2, force_rows,
+                -r12[0] * f12[0], -r12[1] * f12[1], -r12[2] * f12[2],
+                -r12[0] * f12[1], -r12[0] * f12[2], -r12[1] * f12[2],
+                -r12[1] * f12[0], -r12[2] * f12[0], -r12[2] * f12[1]);
             }
           }
         }
@@ -3423,9 +3451,7 @@ void find_force_angular_for_lammps(
             center_fx += f12[0];
             center_fy += f12[1];
             center_fz += f12[2];
-            local_force[0 * force_rows + n2] -= f12[0];
-            local_force[1 * force_rows + n2] -= f12[1];
-            local_force[2 * force_rows + n2] -= f12[2];
+            add_lammps_force3(local_force, n2, force_rows, -f12[0], -f12[1], -f12[2]);
 
             center_virial[0] -= r12[0] * f12[0]; // xx
             center_virial[1] -= r12[1] * f12[1]; // yy
@@ -3434,20 +3460,14 @@ void find_force_angular_for_lammps(
             center_virial[4] -= r12[0] * f12[2]; // xz
             center_virial[5] -= r12[1] * f12[2]; // yz
             if (local_virial) {
-              local_virial[0 * force_rows + n2] -= r12[0] * f12[0]; // xx
-              local_virial[1 * force_rows + n2] -= r12[1] * f12[1]; // yy
-              local_virial[2 * force_rows + n2] -= r12[2] * f12[2]; // zz
-              local_virial[3 * force_rows + n2] -= r12[0] * f12[1]; // xy
-              local_virial[4 * force_rows + n2] -= r12[0] * f12[2]; // xz
-              local_virial[5 * force_rows + n2] -= r12[1] * f12[2]; // yz
-              local_virial[6 * force_rows + n2] -= r12[1] * f12[0]; // yx
-              local_virial[7 * force_rows + n2] -= r12[2] * f12[0]; // zx
-              local_virial[8 * force_rows + n2] -= r12[2] * f12[1]; // zy
+              add_lammps_virial9(
+                local_virial, n2, force_rows,
+                -r12[0] * f12[0], -r12[1] * f12[1], -r12[2] * f12[2],
+                -r12[0] * f12[1], -r12[0] * f12[2], -r12[1] * f12[2],
+                -r12[1] * f12[0], -r12[2] * f12[0], -r12[2] * f12[1]);
             }
           }
-          local_force[0 * force_rows + n1] += center_fx;
-          local_force[1 * force_rows + n1] += center_fy;
-          local_force[2 * force_rows + n1] += center_fz;
+          add_lammps_force3(local_force, n1, force_rows, center_fx, center_fy, center_fz);
           for (int d = 0; d < 6; ++d) {
             local_total_virial[d] += center_virial[d];
           }
@@ -3516,12 +3536,8 @@ void find_force_angular_for_lammps(
           }
 #endif
 
-          local_force[0 * force_rows + n1] += f12[0];
-          local_force[1 * force_rows + n1] += f12[1];
-          local_force[2 * force_rows + n1] += f12[2];
-          local_force[0 * force_rows + n2] -= f12[0];
-          local_force[1 * force_rows + n2] -= f12[1];
-          local_force[2 * force_rows + n2] -= f12[2];
+          add_lammps_force3(local_force, n1, force_rows, f12[0], f12[1], f12[2]);
+          add_lammps_force3(local_force, n2, force_rows, -f12[0], -f12[1], -f12[2]);
 
           local_total_virial[0] -= r12[0] * f12[0]; // xx
           local_total_virial[1] -= r12[1] * f12[1]; // yy
@@ -3530,15 +3546,11 @@ void find_force_angular_for_lammps(
           local_total_virial[4] -= r12[0] * f12[2]; // xz
           local_total_virial[5] -= r12[1] * f12[2]; // yz
           if (local_virial) {
-            local_virial[0 * force_rows + n2] -= r12[0] * f12[0]; // xx
-            local_virial[1 * force_rows + n2] -= r12[1] * f12[1]; // yy
-            local_virial[2 * force_rows + n2] -= r12[2] * f12[2]; // zz
-            local_virial[3 * force_rows + n2] -= r12[0] * f12[1]; // xy
-            local_virial[4 * force_rows + n2] -= r12[0] * f12[2]; // xz
-            local_virial[5 * force_rows + n2] -= r12[1] * f12[2]; // yz
-            local_virial[6 * force_rows + n2] -= r12[1] * f12[0]; // yx
-            local_virial[7 * force_rows + n2] -= r12[2] * f12[0]; // zx
-            local_virial[8 * force_rows + n2] -= r12[2] * f12[1]; // zy
+            add_lammps_virial9(
+              local_virial, n2, force_rows,
+              -r12[0] * f12[0], -r12[1] * f12[1], -r12[2] * f12[2],
+              -r12[0] * f12[1], -r12[0] * f12[2], -r12[1] * f12[2],
+              -r12[1] * f12[0], -r12[2] * f12[0], -r12[2] * f12[1]);
           }
         }
       }
@@ -3720,12 +3732,8 @@ void find_force_ZBL_for_lammps(
           }
           double f2 = fp * d12inv * 0.5;
           double f12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
-          local_force[0 * force_rows + n1] += f12[0];
-          local_force[1 * force_rows + n1] += f12[1];
-          local_force[2 * force_rows + n1] += f12[2];
-          local_force[0 * force_rows + n2] -= f12[0];
-          local_force[1 * force_rows + n2] -= f12[1];
-          local_force[2 * force_rows + n2] -= f12[2];
+          add_lammps_force3(local_force, n1, force_rows, f12[0], f12[1], f12[2]);
+          add_lammps_force3(local_force, n2, force_rows, -f12[0], -f12[1], -f12[2]);
           local_total_virial[0] -= r12[0] * f12[0]; // xx
           local_total_virial[1] -= r12[1] * f12[1]; // yy
           local_total_virial[2] -= r12[2] * f12[2]; // zz
@@ -3733,15 +3741,11 @@ void find_force_ZBL_for_lammps(
           local_total_virial[4] -= r12[0] * f12[2]; // xz
           local_total_virial[5] -= r12[1] * f12[2]; // yz
           if (local_virial) {
-            local_virial[0 * force_rows + n2] -= r12[0] * f12[0]; // xx
-            local_virial[1 * force_rows + n2] -= r12[1] * f12[1]; // yy
-            local_virial[2 * force_rows + n2] -= r12[2] * f12[2]; // zz
-            local_virial[3 * force_rows + n2] -= r12[0] * f12[1]; // xy
-            local_virial[4 * force_rows + n2] -= r12[0] * f12[2]; // xz
-            local_virial[5 * force_rows + n2] -= r12[1] * f12[2]; // yz
-            local_virial[6 * force_rows + n2] -= r12[1] * f12[0]; // yx
-            local_virial[7 * force_rows + n2] -= r12[2] * f12[0]; // zx
-            local_virial[8 * force_rows + n2] -= r12[2] * f12[1]; // zy
+            add_lammps_virial9(
+              local_virial, n2, force_rows,
+              -r12[0] * f12[0], -r12[1] * f12[1], -r12[2] * f12[2],
+              -r12[0] * f12[1], -r12[0] * f12[2], -r12[1] * f12[2],
+              -r12[1] * f12[0], -r12[2] * f12[0], -r12[2] * f12[1]);
           }
           total_potential += f * 0.5;
           if (g_potential) {
@@ -4569,15 +4573,15 @@ void add_lammps_spin_virial(
   const double v10 = -ry * grad_rij[0];
   const double v20 = -rz * grad_rij[0];
   const double v21 = -rz * grad_rij[1];
-  virial[0 * stride + row] += v00;
-  virial[1 * stride + row] += v11;
-  virial[2 * stride + row] += v22;
-  virial[3 * stride + row] += v01;
-  virial[4 * stride + row] += v02;
-  virial[5 * stride + row] += v12;
-  virial[6 * stride + row] += v10;
-  virial[7 * stride + row] += v20;
-  virial[8 * stride + row] += v21;
+  virial[lammps_virial_index(row, 0, stride)] += v00;
+  virial[lammps_virial_index(row, 1, stride)] += v11;
+  virial[lammps_virial_index(row, 2, stride)] += v22;
+  virial[lammps_virial_index(row, 3, stride)] += v01;
+  virial[lammps_virial_index(row, 4, stride)] += v02;
+  virial[lammps_virial_index(row, 5, stride)] += v12;
+  virial[lammps_virial_index(row, 6, stride)] += v10;
+  virial[lammps_virial_index(row, 7, stride)] += v20;
+  virial[lammps_virial_index(row, 8, stride)] += v21;
 }
 
 void add_lammps_spin_total_virial(
@@ -5792,10 +5796,17 @@ void add_spin_chiral_gradient(
     std::array<double, 3> grad_rij = {0.0, 0.0, 0.0};
     for (int d = 0; d < 3; ++d) {
       grad_rij[d] = grad_dist * edge.rhat[d] + (gu[d] - dot_r * edge.rhat[d]) / edge.dist;
-      local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
-      local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
-      local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_si[e * 3 + d];
-      local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.j] += grad_sj[e * 3 + d];
+      if (use_lammps_scratch) {
+        local_force[lammps_vector_index(edge.i, d, force_stride)] += grad_rij[d];
+        local_force[lammps_vector_index(edge.j, d, force_stride)] -= grad_rij[d];
+        local_grad_spin[lammps_vector_index(edge.i, d, force_stride)] += grad_si[e * 3 + d];
+        local_grad_spin[lammps_vector_index(edge.j, d, force_stride)] += grad_sj[e * 3 + d];
+      } else {
+        local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
+        local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
+        local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_si[e * 3 + d];
+        local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.j] += grad_sj[e * 3 + d];
+      }
     }
     if (use_lammps_scratch) {
       if (local_virial) {
@@ -6071,7 +6082,11 @@ void add_spin_gradient(
     }
     auto add_local_grad_spin = [&](const int atom, const std::array<double, 3>& g) {
       for (int d = 0; d < 3; ++d) {
-        local_grad_spin[static_cast<std::size_t>(d) * force_stride + atom] += g[d];
+        if (use_lammps_scratch) {
+          local_grad_spin[lammps_vector_index(atom, d, force_stride)] += g[d];
+        } else {
+          local_grad_spin[static_cast<std::size_t>(d) * force_stride + atom] += g[d];
+        }
       }
     };
     std::array<double, MAX_NUM_N> grad_weight;
@@ -6281,8 +6296,13 @@ void add_spin_gradient(
     }
     for (int d = 0; d < 3; ++d) {
       grad_rij[d] = grad_dist * edge.rhat[d] + (grad_rhat[d] - dot_r * edge.rhat[d]) / edge.dist;
-      local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
-      local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
+      if (use_lammps_scratch) {
+        local_force[lammps_vector_index(edge.i, d, force_stride)] += grad_rij[d];
+        local_force[lammps_vector_index(edge.j, d, force_stride)] -= grad_rij[d];
+      } else {
+        local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
+        local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
+      }
     }
     if (use_lammps_scratch) {
       if (local_virial) {
