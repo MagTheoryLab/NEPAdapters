@@ -8321,6 +8321,17 @@ void NEP::compute_for_lammps(
   lammps_spin_spins_soa.resize(static_cast<std::size_t>(atom_capacity) * 3);
   lammps_spin_descriptor.resize(static_cast<std::size_t>(inum) * annmb.dim);
 
+#if defined(_OPENMP)
+  const int num_threads = omp_get_max_threads();
+  const bool use_parallel_atoms = num_threads > 1 && atom_capacity > 256;
+#else
+  const int num_threads = 1;
+  const bool use_parallel_atoms = false;
+#endif
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_atoms)
+#endif
   for (int atom = 0; atom < atom_capacity; ++atom) {
     lammps_spin_types[atom] = type_map[type[atom]];
     const double mu = spins[atom][3];
@@ -8430,6 +8441,9 @@ void NEP::compute_for_lammps(
     phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos,
     lammps_spin_descriptor.data(), &lammps_radial_cache);
 
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) reduction(+:total_potential) if (use_parallel_atoms)
+#endif
   for (int ii = 0; ii < inum; ++ii) {
     const int atom = ilist[ii];
     double F = 0.0;
@@ -8453,7 +8467,6 @@ void NEP::compute_for_lammps(
 
   LammpsThreadLocalScratchView lammps_scratch;
 #if defined(_OPENMP)
-  const int num_threads = omp_get_max_threads();
   if (num_threads > 1 && inum > 0) {
     const int force_rows =
       infer_lammps_touched_rows(
