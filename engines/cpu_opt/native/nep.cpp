@@ -5771,27 +5771,21 @@ void add_spin_gradient(
     }
     offset += C;
 
-    auto add_density_gradient = [&](const int width, const std::vector<double>& density,
-                           const double* value,
-                           const double mod_value,
-                           const bool has_mod,
-                           const int q_offset,
-                           const std::vector<double>* other_density,
-                           double* grad_value,
-                           double& grad_mod) {
+    auto add_angular_density_gradient = [&](
+      const int width,
+      const std::vector<double>& density,
+      const double* value,
+      const int q_offset,
+      double* grad_value) {
       for (int c = 0; c < C; ++c) {
         const double* self = block(density, edge.i, c, width);
-        const double* other = other_density ? block(*other_density, edge.i, c, width) : nullptr;
-        const double alpha = fp(edge.i, q_offset + c);
-        const double m = has_mod ? mod_value : 1.0;
+        const double alpha2 = 2.0 * fp(edge.i, q_offset + c);
+        const double w = edge.weights[c];
         double grad_weight_c = grad_weight[c];
         for (int k = 0; k < width; ++k) {
-          const double gd = other ? alpha * other[k] : 2.0 * alpha * self[k];
-          grad_weight_c += gd * value[k] * m;
-          grad_value[k] += gd * edge.weights[c] * m;
-          if (has_mod) {
-            grad_mod += gd * edge.weights[c] * value[k];
-          }
+          const double gd = alpha2 * self[k];
+          grad_weight_c += gd * value[k];
+          grad_value[k] += gd * w;
         }
         grad_weight[c] = grad_weight_c;
       }
@@ -5883,7 +5877,7 @@ void add_spin_gradient(
         value[width++] = y * edge.sj[2];
       }
       double ge[27] = {0.0};
-      add_density_gradient(width, angular, value, 1.0, false, offset, nullptr, ge, grad_dot);
+      add_angular_density_gradient(width, angular, value, offset, ge);
       apply_angular(ell, ylm, ylm_width, ge);
       offset += C;
     }
