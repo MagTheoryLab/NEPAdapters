@@ -5959,7 +5959,7 @@ void add_spin_gradient(
           gw1 += gd1 * v;
           gw2 += gd2 * v;
           gw3 += gd3 * v;
-          grad_value[k] += gd0 * w0 + gd1 * w1 + gd2 * w2 + gd3 * w3;
+          grad_value[k] = gd0 * w0 + gd1 * w1 + gd2 * w2 + gd3 * w3;
         }
         grad_weight[0] = gw0;
         grad_weight[1] = gw1;
