@@ -4518,14 +4518,45 @@ void fill_spin_descriptor(
 #endif
   const bool use_parallel_edges = num_threads > 1 && N > 8;
   const bool keep_edges = cache_out || paramb.spin_chiral;
+  // ponytail: direct edge fill wins on large LMP cases; retune if benchmark mix changes.
+  const bool direct_edge_cache =
+    keep_edges && use_parallel_edges && use_lammps_edges && loop_count >= 4096;
+  std::vector<int> edge_offsets;
   std::vector<std::vector<SpinEdge>> private_edges(
-    keep_edges && use_parallel_edges ? static_cast<std::size_t>(num_threads) : 0);
+    keep_edges && use_parallel_edges && !direct_edge_cache ? static_cast<std::size_t>(num_threads) : 0);
   if (keep_edges) {
     std::size_t edge_capacity = 0;
     for (int idx = 0; idx < loop_count; ++idx) {
       edge_capacity += static_cast<std::size_t>(NN[center_atom(idx)]);
     }
-    if (use_parallel_edges) {
+    if (direct_edge_cache) {
+      edge_offsets.assign(static_cast<std::size_t>(loop_count) + 1, 0);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads)
+#endif
+      for (int idx = 0; idx < loop_count; ++idx) {
+        const int i = center_atom(idx);
+        int count = 0;
+        for (int n = 0; n < NN[i]; ++n) {
+          const int j = lammps_NL[i][n];
+          const double dx = lammps_pos[j][0] - lammps_pos[i][0];
+          const double dy = lammps_pos[j][1] - lammps_pos[i][1];
+          const double dz = lammps_pos[j][2] - lammps_pos[i][2];
+          const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+          if (d > 1.0e-12 && d < paramb.spin_cutoff_radial &&
+              active(paramb.spin_dof_type_active, type[i]) &&
+              active(paramb.spin_env_type_active, type[j])) {
+            ++count;
+          }
+        }
+        edge_offsets[static_cast<std::size_t>(idx) + 1] = count;
+      }
+      for (int idx = 0; idx < loop_count; ++idx) {
+        edge_offsets[static_cast<std::size_t>(idx) + 1] +=
+          edge_offsets[static_cast<std::size_t>(idx)];
+      }
+      cache.edges.resize(static_cast<std::size_t>(edge_offsets[loop_count]));
+    } else if (use_parallel_edges) {
       const std::size_t reserve_per_thread =
         edge_capacity / static_cast<std::size_t>(num_threads) + 64;
       for (auto& thread_edges : private_edges) {
@@ -4542,6 +4573,7 @@ void fill_spin_descriptor(
 #endif
   for (int idx = 0; idx < loop_count; ++idx) {
     const int i = center_atom(idx);
+    int direct_edge_offset = direct_edge_cache ? edge_offsets[static_cast<std::size_t>(idx)] : 0;
 #if defined(_OPENMP)
     const int tid = omp_get_thread_num();
 #else
@@ -4665,7 +4697,9 @@ void fill_spin_descriptor(
       add_density(rho0_dot, C, edge.i, sj_value, 3, edge.weights.data(), edge.dot);
       add_density(raw1_dot, C, edge.i, raw1_value, 9, edge.weights.data(), edge.dot);
       if (keep_edges) {
-        if (use_parallel_edges) {
+        if (direct_edge_cache) {
+          cache.edges[static_cast<std::size_t>(direct_edge_offset++)] = std::move(edge);
+        } else if (use_parallel_edges) {
           private_edges[static_cast<std::size_t>(tid)].push_back(std::move(edge));
         } else {
           cache.edges.push_back(std::move(edge));
@@ -4693,7 +4727,7 @@ void fill_spin_descriptor(
   }
   add_phase(&SpinPhaseBreakdown::unpack);
 
-  if (keep_edges && use_parallel_edges) {
+  if (keep_edges && use_parallel_edges && !direct_edge_cache) {
     std::size_t edge_count = 0;
     for (const auto& thread_edges : private_edges) {
       edge_count += thread_edges.size();
