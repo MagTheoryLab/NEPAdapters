@@ -6329,6 +6329,7 @@ void add_spin_gradient(
 
   if (phase) {
     phase->gradient_nonchiral += nep_phase_elapsed(phase_mark);
+    phase_mark = NepPhaseClock::now();
   }
   add_spin_chiral_gradient(
     paramb, annmb, N, type, spins, cache, Fp, grad_spin, force, virial,
