@@ -32,6 +32,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <sstream>
 #include <stdio.h>
@@ -4680,7 +4681,8 @@ void fill_spin_descriptor(
   const int B = paramb.spin_basis_size + 1;
   const int l_max = paramb.spin_l_max;
   const int offset0 = paramb.struct_dim;
-  std::vector<double> q(static_cast<std::size_t>(N) * paramb.spin_dim, 0.0);
+  std::unique_ptr<double[]> q_storage(new double[static_cast<std::size_t>(N) * paramb.spin_dim]);
+  double* q = q_storage.get();
   SpinCache local_cache;
   SpinCache& cache = cache_out ? *cache_out : local_cache;
   clear_spin_cache(cache);
@@ -4746,6 +4748,15 @@ void fill_spin_descriptor(
     const double s2 = sx * sx + sy * sy + sz * sz;
     qref(atom, 0) = dof ? s2 : 0.0;
     qref(atom, 1) = dof ? s2 * s2 : 0.0;
+    for (int d = 2; d < 2 + 4 * C; ++d) {
+      qref(atom, d) = 0.0;
+    }
+    if (paramb.spin_chiral) {
+      const int chiral_offset = spin_descriptor_dim(C, l_max, false);
+      for (int d = chiral_offset; d < paramb.spin_dim; ++d) {
+        qref(atom, d) = 0.0;
+      }
+    }
   }
 
   cache.rho0.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
