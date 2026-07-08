@@ -6249,7 +6249,10 @@ void add_spin_gradient(
         value[width++] = y * sj[1];
         value[width++] = y * sj[2];
       }
-      double ge[27] = {0.0};
+      double ge[27];
+      if (C != 4) {
+        std::fill(ge, ge + width, 0.0);
+      }
       add_angular_density_gradient(width, angular, value, offset, ge);
       apply_angular(ell, ylm, ylm_width, ge);
       offset += C;
