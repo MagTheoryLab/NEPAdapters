@@ -136,6 +136,24 @@ std::vector<double> expected_mforce(const std::vector<double>& spins_aos3) {
   return out;
 }
 
+std::vector<double> make_lammps_spins4(const std::vector<double>& spins_aos3) {
+  const int atom_count = static_cast<int>(spins_aos3.size() / 3);
+  std::vector<double> out(static_cast<std::size_t>(atom_count) * 4, 0.0);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    const double sx = spins_aos3[3 * atom + 0];
+    const double sy = spins_aos3[3 * atom + 1];
+    const double sz = spins_aos3[3 * atom + 2];
+    const double mu = std::sqrt(sx * sx + sy * sy + sz * sz);
+    if (mu > 0.0) {
+      out[4 * atom + 0] = sx / mu;
+      out[4 * atom + 1] = sy / mu;
+      out[4 * atom + 2] = sz / mu;
+    }
+    out[4 * atom + 3] = mu;
+  }
+  return out;
+}
+
 struct BatchPrediction {
   double energy = 0.0;
   std::vector<double> forces;
@@ -315,12 +333,12 @@ bool run_lammps_matches_batch_n(
   std::vector<int> types(static_cast<std::size_t>(atom_count), 1);
   int type_map[2] = {-1, 0};
   std::vector<double> position_storage = positions;
-  std::vector<double> spin_storage = spins;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
   std::vector<double*> position_rows(static_cast<std::size_t>(atom_count));
   std::vector<double*> spin_rows(static_cast<std::size_t>(atom_count));
   for (int atom = 0; atom < atom_count; ++atom) {
     position_rows[static_cast<std::size_t>(atom)] = position_storage.data() + 3 * atom;
-    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 3 * atom;
+    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 4 * atom;
   }
 
   double total_potential = 0.0;
@@ -628,13 +646,13 @@ bool run_lammps(
   int types[kAtomCount] = {1, 1};
   int type_map[2] = {-1, 0};
   std::vector<double> position_storage = positions;
-  std::vector<double> spin_storage = spins;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
   double* position_rows[kAtomCount] = {
       position_storage.data(),
       position_storage.data() + 3};
   double* spin_rows[kAtomCount] = {
       spin_storage.data(),
-      spin_storage.data() + 3};
+      spin_storage.data() + 4};
 
   double total_potential = 0.0;
   double total_virial[6] = {};

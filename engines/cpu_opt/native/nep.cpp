@@ -2561,7 +2561,9 @@ void find_descriptor_for_lammps(
   std::vector<double>& ann_q_group_workspace,
   std::vector<double>& ann_hidden_workspace,
   std::vector<double>& ann_coeff_workspace,
-  std::vector<double>& ann_fp_group_workspace)
+  std::vector<double>& ann_fp_group_workspace,
+  double* g_descriptor = nullptr,
+  bool skip_ann = false)
 {
   double total_potential = 0.0;
   const int n_max_radial_plus_1 = paramb.n_max_radial + 1;
@@ -2576,7 +2578,7 @@ void find_descriptor_for_lammps(
     angular_cache->num_centers == N &&
     angular_cache->n_max_angular_plus_1 == n_max_angular_plus_1;
 #if defined(NEP_ADAPTERS_CPU_OPT_USE_CBLAS)
-  const bool use_batched_ann = paramb.version != 5;
+  const bool use_batched_ann = !skip_ann && paramb.version != 5;
 #else
   const bool use_batched_ann = false;
 #endif
@@ -2904,6 +2906,14 @@ void find_descriptor_for_lammps(
 
     for (int d = 0; d < annmb.dim; ++d) {
       q[d] = q[d] * paramb.q_scaler[d];
+    }
+    if (g_descriptor) {
+      for (int d = 0; d < annmb.dim; ++d) {
+        g_descriptor[static_cast<std::size_t>(d) * nlocal + n1] = q[d];
+      }
+    }
+    if (skip_ann) {
+      continue;
     }
 
     if (use_batched_ann) {
@@ -7429,10 +7439,10 @@ void NEP::compute_for_lammps(
 
 void NEP::compute_for_lammps(
   int nlocal,
-  int N,
-  int*,
-  int*,
-  int**,
+  int inum,
+  int* ilist,
+  int* NN,
+  int** NL,
   int* type,
   int* type_map,
   double** pos,
@@ -7444,62 +7454,270 @@ void NEP::compute_for_lammps(
   double** mforce,
   double** virial)
 {
+  const bool phase_timing = nep_phase_timer_enabled();
+  SpinPhaseBreakdown spin_phase;
+
   if (!spins) {
     throw std::runtime_error("spin LAMMPS path requires spins");
   }
-  std::vector<int> mapped_type(static_cast<std::size_t>(N));
-  std::vector<double> box(9, 0.0);
-  std::vector<double> position(static_cast<std::size_t>(N) * 3, 0.0);
-  std::vector<double> spin_soa(static_cast<std::size_t>(N) * 3, 0.0);
-  double min_pos[3] = {0.0, 0.0, 0.0};
-  double max_pos[3] = {0.0, 0.0, 0.0};
-  if (N > 0) {
-    for (int d = 0; d < 3; ++d) {
-      min_pos[d] = pos[0][d];
-      max_pos[d] = pos[0][d];
-    }
-    for (int atom = 1; atom < N; ++atom) {
-      for (int d = 0; d < 3; ++d) {
-        min_pos[d] = std::min(min_pos[d], pos[atom][d]);
-        max_pos[d] = std::max(max_pos[d], pos[atom][d]);
-      }
-    }
+  if (!mforce) {
+    throw std::runtime_error("spin LAMMPS path requires magnetic-force output");
   }
-  const double padding = paramb.rc_radial_max + 1.0;
-  for (int i = 0; i < 3; ++i) {
-    const double span = max_pos[i] - min_pos[i];
-    box[i * 3 + i] = std::max(span + 2.0 * padding, 2.6 * paramb.rc_radial_max);
-  }
-  for (int atom = 0; atom < N; ++atom) {
-    mapped_type[atom] = type_map[type[atom]];
-    for (int d = 0; d < 3; ++d) {
-      position[static_cast<std::size_t>(d) * N + atom] = pos[atom][d] - min_pos[d] + padding;
-      spin_soa[static_cast<std::size_t>(d) * N + atom] = spins[atom][d];
-    }
-  }
-  std::vector<double> pe(static_cast<std::size_t>(N), 0.0);
-  std::vector<double> force_soa(static_cast<std::size_t>(N) * 3, 0.0);
-  std::vector<double> virial_soa(static_cast<std::size_t>(N) * 9, 0.0);
-  std::vector<double> descriptor(static_cast<std::size_t>(N) * annmb.dim, 0.0);
-  std::vector<double> mforce_soa(static_cast<std::size_t>(N) * 3, 0.0);
-  compute(mapped_type, box, position, spin_soa, pe, force_soa, virial_soa, descriptor, mforce_soa);
 
+  int atom_capacity = nlocal;
+  int max_neighbors = 0;
+  for (int ii = 0; ii < inum; ++ii) {
+    const int i = ilist[ii];
+    atom_capacity = std::max(atom_capacity, i + 1);
+    max_neighbors = std::max(max_neighbors, NN[i]);
+    for (int jj = 0; jj < NN[i]; ++jj) {
+      atom_capacity = std::max(atom_capacity, NL[i][jj] + 1);
+    }
+  }
+
+  if (num_atoms < atom_capacity) {
+    Fp.resize(static_cast<std::size_t>(atom_capacity) * annmb.dim);
+    sum_fxyz.resize(
+      static_cast<std::size_t>(atom_capacity) * (paramb.n_max_angular + 1) * NUM_OF_ABC);
+    num_atoms = atom_capacity;
+  }
+
+  lammps_spin_types.resize(static_cast<std::size_t>(atom_capacity));
+  lammps_spin_spins_soa.resize(static_cast<std::size_t>(atom_capacity) * 3);
+  lammps_spin_descriptor.assign(
+    static_cast<std::size_t>(atom_capacity) * annmb.dim, 0.0);
+  lammps_spin_force_soa.assign(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
+  lammps_spin_mforce_soa.assign(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
+  lammps_spin_virial_soa.assign(static_cast<std::size_t>(atom_capacity) * 9, 0.0);
+  lammps_spin_NN.assign(static_cast<std::size_t>(atom_capacity), 0);
+  lammps_spin_NL.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
+  lammps_spin_x12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
+  lammps_spin_y12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
+  lammps_spin_z12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
+
+  for (int atom = 0; atom < atom_capacity; ++atom) {
+    lammps_spin_types[atom] = type_map[type[atom]];
+    const double mu = spins[atom][3];
+    for (int d = 0; d < 3; ++d) {
+      lammps_spin_spins_soa[static_cast<std::size_t>(d) * atom_capacity + atom] =
+        mu * spins[atom][d];
+    }
+  }
+
+  for (int ii = 0; ii < inum; ++ii) {
+    const int i = ilist[ii];
+    int count = 0;
+    for (int jj = 0; jj < NN[i]; ++jj) {
+      const int j = NL[i][jj];
+      const std::size_t index =
+        static_cast<std::size_t>(count) * atom_capacity + i;
+      lammps_spin_NL[index] = j;
+      lammps_spin_x12[index] = pos[j][0] - pos[i][0];
+      lammps_spin_y12[index] = pos[j][1] - pos[i][1];
+      lammps_spin_z12[index] = pos[j][2] - pos[i][2];
+      ++count;
+    }
+    lammps_spin_NN[i] = count;
+  }
+
+  std::fill(Fp.begin(), Fp.end(), 0.0);
+  std::fill(sum_fxyz.begin(), sum_fxyz.end(), 0.0);
   total_potential = 0.0;
   std::fill(total_virial, total_virial + 6, 0.0);
-  for (int atom = 0; atom < nlocal; ++atom) {
-    total_potential += pe[atom];
-    if (potential) {
-      potential[atom] = pe[atom];
+
+  LammpsRadialEdgeCacheView lammps_radial_cache;
+  LammpsAngularEdgeCacheView lammps_angular_cache;
+  const int n_max_radial_plus_1 = paramb.n_max_radial + 1;
+  const int n_max_angular_plus_1 = paramb.n_max_angular + 1;
+#if defined(_OPENMP)
+  const bool use_lammps_radial_cache = omp_get_max_threads() > 1;
+  const bool use_lammps_angular_cache = omp_get_max_threads() > 1;
+#else
+  const bool use_lammps_radial_cache = false;
+  const bool use_lammps_angular_cache = false;
+#endif
+  if (use_lammps_radial_cache && inum > 0 && n_max_radial_plus_1 > 0) {
+    lammps_radial_edge_offsets.resize(inum + 1);
+    int edge_count = 0;
+    for (int ii = 0; ii < inum; ++ii) {
+      const int i = ilist[ii];
+      lammps_radial_edge_offsets[ii] = edge_count;
+      edge_count += NN[i];
     }
-    for (int d = 0; d < 3; ++d) {
-      force[atom][d] += force_soa[static_cast<std::size_t>(d) * N + atom];
-      if (mforce) {
-        mforce[atom][d] += mforce_soa[static_cast<std::size_t>(d) * N + atom];
+    lammps_radial_edge_offsets[inum] = edge_count;
+    if (edge_count > 0) {
+      const std::size_t edge_count_size = static_cast<std::size_t>(edge_count);
+      const std::size_t coefficient_count =
+        edge_count_size * static_cast<std::size_t>(n_max_radial_plus_1);
+      lammps_radial_edge_neighbors.resize(edge_count_size);
+      lammps_radial_edge_x12.resize(edge_count_size);
+      lammps_radial_edge_y12.resize(edge_count_size);
+      lammps_radial_edge_z12.resize(edge_count_size);
+      lammps_radial_edge_d12.resize(edge_count_size);
+      lammps_radial_edge_gnp.resize(coefficient_count);
+
+      lammps_radial_cache.num_centers = inum;
+      lammps_radial_cache.n_max_radial_plus_1 = n_max_radial_plus_1;
+      lammps_radial_cache.offsets = lammps_radial_edge_offsets.data();
+      lammps_radial_cache.neighbors = lammps_radial_edge_neighbors.data();
+      lammps_radial_cache.x12 = lammps_radial_edge_x12.data();
+      lammps_radial_cache.y12 = lammps_radial_edge_y12.data();
+      lammps_radial_cache.z12 = lammps_radial_edge_z12.data();
+      lammps_radial_cache.d12 = lammps_radial_edge_d12.data();
+      lammps_radial_cache.gnp = lammps_radial_edge_gnp.data();
+    }
+  }
+  if (use_lammps_angular_cache && inum > 0 && n_max_angular_plus_1 > 0) {
+    lammps_angular_edge_offsets.resize(inum + 1);
+    int edge_count = 0;
+    for (int ii = 0; ii < inum; ++ii) {
+      const int i = ilist[ii];
+      lammps_angular_edge_offsets[ii] = edge_count;
+      edge_count += NN[i];
+    }
+    lammps_angular_edge_offsets[inum] = edge_count;
+    if (edge_count > 0) {
+      const std::size_t edge_count_size = static_cast<std::size_t>(edge_count);
+      const std::size_t coefficient_count =
+        edge_count_size * static_cast<std::size_t>(n_max_angular_plus_1);
+      lammps_angular_edge_neighbors.resize(edge_count_size);
+      lammps_angular_edge_x12.resize(edge_count_size);
+      lammps_angular_edge_y12.resize(edge_count_size);
+      lammps_angular_edge_z12.resize(edge_count_size);
+      lammps_angular_edge_d12.resize(edge_count_size);
+      lammps_angular_edge_gn.resize(coefficient_count);
+      lammps_angular_edge_gnp.resize(coefficient_count);
+
+      lammps_angular_cache.num_centers = inum;
+      lammps_angular_cache.n_max_angular_plus_1 = n_max_angular_plus_1;
+      lammps_angular_cache.offsets = lammps_angular_edge_offsets.data();
+      lammps_angular_cache.neighbors = lammps_angular_edge_neighbors.data();
+      lammps_angular_cache.x12 = lammps_angular_edge_x12.data();
+      lammps_angular_cache.y12 = lammps_angular_edge_y12.data();
+      lammps_angular_cache.z12 = lammps_angular_edge_z12.data();
+      lammps_angular_cache.d12 = lammps_angular_edge_d12.data();
+      lammps_angular_cache.gn = lammps_angular_edge_gn.data();
+      lammps_angular_cache.gnp = lammps_angular_edge_gnp.data();
+    }
+  }
+
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+  prepare_table_for_lammps(inum, ilist, NN, NL, type, type_map);
+#endif
+
+  find_descriptor_for_lammps(
+    paramb, annmb, atom_capacity, inum, ilist, NN, NL, type, type_map, pos,
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_radial.data(), gnp_radial.data(), gn_angular.data(), gnp_angular.data(),
+#endif
+    Fp.data(), sum_fxyz.data(), total_potential, potential, &lammps_radial_cache,
+    &lammps_angular_cache, ann_q_group, ann_hidden, ann_coeff, ann_fp_group,
+    lammps_spin_descriptor.data(), true);
+
+  SpinCache spin_cache;
+  fill_spin_descriptor(
+    paramb, annmb, atom_capacity, lammps_spin_NN.data(), lammps_spin_NL.data(),
+    lammps_spin_types.data(), lammps_spin_x12.data(), lammps_spin_y12.data(),
+    lammps_spin_z12.data(), lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(),
+    &spin_cache, phase_timing ? &spin_phase : nullptr);
+
+  for (int ii = 0; ii < inum; ++ii) {
+    const int atom = ilist[ii];
+    double q[MAX_DIM] = {0.0};
+    double F = 0.0;
+    double Fp_local[MAX_DIM] = {0.0};
+    double latent[MAX_NEURON] = {0.0};
+    const int mapped_type = lammps_spin_types[atom];
+    for (int d = 0; d < annmb.dim; ++d) {
+      q[d] = lammps_spin_descriptor[static_cast<std::size_t>(d) * atom_capacity + atom];
+    }
+    apply_ann_one_layer(
+      annmb.dim, annmb.num_neurons1, annmb.w0[mapped_type], annmb.b0[mapped_type],
+      annmb.w1[mapped_type], annmb.b1, q, F, Fp_local, latent, false, nullptr);
+    const double energy = F + spin_baseline[static_cast<std::size_t>(mapped_type)];
+    total_potential += energy;
+    if (potential) {
+      potential[atom] += energy;
+    }
+    for (int d = 0; d < annmb.dim; ++d) {
+      Fp[static_cast<std::size_t>(atom) * annmb.dim + d] =
+        Fp_local[d] * paramb.q_scaler[d];
+    }
+  }
+
+  LammpsThreadLocalScratchView lammps_scratch;
+#if defined(_OPENMP)
+  const int num_threads = omp_get_max_threads();
+  if (num_threads > 1 && inum > 0) {
+    const int force_rows =
+      infer_lammps_touched_rows(
+        inum, ilist, NN, NL, lammps_touched_rows, lammps_touched_marks,
+        lammps_touched_stamp);
+    if (force_rows > 0) {
+      const std::size_t force_size = static_cast<std::size_t>(num_threads) * 3 * force_rows;
+      const std::size_t total_virial_size = static_cast<std::size_t>(num_threads) * 6;
+      const std::size_t virial_size = static_cast<std::size_t>(num_threads) * 9 * force_rows;
+      if (lammps_force_private.size() < force_size) {
+        lammps_force_private.resize(force_size);
       }
+      if (lammps_total_virial_private.size() < total_virial_size) {
+        lammps_total_virial_private.resize(total_virial_size);
+      }
+      if (virial && lammps_virial_private.size() < virial_size) {
+        lammps_virial_private.resize(virial_size);
+      }
+
+      lammps_scratch.force_rows = force_rows;
+      lammps_scratch.num_threads = num_threads;
+      lammps_scratch.dense_rows =
+        static_cast<std::size_t>(force_rows) * 3 <= lammps_touched_rows.size() * 4;
+      lammps_scratch.touched_rows = &lammps_touched_rows;
+      lammps_scratch.force_private = lammps_force_private.data();
+      lammps_scratch.total_virial_private = lammps_total_virial_private.data();
+      lammps_scratch.virial_private = virial ? lammps_virial_private.data() : nullptr;
+      zero_lammps_thread_local_scratch(lammps_scratch, virial != nullptr);
+    }
+  }
+#endif
+
+  find_force_radial_for_lammps(
+    paramb, annmb, nlocal, inum, ilist, NN, NL, type, type_map, pos, Fp.data(),
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_radial.data(), gnp_radial.data(),
+#endif
+    &lammps_radial_cache, force, total_virial, virial, &lammps_scratch);
+  find_force_angular_for_lammps(
+    paramb, annmb, nlocal, inum, ilist, NN, NL, type, type_map, pos, Fp.data(),
+    sum_fxyz.data(),
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_angular.data(), gnp_angular.data(),
+#endif
+    force, total_virial, virial, &lammps_angular_cache, &lammps_scratch);
+  if (zbl.enabled) {
+    find_force_ZBL_for_lammps(
+      paramb, zbl, inum, ilist, NN, NL, type, type_map, pos, force, total_virial, virial,
+      total_potential, potential, &lammps_scratch);
+  }
+#if defined(_OPENMP)
+  if (lammps_thread_scratch_active(&lammps_scratch)) {
+    reduce_lammps_thread_local_force_virial(lammps_scratch, force, total_virial, virial);
+  }
+#endif
+
+  add_spin_gradient(
+    paramb, annmb, atom_capacity, lammps_spin_types.data(), lammps_spin_spins_soa.data(),
+    spin_cache, Fp.data(), lammps_spin_force_soa.data(), lammps_spin_virial_soa.data(),
+    lammps_spin_mforce_soa.data(), phase_timing ? &spin_phase : nullptr);
+  for (int atom = 0; atom < atom_capacity; ++atom) {
+    for (int d = 0; d < 3; ++d) {
+      force[atom][d] +=
+        lammps_spin_force_soa[static_cast<std::size_t>(d) * atom_capacity + atom];
+      mforce[atom][d] +=
+        lammps_spin_mforce_soa[static_cast<std::size_t>(d) * atom_capacity + atom];
     }
   }
   auto raw = [&](const int comp, const int atom) {
-    return virial_soa[static_cast<std::size_t>(comp) * N + atom];
+    return lammps_spin_virial_soa[static_cast<std::size_t>(comp) * atom_capacity + atom];
   };
   for (int atom = 0; atom < nlocal; ++atom) {
     total_virial[0] += raw(0, atom);
@@ -7519,6 +7737,26 @@ void NEP::compute_for_lammps(
       virial[atom][7] += raw(6, atom);
       virial[atom][8] += raw(7, atom);
     }
+  }
+
+  if (phase_timing) {
+    NepPhaseTotals& totals = nep_phase_timer_state().lammps;
+    ++totals.calls;
+    totals.active_atoms += nlocal;
+    totals.centers += inum;
+    for (int ii = 0; ii < inum; ++ii) {
+      totals.neighbors += NN[ilist[ii]];
+    }
+    totals.spin_setup += spin_phase.setup;
+    totals.spin_edges += spin_phase.edges;
+    totals.spin_unpack += spin_phase.unpack;
+    totals.spin_merge += spin_phase.merge;
+    totals.spin_contract += spin_phase.contract;
+    totals.spin_chiral += spin_phase.chiral;
+    totals.spin_copy += spin_phase.copy;
+    totals.spin_gradient += spin_phase.gradient_nonchiral + spin_phase.gradient_chiral;
+    totals.spin_gradient_nonchiral += spin_phase.gradient_nonchiral;
+    totals.spin_gradient_chiral += spin_phase.gradient_chiral;
   }
 }
 
