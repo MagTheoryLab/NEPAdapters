@@ -32,7 +32,20 @@ Engine* find_engine(const char* engine_name) {
   return nullptr;
 }
 
+std::string& last_error() {
+  static thread_local std::string message;
+  return message;
+}
+
 }  // namespace
+
+void clear_last_error() {
+  last_error().clear();
+}
+
+void set_last_error(const std::string& message) {
+  last_error() = message;
+}
 
 bool register_engine(Engine* engine) {
   if (engine == nullptr) {
@@ -94,6 +107,7 @@ NepaStatus nepa_load_model(
     const char* backend_name,
     const char* model_path,
     NepaModel** out) {
+  nep_adapters::clear_last_error();
   if (backend_name == nullptr || model_path == nullptr || out == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
@@ -116,19 +130,22 @@ NepaStatus nepa_load_model(
 
     *out = new NepaModel{std::move(model)};
     return NEPA_STATUS_OK;
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
 }
 
 NepaStatus nepa_model_info(NepaModel* model, NepaModelInfo* out) {
+  nep_adapters::clear_last_error();
   if (model == nullptr || out == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
 
   try {
     return model->impl->model_info(*out);
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
 }
@@ -137,13 +154,15 @@ NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindForceResult* result) {
+  nep_adapters::clear_last_error();
   if (model == nullptr || batch == nullptr || result == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
 
   try {
     return model->impl->find_force_batch(*batch, *result);
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
 }
@@ -152,13 +171,15 @@ NepaStatus nepa_find_descriptors(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindDescriptorResult* result) {
+  nep_adapters::clear_last_error();
   if (model == nullptr || batch == nullptr || result == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
 
   try {
     return model->impl->find_descriptors(*batch, *result);
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
 }
@@ -167,13 +188,32 @@ NepaStatus nepa_find_force_lammps_neighbors(
     NepaModel* model,
     const NepaLammpsNeighborInput* input,
     NepaLammpsNeighborResult* result) {
+  nep_adapters::clear_last_error();
   if (model == nullptr || input == nullptr || result == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
 
   try {
     return model->impl->find_force_lammps_neighbors(*input, *result);
-  } catch (const std::exception&) {
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+NepaStatus nepa_find_force_lammps_device_neighbors(
+    NepaModel* model,
+    const NepaLammpsDeviceNeighborInput* input,
+    NepaLammpsDeviceNeighborResult* result) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || input == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+
+  try {
+    return model->impl->find_force_lammps_device_neighbors(*input, *result);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
 }
@@ -197,4 +237,8 @@ const char* nepa_status_message(NepaStatus status) {
   }
 
   return "unknown status";
+}
+
+const char* nepa_last_error_message(void) {
+  return nep_adapters::last_error().c_str();
 }

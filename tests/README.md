@@ -9,6 +9,10 @@ Current label meanings:
 - `parity`: adapter/runtime output matches a trusted oracle.
 - `engine`: engine-level tests.
 - `frontend`: Python, LAMMPS, or future software integration tests.
+- `cuda`: CUDA backend tests.
+- `device`: tests that require CUDA device runtime kernels.
+- `kokkos`: LAMMPS/Kokkos-shaped device-neighbor simulation tests.
+- `force`: finite-difference or parity gates for CUDA force components.
 - `large_model`: tests that use a large model such as `nep89`.
 - `domain_decomp`: backend-neutral local/ghost/foldback semantics for future
   multi-rank LAMMPS paths.
@@ -46,6 +50,31 @@ are added.
 
 `nep_adapters_virial_order_test` fixes the component-order contract between the
 regular NEP `compute` path and the LAMMPS `compute_for_lammps` path.
+
+CUDA backend closure is run with:
+
+```sh
+python3 tools/run_cuda_tests.py
+```
+
+Use `--cuda-arch 70` on V100 nodes and `--cuda-arch 89` on RTX 4090/Ada nodes
+when `native` architecture detection is not wanted. The script configures
+`NEP_ADAPTERS_ENABLE_CUDA=ON` and
+`NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME=ON`, builds the tests, then runs
+`ctest -L cuda`. This is a correctness gate only; MD throughput, `ncu`, and
+`nsys` runs stay under `benchmarks/` or external job scripts.
+Pass `--cpu-nep3-source-dir /path/to/nep_cpu` when the CPU oracle source is not
+in one of the auto-detected sibling paths.
+
+The CUDA gate covers these surfaces:
+
+- engine registration and public capability reporting;
+- host batch API and LAMMPS host-neighbor simulation;
+- device model/workspace upload and internal neighbor construction;
+- radial, angular, high-body, and ZBL force finite-difference checks;
+- CPU/CUDA triclinic parity;
+- LAMMPS/Kokkos-style strided device-neighbor input, output layout, type map,
+  virial ordering, and neighbor-capacity failure behavior.
 
 `tools/run_lammps_mpi_smoke.py` runs the local LAMMPS plugin under
 `mpirun -np 1/2/4` and compares multi-rank output against the 1-rank reference

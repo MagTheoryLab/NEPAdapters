@@ -1,0 +1,1181 @@
+#include "nep_adapters/engine.hpp"
+#include "nep_adapters/engines/cuda.hpp"
+
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+#include "ann_energy.hpp"
+#include "angular_descriptor.hpp"
+#include "angular_force.hpp"
+#include "batch_output.hpp"
+#include "device_model.hpp"
+#include "device_staging.hpp"
+#include "device_workspace.hpp"
+#include "internal_neighbor_builder.hpp"
+#include "lammps_device_output.hpp"
+#include "model_parameters.hpp"
+#include "pair_geometry_cache.hpp"
+#include "qnep_charge.hpp"
+#include "radial_basis_cache.hpp"
+#include "radial_descriptor.hpp"
+#include "radial_force.hpp"
+#include "zbl_force.hpp"
+#endif
+
+#include "host_staging.hpp"
+#include "model_protocol.hpp"
+#include "nep_adapters/virial_order.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <exception>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+#include <cuda_runtime.h>
+#endif
+
+namespace {
+
+bool valid_batch(const NepaStructureBatch& batch) {
+  return batch.num_structures > 0 && batch.total_atoms > 0 &&
+         batch.atom_counts != nullptr && batch.atom_offsets != nullptr &&
+         batch.types != nullptr && batch.positions_aos3 != nullptr &&
+         batch.boxes_row_major9 != nullptr;
+}
+
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+bool supports_batch_force(const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+  const auto& body = protocol.body_channels;
+  return (protocol.version == 4 || protocol.version == 5) &&
+         protocol.charge_mode == 0 &&
+         (!protocol.has_zbl ||
+          (!protocol.flexible_zbl &&
+           protocol.zbl_inner >= 0.0 &&
+           protocol.zbl_outer > protocol.zbl_inner &&
+           protocol.zbl_outer <= protocol.cutoff_radial)) &&
+         body.l_max_3body <= 4;
+}
+
+bool supports_batched_execution(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+  return supports_batch_force(protocol);
+}
+
+bool needs_angular_terms(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+  return protocol.body_channels.channel_count() > 0;
+}
+
+int env_int(const char* name, int fallback) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || raw[0] == '\0') {
+    return fallback;
+  }
+  char* end = nullptr;
+  const long value = std::strtol(raw, &end, 10);
+  return end == raw ? fallback : static_cast<int>(value);
+}
+
+int mpi_rank_from_env() {
+  const char* names[] = {
+      "OMPI_COMM_WORLD_RANK",
+      "PMI_RANK",
+      "PMIX_RANK",
+      "SLURM_PROCID"};
+  for (const char* name : names) {
+    const int value = env_int(name, -1);
+    if (value >= 0) {
+      return value;
+    }
+  }
+  return 0;
+}
+
+class LammpsDevicePairProfiler {
+ public:
+  LammpsDevicePairProfiler(int nlocal, bool rebuild_workspace)
+      : nlocal_(nlocal), rebuild_workspace_(rebuild_workspace) {
+    const char* raw = std::getenv("NEP_ADAPTERS_PROFILE_PAIR");
+    if (raw == nullptr || raw[0] == '\0') {
+      return;
+    }
+    const int rank = mpi_rank_from_env();
+    if (rank != env_int("NEP_ADAPTERS_PROFILE_PAIR_RANK", 0)) {
+      return;
+    }
+    static int samples = 0;
+    const int max_samples = env_int("NEP_ADAPTERS_PROFILE_PAIR", 5);
+    if (max_samples > 0 && samples >= max_samples) {
+      return;
+    }
+    sample_ = ++samples;
+    enabled_ = true;
+    cudaEventCreate(&mark_);
+    cudaEventCreate(&now_);
+    cudaEventRecord(mark_);
+  }
+
+  ~LammpsDevicePairProfiler() {
+    if (mark_ != nullptr) {
+      cudaEventDestroy(mark_);
+    }
+    if (now_ != nullptr) {
+      cudaEventDestroy(now_);
+    }
+  }
+
+  void split(float& target_ms) {
+    if (!enabled_) {
+      return;
+    }
+    cudaEventRecord(now_);
+    cudaEventSynchronize(now_);
+    cudaEventElapsedTime(&target_ms, mark_, now_);
+    cudaEventRecord(mark_);
+  }
+
+  void print(
+      float stage_ms,
+      float clear_ms,
+      float descriptor_ann_ms,
+      float radial_force_ms,
+      float angular_force_ms,
+      float zbl_force_ms,
+      float output_ms) const {
+    if (!enabled_) {
+      return;
+    }
+    const float total_ms =
+        stage_ms + clear_ms + descriptor_ann_ms + radial_force_ms +
+        angular_force_ms + zbl_force_ms + output_ms;
+    std::fprintf(
+        stderr,
+        "NEPA_PAIR_PROFILE sample=%d nlocal=%d rebuild=%d "
+        "stage_ms=%.3f clear_ms=%.3f descriptor_ann_ms=%.3f "
+        "radial_force_ms=%.3f angular_force_ms=%.3f zbl_force_ms=%.3f "
+        "output_ms=%.3f total_ms=%.3f\n",
+        sample_,
+        nlocal_,
+        rebuild_workspace_ ? 1 : 0,
+        stage_ms,
+        clear_ms,
+        descriptor_ann_ms,
+        radial_force_ms,
+        angular_force_ms,
+        zbl_force_ms,
+        output_ms,
+        total_ms);
+  }
+
+ private:
+  bool enabled_ = false;
+  int sample_ = 0;
+  int nlocal_ = 0;
+  bool rebuild_workspace_ = false;
+  cudaEvent_t mark_ = nullptr;
+  cudaEvent_t now_ = nullptr;
+};
+
+void build_radial_descriptor_stage(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol,
+    int atom_count,
+    const nep_adapters::cuda_backend::SimulationBox& box,
+    const nep_adapters::cuda_backend::DeviceModel& device,
+    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
+    bool has_angular) {
+  if (has_angular) {
+    nep_adapters::cuda_backend::build_angular_geometry_cache_on_device(
+        protocol,
+        atom_count,
+        box,
+        workspace);
+    if (nep_adapters::cuda_backend::build_radial_descriptors_from_geometry_on_device(
+            protocol,
+            atom_count,
+            box,
+            device,
+            workspace)) {
+      return;
+    }
+    nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
+        protocol,
+        atom_count,
+        box,
+        workspace);
+    nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
+        protocol,
+        atom_count,
+        workspace);
+    nep_adapters::cuda_backend::build_radial_descriptors_on_device(
+        protocol,
+        atom_count,
+        device,
+        workspace);
+    return;
+  }
+
+  if (nep_adapters::cuda_backend::build_radial_descriptors_from_geometry_on_device(
+          protocol,
+          atom_count,
+          box,
+          device,
+          workspace)) {
+    return;
+  }
+
+  nep_adapters::cuda_backend::build_radial_geometry_basis_cache_on_device(
+      protocol,
+      atom_count,
+      box,
+      workspace);
+  nep_adapters::cuda_backend::build_radial_descriptors_on_device(
+      protocol,
+      atom_count,
+      device,
+      workspace);
+}
+
+void build_angular_descriptors_and_ann_stage(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol,
+    int atom_count,
+    const nep_adapters::cuda_backend::DeviceModel& device,
+    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
+    bool has_angular) {
+  if (protocol.charge_mode > 0) {
+    if (has_angular) {
+      nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
+          protocol,
+          atom_count,
+          device,
+          workspace);
+    }
+    nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
+        protocol,
+        atom_count,
+        device,
+        workspace);
+    return;
+  }
+  if (has_angular) {
+    if (nep_adapters::cuda_backend::
+            try_build_angular_descriptors_and_ann_from_geometry_on_device(
+                protocol,
+                atom_count,
+                device,
+                workspace)) {
+      return;
+    }
+    nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
+        protocol,
+        atom_count,
+        device,
+        workspace);
+  }
+  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
+      protocol,
+      atom_count,
+      device,
+      workspace);
+}
+
+void build_descriptors_and_ann_stage(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol,
+    int atom_count,
+    const nep_adapters::cuda_backend::SimulationBox& box,
+    const nep_adapters::cuda_backend::DeviceModel& device,
+    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
+    bool has_angular,
+    bool store_potential = true) {
+  if (protocol.charge_mode == 0 && has_angular &&
+      nep_adapters::cuda_backend::
+          try_build_descriptors_and_ann_from_positions_on_device(
+              protocol,
+              atom_count,
+              box,
+              device,
+              workspace,
+              store_potential)) {
+    return;
+  }
+  build_radial_descriptor_stage(
+      protocol,
+      atom_count,
+      box,
+      device,
+      workspace,
+      has_angular);
+  build_angular_descriptors_and_ann_stage(
+      protocol,
+      atom_count,
+      device,
+      workspace,
+      has_angular);
+}
+
+int lammps_atom_capacity(const NepaLammpsNeighborInput& input) {
+  int atom_capacity = input.nlocal;
+  for (int active = 0; active < input.inum; ++active) {
+    const int atom = input.ilist[active];
+    if (atom >= 0) {
+      atom_capacity = std::max(atom_capacity, atom + 1);
+    }
+    if (atom < 0 || input.numneigh == nullptr || input.firstneigh == nullptr ||
+        input.firstneigh[atom] == nullptr) {
+      continue;
+    }
+    for (int slot = 0; slot < input.numneigh[atom]; ++slot) {
+      constexpr int kLammpsNeighborMask = 0x3fffffff;
+      const int neighbor = input.firstneigh[atom][slot] & kLammpsNeighborMask;
+      atom_capacity = std::max(atom_capacity, neighbor + 1);
+    }
+  }
+  return atom_capacity;
+}
+
+nep_adapters::cuda_backend::SimulationBox make_nonperiodic_lammps_box() {
+  nep_adapters::cuda_backend::SimulationBox box{};
+  box.frac_to_cart[0] = 1.0;
+  box.frac_to_cart[4] = 1.0;
+  box.frac_to_cart[8] = 1.0;
+  box.cart_to_frac[0] = 1.0;
+  box.cart_to_frac[4] = 1.0;
+  box.cart_to_frac[8] = 1.0;
+  return box;
+}
+
+bool invert_row_major3(const double* matrix, double* inverse) {
+  const double det =
+      matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
+      matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
+      matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
+  if (std::abs(det) <= 1.0e-12) {
+    return false;
+  }
+  const double inv_det = 1.0 / det;
+  inverse[0] = (matrix[4] * matrix[8] - matrix[5] * matrix[7]) * inv_det;
+  inverse[1] = (matrix[2] * matrix[7] - matrix[1] * matrix[8]) * inv_det;
+  inverse[2] = (matrix[1] * matrix[5] - matrix[2] * matrix[4]) * inv_det;
+  inverse[3] = (matrix[5] * matrix[6] - matrix[3] * matrix[8]) * inv_det;
+  inverse[4] = (matrix[0] * matrix[8] - matrix[2] * matrix[6]) * inv_det;
+  inverse[5] = (matrix[2] * matrix[3] - matrix[0] * matrix[5]) * inv_det;
+  inverse[6] = (matrix[3] * matrix[7] - matrix[4] * matrix[6]) * inv_det;
+  inverse[7] = (matrix[1] * matrix[6] - matrix[0] * matrix[7]) * inv_det;
+  inverse[8] = (matrix[0] * matrix[4] - matrix[1] * matrix[3]) * inv_det;
+  return true;
+}
+
+bool batch_boxes_are_orthorhombic(const NepaStructureBatch& batch) {
+  constexpr double kTolerance = 1.0e-14;
+  for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+    const double* box = batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
+    if (!std::isfinite(box[0]) || !std::isfinite(box[4]) ||
+        !std::isfinite(box[8]) || box[0] <= 0.0 || box[4] <= 0.0 ||
+        box[8] <= 0.0) {
+      return false;
+    }
+    for (int component = 0; component < 9; ++component) {
+      if (component == 0 || component == 4 || component == 8) {
+        continue;
+      }
+      if (std::abs(box[component]) > kTolerance) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool make_simulation_box(
+    const NepaStructureBatch& batch,
+    nep_adapters::cuda_backend::SimulationBox& box) {
+  const double* cell = batch.boxes_row_major9;
+  for (int component = 0; component < 9; ++component) {
+    box.frac_to_cart[component] = cell[component];
+  }
+  if (!invert_row_major3(box.frac_to_cart, box.cart_to_frac)) {
+    return false;
+  }
+  box.pbc[0] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[0] : 0;
+  box.pbc[1] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[1] : 0;
+  box.pbc[2] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[2] : 0;
+  return std::isfinite(box.cart_to_frac[0]) &&
+         std::isfinite(box.cart_to_frac[4]) &&
+         std::isfinite(box.cart_to_frac[8]);
+}
+
+std::vector<double> copy_device_doubles(const double* device, std::size_t count) {
+  std::vector<double> host(count, 0.0);
+  const cudaError_t status = cudaMemcpy(
+      host.data(),
+      device,
+      count * sizeof(double),
+      cudaMemcpyDeviceToHost);
+  if (status != cudaSuccess) {
+    throw std::runtime_error("failed to copy CUDA double output");
+  }
+  return host;
+}
+
+void copy_device_doubles_to_host(
+    const double* device,
+    std::size_t count,
+    double* host,
+    const char* action) {
+  const cudaError_t status = cudaMemcpy(
+      host,
+      device,
+      count * sizeof(double),
+      cudaMemcpyDeviceToHost);
+  if (status != cudaSuccess) {
+    throw std::runtime_error(action);
+  }
+}
+
+void clear_device_doubles(double* device, std::size_t count) {
+  const cudaError_t status = cudaMemset(device, 0, count * sizeof(double));
+  if (status != cudaSuccess) {
+    throw std::runtime_error("failed to clear CUDA double buffer");
+  }
+}
+
+int public_virial_component_to_cuda_internal(int component) {
+  constexpr int map[] = {0, 3, 4, 6, 1, 5, 7, 8, 2};
+  return map[component];
+}
+
+#endif
+
+class CudaModel : public nep_adapters::Model {
+ public:
+  explicit CudaModel(const std::string& model_path)
+      :
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+        host_(nep_adapters::cuda_backend::load_host_model_parameters(model_path)),
+        protocol_(host_.protocol),
+        device_(host_) {}
+#else
+        protocol_(nep_adapters::cuda_backend::parse_model_protocol(model_path)) {}
+#endif
+
+  NepaStatus model_info(NepaModelInfo& out) const override {
+    out = {};
+    out.cutoff_radial = protocol_.cutoff_radial;
+    out.cutoff_angular = protocol_.cutoff_angular;
+    out.cutoff_max = protocol_.cutoff_max;
+    out.capabilities = nep_adapters::to_mask(nep_adapters::Capability::device_input);
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+    if (supports_batch_force(protocol_)) {
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::external_neighbors);
+    } else if (protocol_.charge_mode > 0) {
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::charge);
+    }
+#endif
+    out.num_types = protocol_.num_types;
+    out.descriptor_dim = protocol_.descriptor_dim;
+    return NEPA_STATUS_OK;
+  }
+
+  NepaStatus find_force_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) override {
+    if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
+        result.forces_aos3 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+
+    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+      const std::int32_t atom_count = batch.atom_counts[structure];
+      const std::int32_t atom_offset = batch.atom_offsets[structure];
+      if (atom_count <= 0 || atom_offset < 0 ||
+          atom_offset + atom_count > batch.total_atoms) {
+        return NEPA_STATUS_INVALID_ARGUMENT;
+      }
+    }
+
+    try {
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+      if (!supports_batch_force(protocol_) && protocol_.charge_mode == 0) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+      if (protocol_.charge_mode > 0 && batch.num_structures != 1) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+      if (supports_batched_execution(protocol_)) {
+        nep_adapters::cuda_backend::DeviceWorkspace workspace(
+            nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+                protocol_,
+                static_cast<std::size_t>(batch.total_atoms),
+                static_cast<std::size_t>(batch.num_structures)));
+
+        nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
+        const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+        clear_device_doubles(view.potential, view.atom_capacity);
+        clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+        const bool orthorhombic_fast_path = batch_boxes_are_orthorhombic(batch);
+        nep_adapters::cuda_backend::build_internal_neighbors_batched(
+            protocol_,
+            batch.num_structures,
+            batch.total_atoms,
+            workspace,
+            orthorhombic_fast_path);
+        const bool has_angular = needs_angular_terms(protocol_);
+        if (!orthorhombic_fast_path && has_angular) {
+          nep_adapters::cuda_backend::build_pair_geometry_cache_batched(
+              protocol_,
+              batch.total_atoms,
+              workspace);
+          nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
+              protocol_,
+              batch.total_atoms,
+              workspace);
+        } else if (!orthorhombic_fast_path) {
+          nep_adapters::cuda_backend::build_radial_geometry_basis_cache_batched(
+              protocol_,
+              batch.total_atoms,
+              workspace);
+        } else {
+          nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
+              protocol_,
+              batch.total_atoms,
+              workspace);
+        }
+        nep_adapters::cuda_backend::build_radial_descriptors_on_device(
+            protocol_,
+            batch.total_atoms,
+            device_,
+            workspace);
+        build_angular_descriptors_and_ann_stage(
+            protocol_,
+            batch.total_atoms,
+            device_,
+            workspace,
+            has_angular);
+        nep_adapters::cuda_backend::accumulate_radial_forces_batched(
+            protocol_,
+            batch.total_atoms,
+            device_,
+            workspace);
+        if (has_angular) {
+          nep_adapters::cuda_backend::accumulate_l2_angular_forces_batched(
+              protocol_,
+              batch.total_atoms,
+              device_,
+              workspace);
+        }
+        if (protocol_.has_zbl) {
+          nep_adapters::cuda_backend::accumulate_zbl_forces_batched(
+              protocol_,
+              batch.total_atoms,
+              device_,
+              workspace);
+        }
+
+        nep_adapters::cuda_backend::prepare_batched_outputs(
+            batch.num_structures,
+            batch.total_atoms,
+            workspace);
+        copy_device_doubles_to_host(
+            view.structure_energy,
+            static_cast<std::size_t>(batch.num_structures),
+            result.energy_per_structure,
+            "failed to copy CUDA structure energies");
+        copy_device_doubles_to_host(
+            view.output_forces_aos3,
+            static_cast<std::size_t>(batch.total_atoms) * 3,
+            result.forces_aos3,
+            "failed to copy CUDA forces");
+        if (result.potential_per_atom != nullptr) {
+          copy_device_doubles_to_host(
+              view.potential,
+              static_cast<std::size_t>(batch.total_atoms),
+              result.potential_per_atom,
+              "failed to copy CUDA per-atom potentials");
+        }
+        if (result.virials_per_atom_row_major9 != nullptr) {
+          copy_device_doubles_to_host(
+              view.output_virials_per_atom_row_major9,
+              static_cast<std::size_t>(batch.total_atoms) * 9,
+              result.virials_per_atom_row_major9,
+              "failed to copy CUDA per-atom virials");
+        }
+        if (result.virials_row_major9 != nullptr) {
+          copy_device_doubles_to_host(
+              view.structure_virial_row_major9,
+              static_cast<std::size_t>(batch.num_structures) * 9,
+              result.virials_row_major9,
+              "failed to copy CUDA structure virials");
+        }
+        return NEPA_STATUS_OK;
+      }
+      std::size_t max_structure_atoms = 0;
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        max_structure_atoms = std::max(
+            max_structure_atoms,
+            static_cast<std::size_t>(batch.atom_counts[structure]));
+      }
+      nep_adapters::cuda_backend::DeviceWorkspace workspace(
+          nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+              protocol_,
+              max_structure_atoms,
+              1));
+
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        const std::int32_t atom_count = batch.atom_counts[structure];
+        const std::int32_t atom_offset = batch.atom_offsets[structure];
+        const std::int32_t local_atom_counts[] = {atom_count};
+        const std::int32_t local_atom_offsets[] = {0};
+        NepaStructureBatch single{};
+        single.num_structures = 1;
+        single.total_atoms = atom_count;
+        single.atom_counts = local_atom_counts;
+        single.atom_offsets = local_atom_offsets;
+        single.types = batch.types + atom_offset;
+        single.positions_aos3 =
+            batch.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
+        single.boxes_row_major9 =
+            batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
+        single.pbc_flags3 =
+            batch.pbc_flags3 != nullptr
+                ? batch.pbc_flags3 + 3 * static_cast<std::size_t>(structure)
+                : nullptr;
+
+        nep_adapters::cuda_backend::SimulationBox box;
+        if (!make_simulation_box(single, box)) {
+          return NEPA_STATUS_UNSUPPORTED;
+        }
+        nep_adapters::cuda_backend::stage_batch_on_device(single, workspace);
+        const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+        clear_device_doubles(view.potential, view.atom_capacity);
+        clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+        nep_adapters::cuda_backend::build_internal_neighbors_on_device(
+            protocol_,
+            atom_count,
+            box,
+            workspace);
+        const bool has_angular = needs_angular_terms(protocol_);
+        build_descriptors_and_ann_stage(
+            protocol_,
+            atom_count,
+            box,
+            device_,
+            workspace,
+            has_angular);
+        if (protocol_.charge_mode > 0) {
+          nep_adapters::cuda_backend::zero_total_charge_on_device(
+              atom_count,
+              workspace);
+          nep_adapters::cuda_backend::apply_qnep_charge_terms_on_device(
+              protocol_,
+              atom_count,
+              box,
+              workspace,
+              result.potential_per_atom != nullptr,
+              result.virials_per_atom_row_major9 != nullptr);
+          nep_adapters::cuda_backend::add_charge_chain_to_fp_on_device(
+              protocol_,
+              atom_count,
+              workspace);
+        }
+        nep_adapters::cuda_backend::accumulate_radial_forces_on_device(
+            protocol_,
+            atom_count,
+            box,
+            device_,
+            workspace,
+            true,
+            protocol_.charge_mode == 0,
+            protocol_.charge_mode > 0);
+        if (has_angular) {
+          nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
+              protocol_,
+              atom_count,
+              box,
+              device_,
+              workspace,
+              true,
+              protocol_.charge_mode > 0);
+        }
+        if (protocol_.has_zbl) {
+          nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
+              protocol_,
+              atom_count,
+              box,
+              device_,
+              workspace);
+        }
+
+        const std::vector<double> potential =
+            copy_device_doubles(view.potential, view.atom_capacity);
+        const std::vector<double> force_soa =
+            copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        const std::vector<double> virial_soa =
+            copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+        const std::vector<double> charge =
+            result.charge_per_atom != nullptr && protocol_.charge_mode > 0
+                ? copy_device_doubles(view.charge, view.atom_capacity)
+                : std::vector<double>{};
+        result.energy_per_structure[structure] =
+            std::accumulate(potential.begin(), potential.begin() + atom_count, 0.0);
+        for (int atom = 0; atom < atom_count; ++atom) {
+          const std::size_t global_atom =
+              static_cast<std::size_t>(atom_offset + atom);
+          if (result.potential_per_atom != nullptr) {
+            result.potential_per_atom[global_atom] =
+                potential[static_cast<std::size_t>(atom)];
+          }
+          if (result.charge_per_atom != nullptr && protocol_.charge_mode > 0) {
+            result.charge_per_atom[global_atom] =
+                charge[static_cast<std::size_t>(atom)];
+          }
+          result.forces_aos3[3 * global_atom + 0] =
+              force_soa[static_cast<std::size_t>(atom)];
+          result.forces_aos3[3 * global_atom + 1] =
+              force_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
+          result.forces_aos3[3 * global_atom + 2] =
+              force_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+          if (result.virials_per_atom_row_major9 != nullptr) {
+            for (int component = 0; component < 9; ++component) {
+              const int internal_component =
+                  public_virial_component_to_cuda_internal(component);
+              result.virials_per_atom_row_major9[9 * global_atom + component] =
+                  virial_soa[internal_component * view.atom_capacity +
+                             static_cast<std::size_t>(atom)];
+            }
+          }
+        }
+        if (result.virials_row_major9 != nullptr) {
+          double* structure_virial =
+              result.virials_row_major9 + 9 * static_cast<std::size_t>(structure);
+          for (int component = 0; component < 9; ++component) {
+            const int internal_component =
+                public_virial_component_to_cuda_internal(component);
+            double total = 0.0;
+            for (int atom = 0; atom < atom_count; ++atom) {
+              total += virial_soa[internal_component * view.atom_capacity +
+                                  static_cast<std::size_t>(atom)];
+            }
+            structure_virial[component] = total;
+          }
+        }
+      }
+      return NEPA_STATUS_OK;
+#else
+      (void)nep_adapters::cuda_backend::stage_batch_for_internal_neighbors(batch);
+#endif
+    } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  NepaStatus find_force_lammps_neighbors(
+      const NepaLammpsNeighborInput& input,
+      NepaLammpsNeighborResult& result) override {
+    if (input.nlocal < 0 || input.inum < 0 || input.ilist == nullptr ||
+        input.numneigh == nullptr || input.firstneigh == nullptr ||
+        input.types == nullptr || input.type_map == nullptr ||
+        input.positions == nullptr || result.total_potential == nullptr ||
+        result.total_virial6 == nullptr || result.forces == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+      if (!supports_batch_force(protocol_)) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+      const int atom_capacity = lammps_atom_capacity(input);
+      if (atom_capacity <= 0) {
+        return NEPA_STATUS_INVALID_ARGUMENT;
+      }
+      nep_adapters::cuda_backend::DeviceWorkspace workspace(
+          nep_adapters::cuda_backend::make_external_neighbor_workspace_plan(
+              protocol_,
+              static_cast<std::size_t>(atom_capacity),
+              static_cast<std::size_t>(input.inum)));
+      nep_adapters::cuda_backend::stage_lammps_external_neighbors_on_device(
+          input,
+          protocol_,
+          workspace);
+
+      const nep_adapters::cuda_backend::SimulationBox box =
+          make_nonperiodic_lammps_box();
+      const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+      clear_device_doubles(view.potential, view.atom_capacity);
+      const bool has_angular = needs_angular_terms(protocol_);
+      build_descriptors_and_ann_stage(
+          protocol_,
+          atom_capacity,
+          box,
+          device_,
+          workspace,
+          has_angular);
+      const bool accumulate_virial =
+          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
+      const bool zbl_outputs =
+          result.total_potential != nullptr || result.potential_per_atom != nullptr ||
+          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
+      if (protocol_.has_zbl && !zbl_outputs) {
+        nep_adapters::cuda_backend::accumulate_radial_and_zbl_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace);
+      } else {
+        nep_adapters::cuda_backend::accumulate_radial_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+      }
+      if (has_angular) {
+        nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+      }
+      if (protocol_.has_zbl && zbl_outputs) {
+        nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace,
+            zbl_outputs);
+      }
+
+      const std::vector<double> potential =
+          copy_device_doubles(view.potential, view.atom_capacity);
+      const std::vector<double> force_soa =
+          copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
+      const std::vector<double> virial_soa =
+          copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+
+      double total_potential = 0.0;
+      double total_raw9[9] = {};
+      for (int atom = 0; atom < input.nlocal; ++atom) {
+        total_potential += potential[static_cast<std::size_t>(atom)];
+        if (result.potential_per_atom != nullptr) {
+          result.potential_per_atom[atom] = potential[static_cast<std::size_t>(atom)];
+        }
+        if (result.forces[atom] != nullptr) {
+          result.forces[atom][0] = force_soa[static_cast<std::size_t>(atom)];
+          result.forces[atom][1] =
+              force_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
+          result.forces[atom][2] =
+              force_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+        }
+        if (result.virials_per_atom9 != nullptr &&
+            result.virials_per_atom9[atom] != nullptr) {
+          for (int component = 0; component < 9; ++component) {
+            const double value =
+                virial_soa[static_cast<std::size_t>(component) *
+                               view.atom_capacity +
+                           static_cast<std::size_t>(atom)];
+            result.virials_per_atom9[atom][component] = value;
+            total_raw9[component] += value;
+          }
+        } else {
+          for (int component = 0; component < 9; ++component) {
+            total_raw9[component] +=
+                virial_soa[static_cast<std::size_t>(component) *
+                               view.atom_capacity +
+                           static_cast<std::size_t>(atom)];
+          }
+        }
+      }
+      *result.total_potential = total_potential;
+      for (int component = 0; component < 6; ++component) {
+        result.total_virial6[component] =
+            nep_adapters::lammps_voigt6_from_lammps_raw9(
+                total_raw9,
+                component);
+      }
+      return NEPA_STATUS_OK;
+#else
+      (void)nep_adapters::cuda_backend::stage_lammps_external_neighbors(
+          input,
+          protocol_);
+#endif
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  NepaStatus find_force_lammps_device_neighbors(
+      const NepaLammpsDeviceNeighborInput& input,
+      NepaLammpsDeviceNeighborResult& result) override {
+    if (input.nlocal < 0 || input.nall < input.nlocal || input.inum <= 0 ||
+        input.max_neighbors < 0 || input.neighbor_rows <= 0 ||
+        input.numneigh_length <= 0 || input.ilist == nullptr ||
+        input.numneigh == nullptr || input.neighbors == nullptr ||
+        input.neighbor_atom_stride <= 0 || input.neighbor_slot_stride <= 0 ||
+        input.types == nullptr || input.positions == nullptr ||
+        input.position_atom_stride <= 0 || input.position_component_stride <= 0 ||
+        result.forces == nullptr || result.force_atom_stride <= 0 ||
+        result.force_component_stride <= 0) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if ((result.total_potential == nullptr) !=
+        (result.total_virial6 == nullptr)) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if (result.virials_per_atom9 != nullptr &&
+        (result.virial_atom_stride <= 0 ||
+         result.virial_component_stride <= 0)) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if ((input.type_map == nullptr && input.type_map_length != 0) ||
+        (input.type_map != nullptr && input.type_map_length <= 0)) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+
+    try {
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+      if (!supports_batch_force(protocol_)) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+      auto padded_capacity = [](std::size_t required) {
+        return required + required / 64 + 1024;
+      };
+      const bool positions_are_soa =
+          input.position_atom_stride == 1 &&
+          input.position_component_stride >= input.nall;
+      std::size_t atom_capacity = static_cast<std::size_t>(input.nall);
+      if (positions_are_soa) {
+        atom_capacity = static_cast<std::size_t>(input.position_component_stride);
+      } else if (
+          lammps_device_workspace_ != nullptr &&
+          atom_capacity <= lammps_device_atom_capacity_) {
+        atom_capacity = lammps_device_atom_capacity_;
+      } else {
+        atom_capacity = padded_capacity(atom_capacity);
+      }
+      std::size_t active_atom_capacity = static_cast<std::size_t>(input.inum);
+      if (lammps_device_workspace_ != nullptr &&
+          active_atom_capacity <= lammps_device_active_atom_capacity_) {
+        active_atom_capacity = lammps_device_active_atom_capacity_;
+      } else {
+        active_atom_capacity = padded_capacity(active_atom_capacity);
+      }
+      active_atom_capacity = std::min(active_atom_capacity, atom_capacity);
+      nep_adapters::cuda_backend::ModelProtocol external_protocol = protocol_;
+      const bool rebuild_workspace =
+          lammps_device_workspace_ == nullptr ||
+          atom_capacity > lammps_device_atom_capacity_ ||
+          active_atom_capacity > lammps_device_active_atom_capacity_;
+      LammpsDevicePairProfiler profiler(input.nlocal, rebuild_workspace);
+      float stage_ms = 0.0f;
+      float clear_ms = 0.0f;
+      float descriptor_ann_ms = 0.0f;
+      float radial_force_ms = 0.0f;
+      float angular_force_ms = 0.0f;
+      float zbl_force_ms = 0.0f;
+      float output_ms = 0.0f;
+      nep_adapters::cuda_backend::DeviceWorkspace& workspace =
+          lammps_device_workspace(
+              external_protocol,
+              atom_capacity,
+              active_atom_capacity);
+      // ponytail: GPUMD uses fixed model MN; per-step compact counts add a
+      // device-to-host sync in the Pair hot path.
+      nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
+          input,
+          external_protocol,
+          workspace,
+          rebuild_workspace);
+      profiler.split(stage_ms);
+
+      const nep_adapters::cuda_backend::SimulationBox box =
+          make_nonperiodic_lammps_box();
+      const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+      const bool store_potential =
+          result.total_potential != nullptr || result.potential_per_atom != nullptr;
+      if (store_potential) {
+        clear_device_doubles(view.potential, static_cast<std::size_t>(input.nlocal));
+      }
+      profiler.split(clear_ms);
+      const bool has_angular = needs_angular_terms(external_protocol);
+      bool descriptor_done = false;
+      if (has_angular && view.f12x == nullptr) {
+        descriptor_done =
+            nep_adapters::cuda_backend::
+                try_build_descriptors_and_ann_from_positions_on_device(
+                    external_protocol,
+                    input.nlocal,
+                    box,
+                    device_,
+                    workspace,
+                    store_potential);
+      }
+      if (!descriptor_done) {
+        build_descriptors_and_ann_stage(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            has_angular,
+            store_potential);
+      }
+      profiler.split(descriptor_ann_ms);
+      const bool accumulate_virial =
+          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
+      const bool zbl_outputs =
+          result.total_potential != nullptr || result.potential_per_atom != nullptr ||
+          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
+      nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
+          external_protocol,
+          input.nlocal,
+          box,
+          device_,
+          workspace,
+          accumulate_virial);
+      profiler.split(radial_force_ms);
+      if (has_angular) {
+        nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+      }
+      profiler.split(angular_force_ms);
+      if (external_protocol.has_zbl) {
+        nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            zbl_outputs);
+      }
+      profiler.split(zbl_force_ms);
+      nep_adapters::cuda_backend::write_lammps_device_outputs(
+          input,
+          result,
+          workspace);
+      profiler.split(output_ms);
+      profiler.print(
+          stage_ms,
+          clear_ms,
+          descriptor_ann_ms,
+          radial_force_ms,
+          angular_force_ms,
+          zbl_force_ms,
+          output_ms);
+      return NEPA_STATUS_OK;
+#else
+      (void)input;
+      (void)result;
+#endif
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+ private:
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+  nep_adapters::cuda_backend::DeviceWorkspace& lammps_device_workspace(
+      const nep_adapters::cuda_backend::ModelProtocol& protocol,
+      std::size_t atom_capacity,
+      std::size_t active_atom_capacity) {
+    if (lammps_device_workspace_ != nullptr &&
+        atom_capacity <= lammps_device_atom_capacity_ &&
+        active_atom_capacity <= lammps_device_active_atom_capacity_ &&
+        protocol.neighbor_capacity_radial <= lammps_device_radial_capacity_ &&
+        protocol.neighbor_capacity_angular <= lammps_device_angular_capacity_) {
+      return *lammps_device_workspace_;
+    }
+
+    auto workspace = std::make_unique<nep_adapters::cuda_backend::DeviceWorkspace>(
+        nep_adapters::cuda_backend::make_external_neighbor_workspace_plan(
+            protocol,
+            atom_capacity,
+            active_atom_capacity,
+            false));
+    lammps_device_workspace_ = std::move(workspace);
+    lammps_device_atom_capacity_ = atom_capacity;
+    lammps_device_active_atom_capacity_ = active_atom_capacity;
+    lammps_device_radial_capacity_ = protocol.neighbor_capacity_radial;
+    lammps_device_angular_capacity_ = protocol.neighbor_capacity_angular;
+    return *lammps_device_workspace_;
+  }
+
+  nep_adapters::cuda_backend::HostModelParameters host_;
+#endif
+  nep_adapters::cuda_backend::ModelProtocol protocol_;
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+  nep_adapters::cuda_backend::DeviceModel device_;
+  std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> lammps_device_workspace_;
+  std::size_t lammps_device_atom_capacity_ = 0;
+  std::size_t lammps_device_active_atom_capacity_ = 0;
+  int lammps_device_radial_capacity_ = 0;
+  int lammps_device_angular_capacity_ = 0;
+#endif
+};
+
+class CudaEngine : public nep_adapters::Engine {
+ public:
+  nep_adapters::EngineInfo info() const override {
+    return {
+        "cuda",
+        "skeleton",
+        nep_adapters::to_mask(nep_adapters::Capability::device_input)};
+  }
+
+  NepaStatus load_model(
+      const std::string& model_path,
+      std::unique_ptr<nep_adapters::Model>& out) override {
+    if (model_path.empty()) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+
+    try {
+      out = std::make_unique<CudaModel>(model_path);
+      return NEPA_STATUS_OK;
+    } catch (const std::exception&) {
+      out.reset();
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+};
+
+}  // namespace
+
+namespace nep_adapters {
+
+bool register_cuda_engine() {
+  static CudaEngine engine;
+  static const bool registered = register_engine(&engine);
+  return registered;
+}
+
+}  // namespace nep_adapters
+
+extern "C" int nepa_register_cuda_engine(void) {
+  return nep_adapters::register_cuda_engine() ? 1 : 0;
+}

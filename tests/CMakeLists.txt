@@ -105,6 +105,11 @@ if(TARGET NEPAdapters::cpu_nep3 AND
     PRIVATE
       NEPAdapters::cpu_nep3
   )
+  target_include_directories(
+    nep_adapters_cpu_nep3_qnep_test
+    PRIVATE
+      "${NEP_ADAPTERS_CPU_NEP3_SOURCE_DIR}"
+  )
   target_compile_definitions(
     nep_adapters_cpu_nep3_qnep_test
     PRIVATE
@@ -113,6 +118,277 @@ if(TARGET NEPAdapters::cpu_nep3 AND
   add_test(NAME nep_adapters_cpu_nep3_qnep_test COMMAND nep_adapters_cpu_nep3_qnep_test)
   set_tests_properties(nep_adapters_cpu_nep3_qnep_test PROPERTIES
     LABELS "smoke;engine;cpu_nep3;qnep")
+endif()
+
+if(TARGET NEPAdapters::cuda AND
+   EXISTS "${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt")
+  add_executable(nep_adapters_cuda_contract_test test_cuda_engine_contract.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_contract_test
+    PRIVATE
+      NEPAdapters::cuda
+  )
+  target_include_directories(
+    nep_adapters_cuda_contract_test
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/engines/cuda"
+  )
+  target_compile_definitions(
+    nep_adapters_cuda_contract_test
+    PRIVATE
+      NEP_ADAPTERS_CUDA_TEST_MODEL_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+  )
+  add_test(NAME nep_adapters_cuda_contract_test COMMAND nep_adapters_cuda_contract_test)
+  set_tests_properties(nep_adapters_cuda_contract_test PROPERTIES
+    LABELS "contract;engine;cuda")
+
+  add_executable(nep_adapters_cuda_batch_interface_test test_cuda_batch_interface.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_batch_interface_test
+    PRIVATE
+      NEPAdapters::cuda
+  )
+  target_compile_definitions(
+    nep_adapters_cuda_batch_interface_test
+    PRIVATE
+      NEP_ADAPTERS_CUDA_TEST_MODEL_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+  )
+  add_test(
+    NAME nep_adapters_cuda_batch_interface_test
+    COMMAND nep_adapters_cuda_batch_interface_test)
+  set_tests_properties(nep_adapters_cuda_batch_interface_test PROPERTIES
+    LABELS "contract;engine;cuda;batch")
+
+  add_executable(nep_adapters_cuda_lammps_host_sim_test test_cuda_lammps_host_sim.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_lammps_host_sim_test
+    PRIVATE
+      NEPAdapters::cuda
+  )
+  target_compile_definitions(
+    nep_adapters_cuda_lammps_host_sim_test
+    PRIVATE
+      NEP_ADAPTERS_CUDA_TEST_MODEL_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+  )
+  add_test(
+    NAME nep_adapters_cuda_lammps_host_sim_test
+    COMMAND nep_adapters_cuda_lammps_host_sim_test)
+  set_tests_properties(nep_adapters_cuda_lammps_host_sim_test PROPERTIES
+    LABELS "contract;engine;cuda;lammps")
+
+  if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME AND
+     EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt" AND
+     EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in" AND
+     EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/force_analytical_ref.out" AND
+     EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/virial_ref.out")
+    add_executable(nep_adapters_cuda_qnep_reference_test
+      test_cuda_qnep_reference.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_qnep_reference_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    target_compile_definitions(
+      nep_adapters_cuda_qnep_reference_test
+      PRIVATE
+        NEP_ADAPTERS_QNEP_TEST_DATA_DIR="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}"
+    )
+    add_test(
+      NAME nep_adapters_cuda_qnep_reference_test
+      COMMAND nep_adapters_cuda_qnep_reference_test)
+    set_tests_properties(nep_adapters_cuda_qnep_reference_test PROPERTIES
+      LABELS "parity;engine;cuda;device;qnep")
+  endif()
+
+  if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
+    add_executable(nep_adapters_cuda_lammps_kk_sim_test test_cuda_lammps_kk_sim.cu)
+    target_link_libraries(
+      nep_adapters_cuda_lammps_kk_sim_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    target_include_directories(
+      nep_adapters_cuda_lammps_kk_sim_test
+      PRIVATE
+        "${PROJECT_SOURCE_DIR}/engines/cuda"
+    )
+    set_target_properties(nep_adapters_cuda_lammps_kk_sim_test PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON)
+    add_test(
+      NAME nep_adapters_cuda_lammps_kk_sim_test
+      COMMAND nep_adapters_cuda_lammps_kk_sim_test)
+    set_tests_properties(nep_adapters_cuda_lammps_kk_sim_test PROPERTIES
+      LABELS "contract;engine;cuda;device;lammps;kokkos")
+
+    add_executable(nep_adapters_cuda_device_model_test test_cuda_device_model.cu)
+    target_link_libraries(
+      nep_adapters_cuda_device_model_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    target_include_directories(
+      nep_adapters_cuda_device_model_test
+      PRIVATE
+        "${PROJECT_SOURCE_DIR}/engines/cuda"
+    )
+    set_target_properties(nep_adapters_cuda_device_model_test PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON)
+    add_test(
+      NAME nep_adapters_cuda_device_model_test
+      COMMAND nep_adapters_cuda_device_model_test)
+    set_tests_properties(nep_adapters_cuda_device_model_test PROPERTIES
+      LABELS "contract;engine;cuda;device")
+
+    add_executable(nep_adapters_cuda_radial_batch_force_test
+      test_cuda_radial_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_radial_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_radial_batch_force_test
+      COMMAND nep_adapters_cuda_radial_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_radial_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_nep5_batch_force_test
+      test_cuda_nep5_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_nep5_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_nep5_batch_force_test
+      COMMAND nep_adapters_cuda_nep5_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_nep5_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_zbl_batch_force_test
+      test_cuda_zbl_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_zbl_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_zbl_batch_force_test
+      COMMAND nep_adapters_cuda_zbl_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_zbl_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_angular_batch_force_test
+      test_cuda_angular_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_angular_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_angular_batch_force_test
+      COMMAND nep_adapters_cuda_angular_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_angular_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q222_batch_force_test
+      test_cuda_q222_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q222_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q222_batch_force_test
+      COMMAND nep_adapters_cuda_q222_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q222_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q1111_batch_force_test
+      test_cuda_q1111_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q1111_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q1111_batch_force_test
+      COMMAND nep_adapters_cuda_q1111_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q1111_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q112_batch_force_test
+      test_cuda_q112_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q112_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q112_batch_force_test
+      COMMAND nep_adapters_cuda_q112_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q112_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q123_batch_force_test
+      test_cuda_q123_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q123_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q123_batch_force_test
+      COMMAND nep_adapters_cuda_q123_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q123_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q233_batch_force_test
+      test_cuda_q233_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q233_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q233_batch_force_test
+      COMMAND nep_adapters_cuda_q233_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q233_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+
+    add_executable(nep_adapters_cuda_q134_batch_force_test
+      test_cuda_q134_batch_force.cpp)
+    target_link_libraries(
+      nep_adapters_cuda_q134_batch_force_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    add_test(
+      NAME nep_adapters_cuda_q134_batch_force_test
+      COMMAND nep_adapters_cuda_q134_batch_force_test)
+    set_tests_properties(nep_adapters_cuda_q134_batch_force_test PROPERTIES
+      LABELS "parity;engine;cuda;device;force")
+  endif()
+endif()
+
+if(TARGET NEPAdapters::cuda AND
+   TARGET NEPAdapters::cpu_nep3 AND
+   NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
+  add_executable(nep_adapters_cuda_cpu_triclinic_parity_test
+    test_cuda_cpu_triclinic_parity.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_cpu_triclinic_parity_test
+    PRIVATE
+      NEPAdapters::cuda
+      NEPAdapters::cpu_nep3
+  )
+  add_test(
+    NAME nep_adapters_cuda_cpu_triclinic_parity_test
+    COMMAND nep_adapters_cuda_cpu_triclinic_parity_test)
+  set_tests_properties(nep_adapters_cuda_cpu_triclinic_parity_test PROPERTIES
+    LABELS "parity;engine;cuda;device;cpu_nep3;triclinic")
 endif()
 
 if(TARGET NEPAdapters::cpu_nep3 AND

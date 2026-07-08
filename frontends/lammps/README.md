@@ -9,13 +9,17 @@ compute engine.
 The preferred distribution shape is a runtime plugin when practical, with a
 source package fallback for older LAMMPS builds.
 
-Current CPU target:
+Current targets:
 
 - pair style: `nep/cpu`
 - backend: `cpu_nep3`
+- pair style: `nep/gpu` when the CUDA engine is enabled
+- backend: `cuda`
 - runtime plugin: `nepadaptersplugin.so`
 - compute path: LAMMPS neighbor lists are forwarded through the
-  external-neighbor runtime API to `NEP::compute_for_lammps`.
+  external-neighbor runtime API. The CUDA path currently shares this
+  LAMMPS-side numerical logic; Kokkos device-view plumbing is a later frontend
+  layer.
 - MPI status: local `mpirun -np 1/2/4` smoke has been validated for energy,
   force, per-atom energy, `stress/atom`, and `centroid/stress/atom`.
 - baseline status: when a LAMMPS executable is provided, the runtime plugin is
@@ -49,5 +53,13 @@ Plugin usage after building:
 ```lammps
 plugin load /path/to/nepadaptersplugin.so
 pair_style nep/cpu
+pair_coeff * * nep.txt Fe
+```
+
+CUDA-enabled builds can use the same coefficient shape:
+
+```lammps
+plugin load /path/to/nepadaptersplugin.so
+pair_style nep/gpu
 pair_coeff * * nep.txt Fe
 ```

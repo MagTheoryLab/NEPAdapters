@@ -43,6 +43,14 @@ class Model {
     (void)result;
     return NEPA_STATUS_UNSUPPORTED;
   }
+
+  virtual NepaStatus find_force_lammps_device_neighbors(
+      const NepaLammpsDeviceNeighborInput& input,
+      NepaLammpsDeviceNeighborResult& result) {
+    (void)input;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
 };
 
 class Engine {
@@ -56,6 +64,8 @@ class Engine {
 };
 
 bool register_engine(Engine* engine);
+void clear_last_error();
+void set_last_error(const std::string& message);
 
 // Transitional names kept while the public C ABI still says "backend".
 using BackendInfo = EngineInfo;

@@ -63,6 +63,7 @@ typedef struct NepaStructureBatch {
   const int32_t* atom_offsets;
   const int32_t* types;
   const double* positions_aos3;
+  /* 3x3 cell in NEP order: ax, bx, cx, ay, by, cy, az, bz, cz. */
   const double* boxes_row_major9;
   const int32_t* pbc_flags3;
 } NepaStructureBatch;
@@ -107,6 +108,51 @@ typedef struct NepaLammpsNeighborResult {
   double** virials_per_atom9;
 } NepaLammpsNeighborResult;
 
+typedef struct NepaLammpsDeviceNeighborInput {
+  int nlocal;
+  int nall;
+  int inum;
+  int max_neighbors;
+  int neighbor_rows;
+  int numneigh_length;
+  const int* ilist;
+  const int* numneigh;
+  /* Strided device neighbor view. LAMMPS/Kokkos legacy and no-legacy layout
+     conversion stays in the pair wrapper. */
+  const int* neighbors;
+  /* Optional length-nall owner ids used only to de-duplicate periodic ghost
+     images while preserving the actual neighbor index for geometry. */
+  const int* neighbor_owner;
+  int neighbor_atom_stride;
+  int neighbor_slot_stride;
+  /* Device model types, 0-based after any LAMMPS type-map conversion. */
+  const int* types;
+  /* Optional device LAMMPS type map. When provided, types are interpreted as
+     LAMMPS atom types and mapped through type_map[type] on device. */
+  const int* type_map;
+  int type_map_length;
+  const double* positions;
+  int position_atom_stride;
+  int position_component_stride;
+} NepaLammpsDeviceNeighborInput;
+
+typedef struct NepaLammpsDeviceNeighborResult {
+  /* Optional device totals. Provide both pointers to request global energy and
+     virial; leave both null for force-only MD steps. */
+  double* total_potential;
+  /* 6 components in LAMMPS order: xx, yy, zz, xy, xz, yz. */
+  double* total_virial6;
+  double* potential_per_atom;
+  double* forces;
+  int force_atom_stride;
+  int force_component_stride;
+  /* Per-atom 9 components in NEP compute_for_lammps() order:
+     xx, yy, zz, xy, xz, yz, yx, zx, zy. */
+  double* virials_per_atom9;
+  int virial_atom_stride;
+  int virial_component_stride;
+} NepaLammpsDeviceNeighborResult;
+
 NEP_ADAPTERS_API int nepa_api_version(void);
 NEP_ADAPTERS_API int nepa_backend_count(void);
 NEP_ADAPTERS_API NepaStatus nepa_backend_info(int index, NepaBackendInfo* out);
@@ -129,8 +175,13 @@ NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_neighbors(
     NepaModel* model,
     const NepaLammpsNeighborInput* input,
     NepaLammpsNeighborResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_device_neighbors(
+    NepaModel* model,
+    const NepaLammpsDeviceNeighborInput* input,
+    NepaLammpsDeviceNeighborResult* result);
 NEP_ADAPTERS_API void nepa_free_model(NepaModel* model);
 NEP_ADAPTERS_API const char* nepa_status_message(NepaStatus status);
+NEP_ADAPTERS_API const char* nepa_last_error_message(void);
 
 #ifdef __cplusplus
 }

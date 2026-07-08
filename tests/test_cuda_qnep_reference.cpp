@@ -1,0 +1,185 @@
+#include "nep_adapters/api.h"
+#include "nep_adapters/engines/cuda.hpp"
+
+#include "cpu_nep3_test_utils.hpp"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <numeric>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace {
+
+cpu_nep3_test::Frame read_xyz_in(
+    const std::string& xyz_path,
+    const std::unordered_map<std::string, std::int32_t>& type_map) {
+  std::ifstream input(xyz_path);
+  int atom_count = 0;
+  input >> atom_count;
+  if (!input || atom_count <= 0) {
+    std::exit(EXIT_FAILURE);
+  }
+
+  cpu_nep3_test::Frame frame;
+  frame.types.resize(static_cast<std::size_t>(atom_count));
+  frame.positions_aos3.resize(static_cast<std::size_t>(atom_count) * 3);
+  input >> frame.box[0] >> frame.box[3] >> frame.box[6] >> frame.box[1] >>
+      frame.box[4] >> frame.box[7] >> frame.box[2] >> frame.box[5] >>
+      frame.box[8];
+
+  for (int atom = 0; atom < atom_count; ++atom) {
+    std::string symbol;
+    input >> symbol >> frame.positions_aos3[3 * atom + 0] >>
+        frame.positions_aos3[3 * atom + 1] >>
+        frame.positions_aos3[3 * atom + 2];
+    const auto found = type_map.find(symbol);
+    if (!input || found == type_map.end()) {
+      std::exit(EXIT_FAILURE);
+    }
+    frame.types[atom] = found->second;
+  }
+  return frame;
+}
+
+std::vector<double> read_columns(
+    const std::string& path,
+    int columns,
+    int rows) {
+  std::ifstream input(path);
+  std::vector<double> values(static_cast<std::size_t>(rows) * columns, 0.0);
+  for (double& value : values) {
+    input >> value;
+    if (!input) {
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  return values;
+}
+
+bool near_all(
+    const std::vector<double>& actual,
+    const std::vector<double>& expected,
+    double tolerance,
+    const char* label,
+    int columns) {
+  double max_error = 0.0;
+  std::size_t max_index = 0;
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    const double error = std::abs(actual[index] - expected[index]);
+    if (error > max_error) {
+      max_error = error;
+      max_index = index;
+    }
+  }
+  if (max_error > tolerance) {
+    const std::size_t row = max_index / static_cast<std::size_t>(columns);
+    const std::size_t component = max_index % static_cast<std::size_t>(columns);
+    std::cerr << label << " mismatch max_error=" << max_error
+              << " index=" << max_index
+              << " row=" << row
+              << " component=" << component
+              << " actual=" << actual[max_index]
+              << " expected=" << expected[max_index] << '\n';
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+int main() {
+  const std::string data_dir = NEP_ADAPTERS_QNEP_TEST_DATA_DIR;
+  const std::string model_path = data_dir + "/nep.txt";
+  const std::string xyz_path = data_dir + "/xyz.in";
+
+  if (!nep_adapters::register_cuda_engine()) {
+    return EXIT_FAILURE;
+  }
+
+  const auto type_map = cpu_nep3_test::read_type_map(model_path);
+  const cpu_nep3_test::Frame frame = read_xyz_in(xyz_path, type_map);
+  const std::int32_t atom_count = static_cast<std::int32_t>(frame.types.size());
+  std::int32_t atom_counts[] = {atom_count};
+  std::int32_t atom_offsets[] = {0};
+  std::int32_t pbc[] = {1, 1, 1};
+
+  NepaStructureBatch batch{};
+  batch.num_structures = 1;
+  batch.total_atoms = atom_count;
+  batch.atom_counts = atom_counts;
+  batch.atom_offsets = atom_offsets;
+  batch.types = frame.types.data();
+  batch.positions_aos3 = frame.positions_aos3.data();
+  batch.boxes_row_major9 = frame.box;
+  batch.pbc_flags3 = pbc;
+
+  NepaModel* model = nullptr;
+  if (nepa_load_model("cuda", model_path.c_str(), &model) != NEPA_STATUS_OK ||
+      model == nullptr) {
+    return EXIT_FAILURE;
+  }
+
+  double energy[] = {0.0};
+  std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> total_virial(9, 0.0);
+  std::vector<double> per_atom_virial(
+      static_cast<std::size_t>(atom_count) * 9,
+      0.0);
+  std::vector<double> charge(static_cast<std::size_t>(atom_count), 0.0);
+
+  NepaFindForceResult result{};
+  result.energy_per_structure = energy;
+  result.forces_aos3 = forces.data();
+  result.virials_row_major9 = total_virial.data();
+  result.virials_per_atom_row_major9 = per_atom_virial.data();
+  result.charge_per_atom = charge.data();
+
+  const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  nepa_free_model(model);
+  if (status != NEPA_STATUS_OK || !std::isfinite(energy[0]) ||
+      !cpu_nep3_test::all_finite(forces) ||
+      !cpu_nep3_test::all_finite(total_virial) ||
+      !cpu_nep3_test::all_finite(per_atom_virial) ||
+      !cpu_nep3_test::all_finite(charge)) {
+    std::cerr << "CUDA qNEP status=" << status
+              << " error=" << nepa_last_error_message() << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const double total_charge =
+      std::accumulate(charge.begin(), charge.end(), 0.0);
+  if (std::abs(total_charge) > 1.0e-8) {
+    std::cerr << "CUDA qNEP charge sum failed: " << total_charge << '\n';
+    return EXIT_FAILURE;
+  }
+
+  const std::vector<double> force_ref =
+      read_columns(data_dir + "/force_analytical_ref.out", 3, atom_count);
+  const std::vector<double> per_atom_virial_ref =
+      read_columns(data_dir + "/virial_ref.out", 9, atom_count);
+  std::vector<double> total_virial_ref(9, 0.0);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    for (int component = 0; component < 9; ++component) {
+      total_virial_ref[component] +=
+          per_atom_virial_ref[9 * atom + component];
+    }
+  }
+
+  const bool force_ok =
+      near_all(forces, force_ref, 5.0e-3, "qNEP force", 3);
+  const bool virial_ok =
+      near_all(total_virial, total_virial_ref, 1.0e-2, "qNEP virial", 9);
+  const bool per_atom_virial_ok = near_all(
+      per_atom_virial,
+      per_atom_virial_ref,
+      1.0e-2,
+      "qNEP per-atom virial",
+      9);
+  return force_ok && virial_ok && per_atom_virial_ok ? EXIT_SUCCESS
+                                                     : EXIT_FAILURE;
+}

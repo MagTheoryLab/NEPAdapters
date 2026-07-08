@@ -40,6 +40,58 @@ Planned engines:
 This avoids repeating the official CPU implementation while still allowing
 independent CPU engineering.
 
+The CUDA engine should be built normal-NEP first. Its protocol source of truth is
+the current `torchnep/src/force` NEP implementation, while performance choices
+should reuse the measured high-performance CUDA work only after the protocol
+boundary is clear. Spin support should layer on top only after the non-spin
+dataflow is stable: model parsing, owned-neighbor construction, host/device
+staging, descriptor/ANN execution, force scatter, and virial reduction should be
+ordinary NEP concepts first, with spin-specific buffers and kernels added later
+instead of defining the base shape.
+
+CUDA implementation files should keep human-facing boundaries explicit:
+`model_protocol` parses the model and computes parameter counts, `workspace_plan`
+names and sizes device buffers, and later `.cu` files should implement kernels
+against those contracts. Avoid recreating a single large bridge file that mixes
+text parsing, LAMMPS conventions, staging, kernels, and diagnostics.
+
+CUDA-facing tests should keep caller shapes separate from the start: ordinary
+batch API, LAMMPS host-neighbor simulation, and LAMMPS Kokkos/device-staging
+simulation are different contracts. The Kokkos path should not be forced through
+host pointer APIs; it needs an explicit device-input contract before kernels are
+advertised as supported.
+
+The CUDA force path has two first-class input modes:
+
+- direct coordinates: the caller provides atom types, positions, boxes, PBC
+  flags, and per-structure ranges. The CUDA engine owns neighbor construction
+  and therefore keeps structure, box, and PBC metadata in its internal-neighbor
+  workspace.
+- external neighbors: the caller provides an already-built neighbor topology,
+  such as LAMMPS host neighbors or later Kokkos/device neighbors. The CUDA engine
+  stages active atoms and converts or aliases the topology into its slot-major
+  execution layout without making this path depend on batch boxes.
+
+Both modes should converge before descriptor and ANN kernels on the same
+slot-major neighbor arrays and SoA atom/output buffers. That shared execution
+layout is the performance-critical boundary; the staging code on either side may
+remain caller-specific.
+
+Internal CUDA neighbor generation should use a large-system cell-list algorithm,
+not an all-pairs builder. The current CUDA scaffold starts with CSR-style cells:
+count atoms per cell, prefix-scan offsets, scatter atom ids into cell-contiguous
+storage, then traverse neighboring cells to fill radial and angular slot-major
+neighbor arrays. That layout leaves room for later sorted-cell ordering and
+Kokkos device-view input without changing descriptor kernels.
+
+LAMMPS Kokkos should be treated as a third frontend shape, not as the same thing
+as the host-neighbor API. In the local LAMMPS checkout, Kokkos coordinates are
+`X_FLOAT*[3]` views accessed as `x(i,0..2)`, while neighbor data is held in
+Kokkos `int**` views and sometimes a transpose view. That can support a later
+device-view path with less copying, but the CUDA engine should still own the
+final execution layout for NEP kernels instead of inheriting LAMMPS view layout
+as the core ABI.
+
 ## Frontend Strategy
 
 Python and LAMMPS have different shapes and should not force each other into the

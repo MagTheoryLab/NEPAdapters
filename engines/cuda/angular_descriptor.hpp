@@ -1,0 +1,36 @@
+#pragma once
+
+#include "device_model.hpp"
+#include "device_workspace.hpp"
+#include "model_protocol.hpp"
+#include "simulation_box.hpp"
+
+namespace nep_adapters::cuda_backend {
+
+void build_angular_descriptors_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
+void build_angular_descriptors_from_geometry_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
+bool try_build_angular_descriptors_and_ann_from_geometry_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
+bool try_build_descriptors_and_ann_from_positions_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool store_potential = true);
+
+}  // namespace nep_adapters::cuda_backend

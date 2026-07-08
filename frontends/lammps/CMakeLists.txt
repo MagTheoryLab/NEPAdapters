@@ -2,6 +2,8 @@ set(NEP_ADAPTERS_LAMMPS_SOURCE_DIR "" CACHE PATH
   "Path to a LAMMPS source tree containing src/pair.h")
 set(NEP_ADAPTERS_LAMMPS_EXECUTABLE "" CACHE FILEPATH
   "Optional LAMMPS executable used for runtime plugin smoke tests")
+set(NEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR "" CACHE PATH
+  "Optional LAMMPS Kokkos build tree used to compile Kokkos-aware plugin styles")
 
 if(NOT NEP_ADAPTERS_LAMMPS_SOURCE_DIR)
   foreach(_candidate IN ITEMS
@@ -38,7 +40,67 @@ endif()
 
 find_package(MPI QUIET COMPONENTS CXX)
 
+if(NEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR)
+  list(APPEND CMAKE_PREFIX_PATH
+    "${NEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR}/cmake_packages/Kokkos")
+  find_package(Kokkos CONFIG REQUIRED)
+  set_source_files_properties(
+    pair_nep_adapters_cuda.cpp
+    PROPERTIES
+      LANGUAGE CUDA
+      COMPILE_OPTIONS "--extended-lambda")
+endif()
+
+function(nep_adapters_lammps_add_kokkos_interface target)
+  foreach(_kokkos_target IN ITEMS
+      Kokkos::kokkoscore
+      Kokkos::kokkoscontainers
+      Kokkos::kokkosalgorithms
+      Kokkos::kokkossimd)
+    foreach(_include_prop IN ITEMS
+        INTERFACE_INCLUDE_DIRECTORIES
+        INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
+      get_target_property(_kokkos_includes ${_kokkos_target} ${_include_prop})
+      if(_kokkos_includes)
+        target_include_directories(${target} SYSTEM PRIVATE ${_kokkos_includes})
+      endif()
+    endforeach()
+
+    get_target_property(_kokkos_definitions
+      ${_kokkos_target} INTERFACE_COMPILE_DEFINITIONS)
+    if(_kokkos_definitions)
+      target_compile_definitions(${target} PRIVATE ${_kokkos_definitions})
+    endif()
+
+    get_target_property(_kokkos_options
+      ${_kokkos_target} INTERFACE_COMPILE_OPTIONS)
+    if(_kokkos_options)
+      target_compile_options(${target} PRIVATE ${_kokkos_options})
+    endif()
+  endforeach()
+endfunction()
+
+function(nep_adapters_lammps_enable_kokkos target)
+  if(NEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR)
+    set(_link_kokkos TRUE)
+    if(ARGC GREATER 1 AND "${ARGV1}" STREQUAL "NO_LINK")
+      set(_link_kokkos FALSE)
+    endif()
+    target_compile_definitions(${target} PRIVATE LMP_KOKKOS)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+    target_include_directories(${target} PRIVATE
+      "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/KOKKOS")
+    if(_link_kokkos)
+      target_link_libraries(${target} PRIVATE Kokkos::kokkos)
+    else()
+      nep_adapters_lammps_add_kokkos_interface(${target})
+    endif()
+  endif()
+endfunction()
+
 add_library(nep_adapters_lammps_frontend STATIC
+  pair_nep_adapters_common.cpp
   pair_nep_adapters_cpu.cpp
 )
 add_library(NEPAdapters::lammps_frontend ALIAS nep_adapters_lammps_frontend)
@@ -48,6 +110,17 @@ target_link_libraries(
   PUBLIC
     NEPAdapters::cpu_nep3
 )
+if(TARGET NEPAdapters::cuda)
+  target_sources(nep_adapters_lammps_frontend PRIVATE
+    pair_nep_adapters_cuda.cpp
+  )
+  target_link_libraries(nep_adapters_lammps_frontend PUBLIC NEPAdapters::cuda)
+  target_compile_definitions(
+    nep_adapters_lammps_frontend
+    PUBLIC
+      NEP_ADAPTERS_LAMMPS_ENABLE_CUDA=1)
+endif()
+nep_adapters_lammps_enable_kokkos(nep_adapters_lammps_frontend)
 if(MPI_CXX_FOUND)
   target_link_libraries(nep_adapters_lammps_frontend PRIVATE MPI::MPI_CXX)
 else()
@@ -76,9 +149,17 @@ set_target_properties(
 if(EXISTS "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/lammpsplugin.h")
   add_library(nepadaptersplugin MODULE
     nepadaptersplugin.cpp
+    pair_nep_adapters_common.cpp
     pair_nep_adapters_cpu.cpp
   )
   target_link_libraries(nepadaptersplugin PRIVATE NEPAdapters::cpu_nep3)
+  if(TARGET NEPAdapters::cuda)
+    target_sources(nepadaptersplugin PRIVATE pair_nep_adapters_cuda.cpp)
+    target_link_libraries(nepadaptersplugin PRIVATE NEPAdapters::cuda)
+    target_compile_definitions(nepadaptersplugin PRIVATE
+      NEP_ADAPTERS_LAMMPS_ENABLE_CUDA=1)
+  endif()
+  nep_adapters_lammps_enable_kokkos(nepadaptersplugin NO_LINK)
   if(MPI_CXX_FOUND)
     target_link_libraries(nepadaptersplugin PRIVATE MPI::MPI_CXX)
   else()
