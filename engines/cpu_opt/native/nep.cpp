@@ -5025,6 +5025,10 @@ void fill_spin_descriptor(
 
   int offset = 2 + 4 * C;
   auto contract = [&](const std::vector<double>& a, const std::vector<double>& b, const int width) {
+    const int q_offset = offset;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
     for (int atom = 0; atom < N; ++atom) {
       for (int c = 0; c < C; ++c) {
         const double* av = a.data() + (static_cast<std::size_t>(atom) * C + c) * width;
@@ -5033,7 +5037,7 @@ void fill_spin_descriptor(
         for (int k = 0; k < width; ++k) {
           sum += av[k] * bv[k];
         }
-        qref(atom, offset + c) = sum;
+        qref(atom, q_offset + c) = sum;
       }
     }
     offset += C;
@@ -5048,6 +5052,10 @@ void fill_spin_descriptor(
   for (int ell = 2; ell <= l_max; ++ell) {
     contract(ell == 2 ? angular2 : ell == 3 ? angular3 : angular4, ell == 2 ? angular2 : ell == 3 ? angular3 : angular4, (2 * ell + 1) * 3);
   }
+  const int geom_q_offset = offset;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
   for (int atom = 0; atom < N; ++atom) {
     const std::array<double, 3> s = {spin(atom, 0), spin(atom, 1), spin(atom, 2)};
     for (int c = 0; c < C; ++c) {
@@ -5058,7 +5066,7 @@ void fill_spin_descriptor(
           value += s[a] * g[3 * a + b] * s[b];
         }
       }
-      qref(atom, offset + c) = value;
+      qref(atom, geom_q_offset + c) = value;
     }
   }
   offset += C;
