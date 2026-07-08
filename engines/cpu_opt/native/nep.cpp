@@ -4476,6 +4476,7 @@ struct SpinEdge {
 
 struct SpinCache {
   std::vector<SpinEdge> edges;
+  std::vector<int> edge_offsets;
   std::vector<double> rho0;
   std::vector<double> raw1;
   std::vector<double> l1_rdot;
@@ -4615,7 +4616,7 @@ void fill_spin_descriptor(
   // ponytail: direct edge fill wins on large LMP cases; retune if benchmark mix changes.
   const bool direct_edge_cache =
     keep_edges && use_parallel_edges && use_lammps_edges && loop_count >= 4096;
-  std::vector<int> edge_offsets;
+  std::vector<int>& edge_offsets = cache.edge_offsets;
   std::vector<std::vector<SpinEdge>> private_edges(
     keep_edges && use_parallel_edges && !direct_edge_cache ? static_cast<std::size_t>(num_threads) : 0);
   if (keep_edges) {
@@ -5122,6 +5123,7 @@ void add_spin_chiral_gradient(
 #endif
   const bool use_parallel_edges = num_threads > 1 && edge_count > 32;
   const bool use_lammps_scratch = lammps_spin_scratch_active(lammps_scratch);
+  const bool use_center_edges = cache.edge_offsets.size() > 1;
 
   auto fp = [&](const int atom, const int dim) {
     return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
@@ -5177,34 +5179,25 @@ void add_spin_chiral_gradient(
     scratch ? scratch->grad_pseudodev_private : local_grad_pseudodev_private;
   resize_and_zero(
     grad_chi_private,
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_chi.size() : 0);
+    use_parallel_edges && !use_center_edges
+      ? static_cast<std::size_t>(num_threads) * grad_chi.size()
+      : 0);
   resize_and_zero(
     grad_polar_private,
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_polar.size() : 0);
+    use_parallel_edges && !use_center_edges
+      ? static_cast<std::size_t>(num_threads) * grad_polar.size()
+      : 0);
   resize_and_zero(
     grad_pseudodev_private,
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size() : 0);
+    use_parallel_edges && !use_center_edges
+      ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size()
+      : 0);
 
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
-#endif
-  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
-    const std::size_t e = static_cast<std::size_t>(edge_index);
+  auto add_chiral_edge_pull = [&](const std::size_t e,
+                                  double* local_grad_chi,
+                                  double* local_grad_polar,
+                                  double* local_grad_pseudodev) {
     const SpinEdge& edge = cache.edges[e];
-#if defined(_OPENMP)
-    const int tid = omp_get_thread_num();
-#else
-    const int tid = 0;
-#endif
-    double* local_grad_chi = use_parallel_edges
-      ? grad_chi_private.data() + static_cast<std::size_t>(tid) * grad_chi.size()
-      : grad_chi.data();
-    double* local_grad_polar = use_parallel_edges
-      ? grad_polar_private.data() + static_cast<std::size_t>(tid) * grad_polar.size()
-      : grad_polar.data();
-    double* local_grad_pseudodev = use_parallel_edges
-      ? grad_pseudodev_private.data() + static_cast<std::size_t>(tid) * grad_pseudodev.size()
-      : grad_pseudodev.data();
     const std::array<double, 3> x = cross3(edge.si, edge.sj);
     std::array<double, 3> gx = {0.0, 0.0, 0.0};
     std::array<double, 3> gu = {0.0, 0.0, 0.0};
@@ -5271,10 +5264,50 @@ void add_spin_chiral_gradient(
     add_edge_vec(grad_si, e, gsi);
     add_edge_vec(grad_sj, e, gsj);
     add_edge_vec(grad_rhat, e, gu);
+  };
+
+  if (use_center_edges) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+    for (std::ptrdiff_t center_index = 0;
+         center_index < static_cast<std::ptrdiff_t>(cache.edge_offsets.size() - 1);
+         ++center_index) {
+      const std::size_t idx = static_cast<std::size_t>(center_index);
+      for (int e = cache.edge_offsets[idx]; e < cache.edge_offsets[idx + 1]; ++e) {
+        add_chiral_edge_pull(
+          static_cast<std::size_t>(e), grad_chi.data(), grad_polar.data(),
+          grad_pseudodev.data());
+      }
+    }
+  } else {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+    for (std::ptrdiff_t edge_index = 0;
+         edge_index < static_cast<std::ptrdiff_t>(edge_count);
+         ++edge_index) {
+      const std::size_t e = static_cast<std::size_t>(edge_index);
+#if defined(_OPENMP)
+      const int tid = omp_get_thread_num();
+#else
+      const int tid = 0;
+#endif
+      double* local_grad_chi = use_parallel_edges
+        ? grad_chi_private.data() + static_cast<std::size_t>(tid) * grad_chi.size()
+        : grad_chi.data();
+      double* local_grad_polar = use_parallel_edges
+        ? grad_polar_private.data() + static_cast<std::size_t>(tid) * grad_polar.size()
+        : grad_polar.data();
+      double* local_grad_pseudodev = use_parallel_edges
+        ? grad_pseudodev_private.data() + static_cast<std::size_t>(tid) * grad_pseudodev.size()
+        : grad_pseudodev.data();
+      add_chiral_edge_pull(e, local_grad_chi, local_grad_polar, local_grad_pseudodev);
+    }
+    reduce_private(grad_chi, grad_chi_private);
+    reduce_private(grad_polar, grad_polar_private);
+    reduce_private(grad_pseudodev, grad_pseudodev_private);
   }
-  reduce_private(grad_chi, grad_chi_private);
-  reduce_private(grad_polar, grad_polar_private);
-  reduce_private(grad_pseudodev, grad_pseudodev_private);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
@@ -5321,22 +5354,12 @@ void add_spin_chiral_gradient(
     scratch ? scratch->grad_Q_private : local_grad_Q_private;
   resize_and_zero(
     grad_Q_private,
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_Q.size() : 0);
+    use_parallel_edges && !use_center_edges
+      ? static_cast<std::size_t>(num_threads) * grad_Q.size()
+      : 0);
 
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
-#endif
-  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
-    const std::size_t e = static_cast<std::size_t>(edge_index);
+  auto add_chiral_pseudodev_pull = [&](const std::size_t e, double* local_grad_Q) {
     const SpinEdge& edge = cache.edges[e];
-#if defined(_OPENMP)
-    const int tid = omp_get_thread_num();
-#else
-    const int tid = 0;
-#endif
-    double* local_grad_Q = use_parallel_edges
-      ? grad_Q_private.data() + static_cast<std::size_t>(tid) * grad_Q.size()
-      : grad_Q.data();
     for (int c = 0; c < C; ++c) {
       const double* gp = cblockC(grad_polar, edge.i, c, 3);
       egw(e, c) += gp[0] * edge.rhat[0] + gp[1] * edge.rhat[1] + gp[2] * edge.rhat[2];
@@ -5375,8 +5398,40 @@ void add_spin_chiral_gradient(
         }
       }
     }
+  };
+
+  if (use_center_edges) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+    for (std::ptrdiff_t center_index = 0;
+         center_index < static_cast<std::ptrdiff_t>(cache.edge_offsets.size() - 1);
+         ++center_index) {
+      const std::size_t idx = static_cast<std::size_t>(center_index);
+      for (int e = cache.edge_offsets[idx]; e < cache.edge_offsets[idx + 1]; ++e) {
+        add_chiral_pseudodev_pull(static_cast<std::size_t>(e), grad_Q.data());
+      }
+    }
+  } else {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+    for (std::ptrdiff_t edge_index = 0;
+         edge_index < static_cast<std::ptrdiff_t>(edge_count);
+         ++edge_index) {
+      const std::size_t e = static_cast<std::size_t>(edge_index);
+#if defined(_OPENMP)
+      const int tid = omp_get_thread_num();
+#else
+      const int tid = 0;
+#endif
+      double* local_grad_Q = use_parallel_edges
+        ? grad_Q_private.data() + static_cast<std::size_t>(tid) * grad_Q.size()
+        : grad_Q.data();
+      add_chiral_pseudodev_pull(e, local_grad_Q);
+    }
+    reduce_private(grad_Q, grad_Q_private);
   }
-  reduce_private(grad_Q, grad_Q_private);
 
   std::vector<double> local_grad_Q_terms;
   std::vector<double> local_grad_O_terms;
