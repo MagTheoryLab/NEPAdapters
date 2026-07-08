@@ -288,6 +288,7 @@ public:
   std::vector<double> spin_baseline;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
+  std::vector<double> lammps_mforce_private;
   std::vector<double> lammps_total_virial_private;
   std::vector<double> lammps_virial_private;
   std::vector<int> lammps_angular_edge_offsets;
@@ -306,16 +307,8 @@ public:
   std::vector<double> lammps_radial_edge_d12;
   std::vector<double> lammps_radial_edge_gnp;
   std::vector<int> lammps_spin_types;
-  std::vector<int> lammps_spin_NN;
-  std::vector<int> lammps_spin_NL;
-  std::vector<double> lammps_spin_x12;
-  std::vector<double> lammps_spin_y12;
-  std::vector<double> lammps_spin_z12;
   std::vector<double> lammps_spin_spins_soa;
   std::vector<double> lammps_spin_descriptor;
-  std::vector<double> lammps_spin_force_soa;
-  std::vector<double> lammps_spin_mforce_soa;
-  std::vector<double> lammps_spin_virial_soa;
   std::vector<int> lammps_touched_rows;
   std::vector<int> lammps_touched_marks;
   int lammps_touched_stamp = 0;

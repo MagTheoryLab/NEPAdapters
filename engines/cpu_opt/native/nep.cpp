@@ -1019,6 +1019,7 @@ struct LammpsThreadLocalScratchView {
   bool dense_rows = false;
   const std::vector<int>* touched_rows = nullptr;
   double* force_private = nullptr;
+  double* mforce_private = nullptr;
   double* total_virial_private = nullptr;
   double* virial_private = nullptr;
 };
@@ -1052,6 +1053,11 @@ bool lammps_thread_scratch_active(const LammpsThreadLocalScratchView* scratch)
 {
   return scratch && scratch->num_threads > 1 && scratch->force_rows > 0 &&
          scratch->touched_rows && scratch->force_private && scratch->total_virial_private;
+}
+
+bool lammps_spin_scratch_active(const LammpsThreadLocalScratchView* scratch)
+{
+  return lammps_thread_scratch_active(scratch) && scratch->mforce_private;
 }
 
 bool lammps_angular_edge_cache_active(const LammpsAngularEdgeCacheView* cache)
@@ -1212,6 +1218,20 @@ void zero_lammps_thread_local_scratch(
       }
     }
 
+    if (scratch.mforce_private) {
+      double* local_mforce =
+        scratch.mforce_private + static_cast<std::size_t>(tid) * 3 * force_rows;
+      if (scratch.dense_rows) {
+        std::fill(local_mforce, local_mforce + static_cast<std::size_t>(3) * force_rows, 0.0);
+      } else {
+        for (int row : touched_rows) {
+          local_mforce[0 * force_rows + row] = 0.0;
+          local_mforce[1 * force_rows + row] = 0.0;
+          local_mforce[2 * force_rows + row] = 0.0;
+        }
+      }
+    }
+
     if (use_virial && scratch.virial_private) {
       double* local_virial = scratch.virial_private + static_cast<std::size_t>(tid) * 9 * force_rows;
       if (scratch.dense_rows) {
@@ -1232,7 +1252,8 @@ void reduce_lammps_thread_local_force_virial(
   const LammpsThreadLocalScratchView& scratch,
   double** g_force,
   double g_total_virial[6],
-  double** g_virial)
+  double** g_virial,
+  double** g_mforce = nullptr)
 {
   const int force_rows = scratch.force_rows;
   const int num_threads = scratch.num_threads;
@@ -1255,6 +1276,20 @@ void reduce_lammps_thread_local_force_virial(
     g_force[n][0] += fx;
     g_force[n][1] += fy;
     g_force[n][2] += fz;
+    if (g_mforce && scratch.mforce_private) {
+      double mx = 0.0;
+      double my = 0.0;
+      double mz = 0.0;
+      for (int tid = 0; tid < num_threads; ++tid) {
+        const std::size_t base = (static_cast<std::size_t>(tid) * 3) * force_rows + n;
+        mx += scratch.mforce_private[base + static_cast<std::size_t>(0) * force_rows];
+        my += scratch.mforce_private[base + static_cast<std::size_t>(1) * force_rows];
+        mz += scratch.mforce_private[base + static_cast<std::size_t>(2) * force_rows];
+      }
+      g_mforce[n][0] -= mx;
+      g_mforce[n][1] -= my;
+      g_mforce[n][2] -= mz;
+    }
   }
 
   for (int d = 0; d < 6; ++d) {
@@ -4285,6 +4320,49 @@ void add_density(
   }
 }
 
+void add_lammps_spin_virial(
+  const std::array<double, 3>& rhat,
+  const double dist,
+  const std::array<double, 3>& grad_rij,
+  double* total_virial,
+  double* virial,
+  const int stride,
+  const int row)
+{
+  const double rx = rhat[0] * dist;
+  const double ry = rhat[1] * dist;
+  const double rz = rhat[2] * dist;
+  const double v00 = -rx * grad_rij[0];
+  const double v01 = -rx * grad_rij[1];
+  const double v02 = -rx * grad_rij[2];
+  const double v11 = -ry * grad_rij[1];
+  const double v12 = -ry * grad_rij[2];
+  const double v22 = -rz * grad_rij[2];
+  total_virial[0] += v00;
+  total_virial[1] += v11;
+  total_virial[2] += v22;
+  total_virial[3] += v01;
+  total_virial[4] += v02;
+  total_virial[5] += v12;
+  if (!virial) {
+    return;
+  }
+  const double v10 = -ry * grad_rij[0];
+  const double v20 = -rz * grad_rij[0];
+  const double v21 = -rz * grad_rij[1];
+  virial[0 * stride + row] += v00;
+  virial[1 * stride + row] += v11;
+  virial[2 * stride + row] += v22;
+  virial[3 * stride + row] += v01;
+  virial[4 * stride + row] += v02;
+  virial[5 * stride + row] += v12;
+  virial[6 * stride + row] += v10;
+  virial[7 * stride + row] += v20;
+  virial[8 * stride + row] += v21;
+}
+
+constexpr int MAX_SPIN_COMPRESS = 4;
+
 struct SpinEdge {
   int i;
   int j;
@@ -4293,8 +4371,8 @@ struct SpinEdge {
   std::array<double, 3> rhat;
   std::array<double, 3> si;
   std::array<double, 3> sj;
-  std::array<double, MAX_NUM_N> weights;
-  std::array<double, MAX_NUM_N> weight_derivatives;
+  std::array<double, MAX_SPIN_COMPRESS> weights;
+  std::array<double, MAX_SPIN_COMPRESS> weight_derivatives;
   double dot;
   double sj2;
   double ri_dot_si;
@@ -4347,7 +4425,11 @@ void fill_spin_descriptor(
   const double* spins,
   double* descriptor_soa,
   SpinCache* cache_out = nullptr,
-  SpinPhaseBreakdown* phase = nullptr)
+  SpinPhaseBreakdown* phase = nullptr,
+  const int center_count = 0,
+  const int* centers = nullptr,
+  int** lammps_NL = nullptr,
+  double** lammps_pos = nullptr)
 {
   auto phase_mark = NepPhaseClock::now();
   auto add_phase = [&](double SpinPhaseBreakdown::*slot) {
@@ -4372,6 +4454,11 @@ void fill_spin_descriptor(
   };
   auto active = [&](const std::vector<int>& mask, const int t) -> bool {
     return mask.empty() || mask[static_cast<std::size_t>(t)] != 0;
+  };
+  const bool use_lammps_edges = centers && lammps_NL && lammps_pos;
+  const int loop_count = use_lammps_edges ? center_count : N;
+  auto center_atom = [&](const int idx) {
+    return use_lammps_edges ? centers[idx] : idx;
   };
 
   for (int atom = 0; atom < N; ++atom) {
@@ -4433,15 +4520,28 @@ void fill_spin_descriptor(
   const bool keep_edges = cache_out || paramb.spin_chiral;
   std::vector<std::vector<SpinEdge>> private_edges(
     keep_edges && use_parallel_edges ? static_cast<std::size_t>(num_threads) : 0);
-  if (keep_edges && !use_parallel_edges) {
-    cache.edges.reserve(static_cast<std::size_t>(N) * 8);
+  if (keep_edges) {
+    std::size_t edge_capacity = 0;
+    for (int idx = 0; idx < loop_count; ++idx) {
+      edge_capacity += static_cast<std::size_t>(NN[center_atom(idx)]);
+    }
+    if (use_parallel_edges) {
+      const std::size_t reserve_per_thread =
+        edge_capacity / static_cast<std::size_t>(num_threads) + 64;
+      for (auto& thread_edges : private_edges) {
+        thread_edges.reserve(reserve_per_thread);
+      }
+    } else {
+      cache.edges.reserve(edge_capacity);
+    }
   }
   add_phase(&SpinPhaseBreakdown::setup);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
-  for (int i = 0; i < N; ++i) {
+  for (int idx = 0; idx < loop_count; ++idx) {
+    const int i = center_atom(idx);
 #if defined(_OPENMP)
     const int tid = omp_get_thread_num();
 #else
@@ -4449,10 +4549,10 @@ void fill_spin_descriptor(
 #endif
     for (int n = 0; n < NN[i]; ++n) {
       const int index = n * N + i;
-      const int j = NL[index];
-      const double dx = x12[index];
-      const double dy = y12[index];
-      const double dz = z12[index];
+      const int j = use_lammps_edges ? lammps_NL[i][n] : NL[index];
+      const double dx = use_lammps_edges ? lammps_pos[j][0] - lammps_pos[i][0] : x12[index];
+      const double dy = use_lammps_edges ? lammps_pos[j][1] - lammps_pos[i][1] : y12[index];
+      const double dz = use_lammps_edges ? lammps_pos[j][2] - lammps_pos[i][2] : z12[index];
       const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
       if (d <= 1.0e-12 || d >= paramb.spin_cutoff_radial) {
         continue;
@@ -4844,7 +4944,8 @@ void add_spin_chiral_gradient(
   const double* Fp,
   std::vector<double>& grad_spin,
   double* force,
-  double* virial)
+  double* virial,
+  LammpsThreadLocalScratchView* lammps_scratch = nullptr)
 {
   if (!paramb.spin_chiral || cache.edges.empty()) {
     return;
@@ -4871,6 +4972,7 @@ void add_spin_chiral_gradient(
   const int num_threads = 1;
 #endif
   const bool use_parallel_edges = num_threads > 1 && edge_count > 32;
+  const bool use_lammps_scratch = lammps_spin_scratch_active(lammps_scratch);
 
   auto fp = [&](const int atom, const int dim) {
     return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
@@ -5181,15 +5283,20 @@ void add_spin_chiral_gradient(
     }
   }
 
+  const bool use_private_edges = use_parallel_edges || use_lammps_scratch;
+  const int force_stride = use_lammps_scratch ? lammps_scratch->force_rows : N;
   std::vector<double> force_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
+    0.0);
   std::vector<double> grad_spin_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
+    0.0);
   std::vector<double> virial_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 9 : 0,
+    0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_private_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
     const std::size_t e = static_cast<std::size_t>(edge_index);
@@ -5199,15 +5306,31 @@ void add_spin_chiral_gradient(
 #else
     const int tid = 0;
 #endif
-    double* local_force = use_parallel_edges
-      ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
-      : force;
-    double* local_grad_spin = use_parallel_edges
-      ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
-      : grad_spin.data();
-    double* local_virial = use_parallel_edges
-      ? virial_private.data() + static_cast<std::size_t>(tid) * 9
-      : nullptr;
+    double* local_force = nullptr;
+    double* local_grad_spin = nullptr;
+    double* local_virial = nullptr;
+    double* local_total_virial = nullptr;
+    if (use_lammps_scratch) {
+      local_force =
+        lammps_scratch->force_private + static_cast<std::size_t>(tid) * 3 * force_stride;
+      local_grad_spin =
+        lammps_scratch->mforce_private + static_cast<std::size_t>(tid) * 3 * force_stride;
+      local_total_virial =
+        lammps_scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+      local_virial = lammps_scratch->virial_private
+        ? lammps_scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_stride
+        : nullptr;
+    } else {
+      local_force = use_private_edges
+        ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
+        : force;
+      local_grad_spin = use_private_edges
+        ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
+        : grad_spin.data();
+      local_virial = use_private_edges
+        ? virial_private.data() + static_cast<std::size_t>(tid) * 9
+        : nullptr;
+    }
     double grad_dist = 0.0;
     for (int c = 0; c < C; ++c) {
       grad_dist += grad_weight[e * C + c] * edge.weight_derivatives[c];
@@ -5218,24 +5341,30 @@ void add_spin_chiral_gradient(
     std::array<double, 3> grad_rij = {0.0, 0.0, 0.0};
     for (int d = 0; d < 3; ++d) {
       grad_rij[d] = grad_dist * edge.rhat[d] + (gu[d] - dot_r * edge.rhat[d]) / edge.dist;
-      local_force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
-      local_force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
-      local_grad_spin[static_cast<std::size_t>(d) * N + edge.i] += grad_si[e * 3 + d];
-      local_grad_spin[static_cast<std::size_t>(d) * N + edge.j] += grad_sj[e * 3 + d];
+      local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
+      local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
+      local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_si[e * 3 + d];
+      local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.j] += grad_sj[e * 3 + d];
     }
-    for (int a = 0; a < 3; ++a) {
-      const double rij_a = edge.rhat[a] * edge.dist;
-      for (int b = 0; b < 3; ++b) {
-        if (use_parallel_edges) {
-          local_virial[a * 3 + b] -= rij_a * grad_rij[b];
-        } else {
-          virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+    if (use_lammps_scratch) {
+      add_lammps_spin_virial(
+        edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
+        force_stride, edge.j);
+    } else {
+      for (int a = 0; a < 3; ++a) {
+        const double rij_a = edge.rhat[a] * edge.dist;
+        for (int b = 0; b < 3; ++b) {
+          if (use_private_edges) {
+            local_virial[a * 3 + b] -= rij_a * grad_rij[b];
+          } else {
+            virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+          }
         }
       }
     }
   }
 
-  if (use_parallel_edges) {
+  if (use_private_edges && !use_lammps_scratch) {
     for (int tid = 0; tid < num_threads; ++tid) {
       const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
       const double* local_grad_spin =
@@ -5266,13 +5395,36 @@ void add_spin_gradient(
   double* force,
   double* virial,
   double* mforce,
-  SpinPhaseBreakdown* phase = nullptr)
+  SpinPhaseBreakdown* phase = nullptr,
+  double** lammps_force = nullptr,
+  double** lammps_mforce = nullptr,
+  double* lammps_total_virial = nullptr,
+  double** lammps_virial = nullptr,
+  int lammps_nlocal = 0,
+  LammpsThreadLocalScratchView* lammps_scratch = nullptr)
 {
   auto phase_mark = NepPhaseClock::now();
   const int C = paramb.spin_compress;
   const int l_max = paramb.spin_l_max;
   const int offset0 = paramb.struct_dim;
+  const bool lammps_output = lammps_force && lammps_mforce && lammps_total_virial;
+  const bool use_lammps_scratch = lammps_output && lammps_spin_scratch_active(lammps_scratch);
+  std::vector<double> lammps_force_work;
+  std::vector<double> lammps_virial_work;
+  if (lammps_output && !use_lammps_scratch) {
+    lammps_force_work.assign(static_cast<std::size_t>(N) * 3, 0.0);
+    lammps_virial_work.assign(static_cast<std::size_t>(N) * 9, 0.0);
+    force = lammps_force_work.data();
+    virial = lammps_virial_work.data();
+  }
   std::vector<double> grad_spin(static_cast<std::size_t>(N) * 3, 0.0);
+  auto add_spin_pull = [&](const int atom, const int d, const double value) {
+    if (use_lammps_scratch) {
+      lammps_mforce[atom][d] -= value;
+    } else {
+      grad_spin[static_cast<std::size_t>(d) * N + atom] += value;
+    }
+  };
   auto fp = [&](const int atom, const int dim) {
     return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
   };
@@ -5295,9 +5447,9 @@ void add_spin_gradient(
     const double sz = spin(atom, 2);
     const double s2 = sx * sx + sy * sy + sz * sz;
     const double scale = 2.0 * fp(atom, 0) + 4.0 * fp(atom, 1) * s2;
-    grad_spin[atom] += scale * sx;
-    grad_spin[static_cast<std::size_t>(N) + atom] += scale * sy;
-    grad_spin[static_cast<std::size_t>(2) * N + atom] += scale * sz;
+    add_spin_pull(atom, 0, scale * sx);
+    add_spin_pull(atom, 1, scale * sy);
+    add_spin_pull(atom, 2, scale * sz);
   }
 
   const int rho0_offset = 2 + 4 * C;
@@ -5327,7 +5479,7 @@ void add_spin_gradient(
         for (int b = 0; b < 3; ++b) {
           gs += (g[3 * a + b] + g[3 * b + a]) * s[b];
         }
-        grad_spin[static_cast<std::size_t>(a) * N + atom] += alpha * gs;
+        add_spin_pull(atom, a, alpha * gs);
       }
     }
   }
@@ -5406,15 +5558,20 @@ void add_spin_gradient(
   const int num_threads = 1;
 #endif
   const bool use_parallel_edges = num_threads > 1 && cache.edges.size() > 32;
+  const bool use_private_edges = use_parallel_edges || use_lammps_scratch;
+  const int force_stride = use_lammps_scratch ? lammps_scratch->force_rows : N;
   std::vector<double> force_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
+    0.0);
   std::vector<double> grad_spin_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
+    0.0);
   std::vector<double> virial_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
+    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 9 : 0,
+    0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_private_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(cache.edges.size()); ++edge_index) {
     const SpinEdge& edge = cache.edges[static_cast<std::size_t>(edge_index)];
@@ -5423,18 +5580,34 @@ void add_spin_gradient(
 #else
     const int tid = 0;
 #endif
-    double* local_force = use_parallel_edges
-      ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
-      : force;
-    double* local_grad_spin = use_parallel_edges
-      ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
-      : grad_spin.data();
-    double* local_virial = use_parallel_edges
-      ? virial_private.data() + static_cast<std::size_t>(tid) * 9
-      : nullptr;
+    double* local_force = nullptr;
+    double* local_grad_spin = nullptr;
+    double* local_virial = nullptr;
+    double* local_total_virial = nullptr;
+    if (use_lammps_scratch) {
+      local_force =
+        lammps_scratch->force_private + static_cast<std::size_t>(tid) * 3 * force_stride;
+      local_grad_spin =
+        lammps_scratch->mforce_private + static_cast<std::size_t>(tid) * 3 * force_stride;
+      local_total_virial =
+        lammps_scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+      local_virial = lammps_scratch->virial_private
+        ? lammps_scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_stride
+        : nullptr;
+    } else {
+      local_force = use_private_edges
+        ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
+        : force;
+      local_grad_spin = use_private_edges
+        ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
+        : grad_spin.data();
+      local_virial = use_private_edges
+        ? virial_private.data() + static_cast<std::size_t>(tid) * 9
+        : nullptr;
+    }
     auto add_local_grad_spin = [&](const int atom, const std::array<double, 3>& g) {
       for (int d = 0; d < 3; ++d) {
-        local_grad_spin[static_cast<std::size_t>(d) * N + atom] += g[d];
+        local_grad_spin[static_cast<std::size_t>(d) * force_stride + atom] += g[d];
       }
     };
     std::array<double, MAX_NUM_N> grad_weight;
@@ -5612,16 +5785,22 @@ void add_spin_gradient(
     }
     for (int d = 0; d < 3; ++d) {
       grad_rij[d] = grad_dist * edge.rhat[d] + (grad_rhat[d] - dot_r * edge.rhat[d]) / edge.dist;
-      local_force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
-      local_force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
+      local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
+      local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
     }
-    for (int a = 0; a < 3; ++a) {
-      const double rij_a = edge.rhat[a] * edge.dist;
-      for (int b = 0; b < 3; ++b) {
-        if (use_parallel_edges) {
-          local_virial[a * 3 + b] -= rij_a * grad_rij[b];
-        } else {
-          virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+    if (use_lammps_scratch) {
+      add_lammps_spin_virial(
+        edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
+        force_stride, edge.j);
+    } else {
+      for (int a = 0; a < 3; ++a) {
+        const double rij_a = edge.rhat[a] * edge.dist;
+        for (int b = 0; b < 3; ++b) {
+          if (use_private_edges) {
+            local_virial[a * 3 + b] -= rij_a * grad_rij[b];
+          } else {
+            virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+          }
         }
       }
     }
@@ -5629,7 +5808,7 @@ void add_spin_gradient(
     add_local_grad_spin(edge.j, grad_sj);
   }
 
-  if (use_parallel_edges) {
+  if (use_private_edges && !use_lammps_scratch) {
     for (int tid = 0; tid < num_threads; ++tid) {
       const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
       const double* local_grad_spin =
@@ -5652,9 +5831,46 @@ void add_spin_gradient(
     phase->gradient_nonchiral += nep_phase_elapsed(phase_mark);
   }
   add_spin_chiral_gradient(
-    paramb, annmb, N, type, cache, Fp, grad_spin, force, virial);
+    paramb, annmb, N, type, cache, Fp, grad_spin, force, virial,
+    use_lammps_scratch ? lammps_scratch : nullptr);
   if (phase) {
     phase->gradient_chiral += nep_phase_elapsed(phase_mark);
+  }
+
+  if (use_lammps_scratch) {
+    return;
+  }
+
+  if (lammps_output) {
+    for (int atom = 0; atom < N; ++atom) {
+      for (int d = 0; d < 3; ++d) {
+        lammps_force[atom][d] += lammps_force_work[static_cast<std::size_t>(d) * N + atom];
+        lammps_mforce[atom][d] -= grad_spin[static_cast<std::size_t>(d) * N + atom];
+      }
+    }
+    auto raw = [&](const int comp, const int atom) {
+      return lammps_virial_work[static_cast<std::size_t>(comp) * N + atom];
+    };
+    for (int atom = 0; atom < lammps_nlocal; ++atom) {
+      lammps_total_virial[0] += raw(0, atom);
+      lammps_total_virial[1] += raw(4, atom);
+      lammps_total_virial[2] += raw(8, atom);
+      lammps_total_virial[3] += raw(1, atom);
+      lammps_total_virial[4] += raw(2, atom);
+      lammps_total_virial[5] += raw(5, atom);
+      if (lammps_virial) {
+        lammps_virial[atom][0] += raw(0, atom);
+        lammps_virial[atom][1] += raw(4, atom);
+        lammps_virial[atom][2] += raw(8, atom);
+        lammps_virial[atom][3] += raw(1, atom);
+        lammps_virial[atom][4] += raw(2, atom);
+        lammps_virial[atom][5] += raw(5, atom);
+        lammps_virial[atom][6] += raw(3, atom);
+        lammps_virial[atom][7] += raw(6, atom);
+        lammps_virial[atom][8] += raw(7, atom);
+      }
+    }
+    return;
   }
 
   for (int atom = 0; atom < N; ++atom) {
@@ -5867,7 +6083,8 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     if (paramb.spin_basis_size + 1 < paramb.spin_compress) {
       throw std::runtime_error("spin_basis_size must cover spin_compress");
     }
-    if (paramb.spin_basis_size + 1 > MAX_NUM_N || paramb.spin_compress > MAX_NUM_N) {
+    if (paramb.spin_basis_size + 1 > MAX_NUM_N ||
+        paramb.spin_compress > MAX_SPIN_COMPRESS) {
       throw std::runtime_error("spin basis is too large for cpu_opt");
     }
     if (paramb.spin_dof_type_active.empty()) {
@@ -7465,11 +7682,9 @@ void NEP::compute_for_lammps(
   }
 
   int atom_capacity = nlocal;
-  int max_neighbors = 0;
   for (int ii = 0; ii < inum; ++ii) {
     const int i = ilist[ii];
     atom_capacity = std::max(atom_capacity, i + 1);
-    max_neighbors = std::max(max_neighbors, NN[i]);
     for (int jj = 0; jj < NN[i]; ++jj) {
       atom_capacity = std::max(atom_capacity, NL[i][jj] + 1);
     }
@@ -7486,14 +7701,6 @@ void NEP::compute_for_lammps(
   lammps_spin_spins_soa.resize(static_cast<std::size_t>(atom_capacity) * 3);
   lammps_spin_descriptor.assign(
     static_cast<std::size_t>(atom_capacity) * annmb.dim, 0.0);
-  lammps_spin_force_soa.assign(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
-  lammps_spin_mforce_soa.assign(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
-  lammps_spin_virial_soa.assign(static_cast<std::size_t>(atom_capacity) * 9, 0.0);
-  lammps_spin_NN.assign(static_cast<std::size_t>(atom_capacity), 0);
-  lammps_spin_NL.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
-  lammps_spin_x12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
-  lammps_spin_y12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
-  lammps_spin_z12.resize(static_cast<std::size_t>(atom_capacity) * max_neighbors);
 
   for (int atom = 0; atom < atom_capacity; ++atom) {
     lammps_spin_types[atom] = type_map[type[atom]];
@@ -7502,22 +7709,6 @@ void NEP::compute_for_lammps(
       lammps_spin_spins_soa[static_cast<std::size_t>(d) * atom_capacity + atom] =
         mu * spins[atom][d];
     }
-  }
-
-  for (int ii = 0; ii < inum; ++ii) {
-    const int i = ilist[ii];
-    int count = 0;
-    for (int jj = 0; jj < NN[i]; ++jj) {
-      const int j = NL[i][jj];
-      const std::size_t index =
-        static_cast<std::size_t>(count) * atom_capacity + i;
-      lammps_spin_NL[index] = j;
-      lammps_spin_x12[index] = pos[j][0] - pos[i][0];
-      lammps_spin_y12[index] = pos[j][1] - pos[i][1];
-      lammps_spin_z12[index] = pos[j][2] - pos[i][2];
-      ++count;
-    }
-    lammps_spin_NN[i] = count;
   }
 
   std::fill(Fp.begin(), Fp.end(), 0.0);
@@ -7616,10 +7807,9 @@ void NEP::compute_for_lammps(
 
   SpinCache spin_cache;
   fill_spin_descriptor(
-    paramb, annmb, atom_capacity, lammps_spin_NN.data(), lammps_spin_NL.data(),
-    lammps_spin_types.data(), lammps_spin_x12.data(), lammps_spin_y12.data(),
-    lammps_spin_z12.data(), lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(),
-    &spin_cache, phase_timing ? &spin_phase : nullptr);
+    paramb, annmb, atom_capacity, NN, nullptr, lammps_spin_types.data(), nullptr, nullptr,
+    nullptr, lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(), &spin_cache,
+    phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos);
 
   for (int ii = 0; ii < inum; ++ii) {
     const int atom = ilist[ii];
@@ -7704,40 +7894,29 @@ void NEP::compute_for_lammps(
   }
 #endif
 
+#if defined(_OPENMP)
+  if (lammps_thread_scratch_active(&lammps_scratch)) {
+    const std::size_t mforce_size =
+      static_cast<std::size_t>(lammps_scratch.num_threads) * 3 * lammps_scratch.force_rows;
+    if (lammps_mforce_private.size() < mforce_size) {
+      lammps_mforce_private.resize(mforce_size);
+    }
+    lammps_scratch.mforce_private = lammps_mforce_private.data();
+    zero_lammps_thread_local_scratch(lammps_scratch, virial != nullptr);
+  }
+#endif
+
   add_spin_gradient(
     paramb, annmb, atom_capacity, lammps_spin_types.data(), lammps_spin_spins_soa.data(),
-    spin_cache, Fp.data(), lammps_spin_force_soa.data(), lammps_spin_virial_soa.data(),
-    lammps_spin_mforce_soa.data(), phase_timing ? &spin_phase : nullptr);
-  for (int atom = 0; atom < atom_capacity; ++atom) {
-    for (int d = 0; d < 3; ++d) {
-      force[atom][d] +=
-        lammps_spin_force_soa[static_cast<std::size_t>(d) * atom_capacity + atom];
-      mforce[atom][d] +=
-        lammps_spin_mforce_soa[static_cast<std::size_t>(d) * atom_capacity + atom];
-    }
+    spin_cache, Fp.data(), nullptr, nullptr, nullptr, phase_timing ? &spin_phase : nullptr,
+    force, mforce, total_virial, virial, nlocal, &lammps_scratch);
+
+#if defined(_OPENMP)
+  if (lammps_spin_scratch_active(&lammps_scratch)) {
+    reduce_lammps_thread_local_force_virial(
+      lammps_scratch, force, total_virial, virial, mforce);
   }
-  auto raw = [&](const int comp, const int atom) {
-    return lammps_spin_virial_soa[static_cast<std::size_t>(comp) * atom_capacity + atom];
-  };
-  for (int atom = 0; atom < nlocal; ++atom) {
-    total_virial[0] += raw(0, atom);
-    total_virial[1] += raw(4, atom);
-    total_virial[2] += raw(8, atom);
-    total_virial[3] += raw(1, atom);
-    total_virial[4] += raw(2, atom);
-    total_virial[5] += raw(5, atom);
-    if (virial) {
-      virial[atom][0] += raw(0, atom);
-      virial[atom][1] += raw(4, atom);
-      virial[atom][2] += raw(8, atom);
-      virial[atom][3] += raw(1, atom);
-      virial[atom][4] += raw(2, atom);
-      virial[atom][5] += raw(5, atom);
-      virial[atom][6] += raw(3, atom);
-      virial[atom][7] += raw(6, atom);
-      virial[atom][8] += raw(7, atom);
-    }
-  }
+#endif
 
   if (phase_timing) {
     NepPhaseTotals& totals = nep_phase_timer_state().lammps;
