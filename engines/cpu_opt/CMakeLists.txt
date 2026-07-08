@@ -12,6 +12,9 @@ if(NOT EXISTS "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/nep.h" OR
 endif()
 
 option(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP "Build cpu_opt with OpenMP when available" ON)
+option(NEP_ADAPTERS_CPU_OPT_ENABLE_NATIVE_ARCH
+  "Build cpu_opt for the host CPU architecture when supported"
+  ON)
 option(NEP_ADAPTERS_CPU_OPT_ENABLE_BATCH_ANN
   "Enable type-grouped CBLAS batch ANN kernels in cpu_opt when a CBLAS provider is available"
   ON)
@@ -45,6 +48,14 @@ set_target_properties(nep_adapters_cpu_opt PROPERTIES POSITION_INDEPENDENT_CODE 
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
   target_compile_options(nep_adapters_cpu_opt PRIVATE -Mnovect)
+endif()
+
+if(NEP_ADAPTERS_CPU_OPT_ENABLE_NATIVE_ARCH)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=native" NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
+  if(NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
+    target_compile_options(nep_adapters_cpu_opt PRIVATE -march=native)
+  endif()
 endif()
 
 target_compile_definitions(
