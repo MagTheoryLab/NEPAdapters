@@ -124,8 +124,6 @@ public:
     int t12;
     double dist;
     std::array<double, 3> rhat;
-    std::array<double, 3> si;
-    std::array<double, 3> sj;
     std::array<double, 4> weights;
     std::array<double, 4> weight_derivatives;
     double dot;
