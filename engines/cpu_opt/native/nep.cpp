@@ -5902,7 +5902,15 @@ void add_spin_chiral_gradient(
           edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
           force_stride, edge.j);
       } else {
-        add_lammps_spin_total_virial(edge.rhat, edge.dist, grad_rij, local_total_virial);
+        const double rx = edge.rhat[0] * edge.dist;
+        const double ry = edge.rhat[1] * edge.dist;
+        const double rz = edge.rhat[2] * edge.dist;
+        local_total_virial[0] -= rx * grad_rij[0];
+        local_total_virial[1] -= ry * grad_rij[1];
+        local_total_virial[2] -= rz * grad_rij[2];
+        local_total_virial[3] -= rx * grad_rij[1];
+        local_total_virial[4] -= rx * grad_rij[2];
+        local_total_virial[5] -= ry * grad_rij[2];
       }
     } else {
       for (int a = 0; a < 3; ++a) {
@@ -6415,7 +6423,15 @@ void add_spin_gradient(
           edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
           force_stride, edge.j);
       } else {
-        add_lammps_spin_total_virial(edge.rhat, edge.dist, grad_rij, local_total_virial);
+        const double rx = edge.rhat[0] * edge.dist;
+        const double ry = edge.rhat[1] * edge.dist;
+        const double rz = edge.rhat[2] * edge.dist;
+        local_total_virial[0] -= rx * grad_rij[0];
+        local_total_virial[1] -= ry * grad_rij[1];
+        local_total_virial[2] -= rz * grad_rij[2];
+        local_total_virial[3] -= rx * grad_rij[1];
+        local_total_virial[4] -= rx * grad_rij[2];
+        local_total_virial[5] -= ry * grad_rij[2];
       }
     } else {
       for (int a = 0; a < 3; ++a) {
