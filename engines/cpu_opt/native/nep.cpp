@@ -77,6 +77,16 @@ struct NepPhaseTotals {
   double angular = 0.0;
   double reduce = 0.0;
   double zbl = 0.0;
+  double spin_setup = 0.0;
+  double spin_edges = 0.0;
+  double spin_unpack = 0.0;
+  double spin_merge = 0.0;
+  double spin_contract = 0.0;
+  double spin_chiral = 0.0;
+  double spin_copy = 0.0;
+  double spin_gradient = 0.0;
+  double spin_gradient_nonchiral = 0.0;
+  double spin_gradient_chiral = 0.0;
 };
 
 struct NepPhaseTimerState {
@@ -96,7 +106,9 @@ struct NepPhaseTimerState {
     }
     const double total =
       totals.setup + totals.neighbor + totals.cache + totals.table + totals.descriptor +
-      totals.scratch + totals.radial + totals.angular + totals.reduce + totals.zbl;
+      totals.scratch + totals.radial + totals.angular + totals.reduce + totals.zbl +
+      totals.spin_setup + totals.spin_edges + totals.spin_unpack + totals.spin_merge +
+      totals.spin_contract + totals.spin_chiral + totals.spin_copy + totals.spin_gradient;
     std::cerr << "{\"phase_timer\":\"nep_cpu\","
               << "\"mode\":\"" << mode << "\","
               << "\"calls\":" << totals.calls << ','
@@ -116,7 +128,17 @@ struct NepPhaseTimerState {
               << "\"radial\":" << totals.radial << ','
               << "\"angular\":" << totals.angular << ','
               << "\"reduce\":" << totals.reduce << ','
-              << "\"zbl\":" << totals.zbl
+              << "\"zbl\":" << totals.zbl << ','
+              << "\"spin_setup\":" << totals.spin_setup << ','
+              << "\"spin_edges\":" << totals.spin_edges << ','
+              << "\"spin_unpack\":" << totals.spin_unpack << ','
+              << "\"spin_merge\":" << totals.spin_merge << ','
+              << "\"spin_contract\":" << totals.spin_contract << ','
+              << "\"spin_chiral\":" << totals.spin_chiral << ','
+              << "\"spin_copy\":" << totals.spin_copy << ','
+              << "\"spin_gradient\":" << totals.spin_gradient << ','
+              << "\"spin_gradient_nonchiral\":" << totals.spin_gradient_nonchiral << ','
+              << "\"spin_gradient_chiral\":" << totals.spin_gradient_chiral
               << "}}\n";
   }
 };
@@ -131,6 +153,17 @@ bool nep_phase_timer_enabled()
 {
   const char* value = std::getenv("NEP_CPU_PHASE_TIMER");
   return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+}
+
+int spin_openmp_threads(const int N)
+{
+#if defined(_OPENMP)
+  const int cap = N <= 1024 ? 8 : 16;
+  return std::max(1, std::min(omp_get_max_threads(), cap));
+#else
+  (void)N;
+  return 1;
+#endif
 }
 
 double nep_phase_elapsed(NepPhaseClock::time_point& mark)
@@ -4279,6 +4312,18 @@ struct SpinCache {
   std::vector<double> raw1_dot;
 };
 
+struct SpinPhaseBreakdown {
+  double setup = 0.0;
+  double edges = 0.0;
+  double unpack = 0.0;
+  double merge = 0.0;
+  double contract = 0.0;
+  double chiral = 0.0;
+  double copy = 0.0;
+  double gradient_nonchiral = 0.0;
+  double gradient_chiral = 0.0;
+};
+
 void fill_spin_descriptor(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
@@ -4291,8 +4336,15 @@ void fill_spin_descriptor(
   const double* z12,
   const double* spins,
   double* descriptor_soa,
-  SpinCache* cache_out = nullptr)
+  SpinCache* cache_out = nullptr,
+  SpinPhaseBreakdown* phase = nullptr)
 {
+  auto phase_mark = NepPhaseClock::now();
+  auto add_phase = [&](double SpinPhaseBreakdown::*slot) {
+    if (phase) {
+      phase->*slot += nep_phase_elapsed(phase_mark);
+    }
+  };
   const int C = paramb.spin_compress;
   const int B = paramb.spin_basis_size + 1;
   const int l_max = paramb.spin_l_max;
@@ -4363,7 +4415,7 @@ void fill_spin_descriptor(
   }
 
 #if defined(_OPENMP)
-  const int num_threads = omp_get_max_threads();
+  const int num_threads = spin_openmp_threads(N);
 #else
   const int num_threads = 1;
 #endif
@@ -4374,9 +4426,10 @@ void fill_spin_descriptor(
   if (keep_edges && !use_parallel_edges) {
     cache.edges.reserve(static_cast<std::size_t>(N) * 8);
   }
+  add_phase(&SpinPhaseBreakdown::setup);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (int i = 0; i < N; ++i) {
 #if defined(_OPENMP)
@@ -4510,10 +4563,11 @@ void fill_spin_descriptor(
       }
     }
   }
+  add_phase(&SpinPhaseBreakdown::edges);
 
   if (paramb.spin_chiral) {
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
     for (int atom = 0; atom < N; ++atom) {
       for (int c = 0; c < chiC; ++c) {
@@ -4527,6 +4581,7 @@ void fill_spin_descriptor(
       }
     }
   }
+  add_phase(&SpinPhaseBreakdown::unpack);
 
   if (keep_edges && use_parallel_edges) {
     std::size_t edge_count = 0;
@@ -4541,6 +4596,7 @@ void fill_spin_descriptor(
         std::make_move_iterator(thread_edges.end()));
     }
   }
+  add_phase(&SpinPhaseBreakdown::merge);
 
   int offset = 2 + 4 * C;
   auto contract = [&](const std::vector<double>& a, const std::vector<double>& b, const int width) {
@@ -4585,6 +4641,7 @@ void fill_spin_descriptor(
   if (l_max >= 1) {
     contract(raw1, raw1_dot, 9);
   }
+  add_phase(&SpinPhaseBreakdown::contract);
 
   if (paramb.spin_chiral) {
     auto block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
@@ -4663,6 +4720,7 @@ void fill_spin_descriptor(
       }
     }
   }
+  add_phase(&SpinPhaseBreakdown::chiral);
 
   for (int atom = 0; atom < N; ++atom) {
     for (int d = 0; d < paramb.spin_dim; ++d) {
@@ -4670,6 +4728,7 @@ void fill_spin_descriptor(
         qref(atom, d) * paramb.q_scaler[offset0 + d];
     }
   }
+  add_phase(&SpinPhaseBreakdown::copy);
 }
 
 void add_stf_outer_gradient(
@@ -4797,7 +4856,7 @@ void add_spin_chiral_gradient(
   std::vector<double> grad_pseudodev(static_cast<std::size_t>(N) * C * 9, 0.0);
 
 #if defined(_OPENMP)
-  const int num_threads = omp_get_max_threads();
+  const int num_threads = spin_openmp_threads(N);
 #else
   const int num_threads = 1;
 #endif
@@ -4835,7 +4894,7 @@ void add_spin_chiral_gradient(
     }
     const std::size_t stride = target.size();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (stride > 1024)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (stride > 1024)
 #endif
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(stride); ++k) {
       double sum = target[static_cast<std::size_t>(k)];
@@ -4854,7 +4913,7 @@ void add_spin_chiral_gradient(
     use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size() : 0, 0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
     const std::size_t e = static_cast<std::size_t>(edge_index);
@@ -4945,7 +5004,7 @@ void add_spin_chiral_gradient(
   reduce_private(grad_pseudodev, grad_pseudodev_private);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (int atom = 0; atom < N; ++atom) {
     for (int c = 0; c < chiC; ++c) {
@@ -4988,7 +5047,7 @@ void add_spin_chiral_gradient(
     use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_Q.size() : 0, 0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
     const std::size_t e = static_cast<std::size_t>(edge_index);
@@ -5051,7 +5110,7 @@ void add_spin_chiral_gradient(
     static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count, 0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (int atom = 0; atom < N; ++atom) {
     for (int c = 0; c < C; ++c) {
@@ -5072,7 +5131,7 @@ void add_spin_chiral_gradient(
   }
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
     const std::size_t e = static_cast<std::size_t>(edge_index);
@@ -5120,7 +5179,7 @@ void add_spin_chiral_gradient(
     use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
     const std::size_t e = static_cast<std::size_t>(edge_index);
@@ -5196,8 +5255,10 @@ void add_spin_gradient(
   const double* Fp,
   double* force,
   double* virial,
-  double* mforce)
+  double* mforce,
+  SpinPhaseBreakdown* phase = nullptr)
 {
+  auto phase_mark = NepPhaseClock::now();
   const int C = paramb.spin_compress;
   const int l_max = paramb.spin_l_max;
   const int offset0 = paramb.struct_dim;
@@ -5330,7 +5391,7 @@ void add_spin_gradient(
   }
 
 #if defined(_OPENMP)
-  const int num_threads = omp_get_max_threads();
+  const int num_threads = spin_openmp_threads(N);
 #else
   const int num_threads = 1;
 #endif
@@ -5343,7 +5404,7 @@ void add_spin_gradient(
     use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
 
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(cache.edges.size()); ++edge_index) {
     const SpinEdge& edge = cache.edges[static_cast<std::size_t>(edge_index)];
@@ -5577,8 +5638,14 @@ void add_spin_gradient(
     }
   }
 
+  if (phase) {
+    phase->gradient_nonchiral += nep_phase_elapsed(phase_mark);
+  }
   add_spin_chiral_gradient(
     paramb, annmb, N, type, cache, Fp, grad_spin, force, virial);
+  if (phase) {
+    phase->gradient_chiral += nep_phase_elapsed(phase_mark);
+  }
 
   for (int atom = 0; atom < N; ++atom) {
     for (int d = 0; d < 3; ++d) {
@@ -6449,20 +6516,42 @@ void NEP::compute(
     throw std::runtime_error("spin output sizes are inconsistent");
   }
 
+  const bool phase_timing = nep_phase_timer_enabled();
+  auto phase_mark = NepPhaseClock::now();
+  double phase_setup = 0.0;
+  double phase_neighbor = 0.0;
+  double phase_table = 0.0;
+  double phase_descriptor = 0.0;
+  double phase_ann = 0.0;
+  double phase_radial = 0.0;
+  double phase_angular = 0.0;
+  double phase_zbl = 0.0;
+  double phase_spin_gradient = 0.0;
+  SpinPhaseBreakdown spin_phase;
+
   const std::size_t size_x12 = N * MN;
   allocate_memory(N);
   std::fill(force.begin(), force.end(), 0.0);
   std::fill(virial.begin(), virial.end(), 0.0);
   std::fill(mforce.begin(), mforce.end(), 0.0);
   std::fill(potential.begin(), potential.end(), 0.0);
+  if (phase_timing) {
+    phase_setup = nep_phase_elapsed(phase_mark);
+  }
 
   find_neighbor_list_small_box(
     paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
     NN_radial, NL_radial, NN_angular, NL_angular, r12);
+  if (phase_timing) {
+    phase_neighbor = nep_phase_elapsed(phase_mark);
+  }
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
 #endif
+  if (phase_timing) {
+    phase_table = nep_phase_elapsed(phase_mark);
+  }
 
   find_descriptor_small_box(
     false, true, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
@@ -6474,12 +6563,18 @@ void NEP::compute(
 #endif
     Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
     ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+  if (phase_timing) {
+    phase_descriptor = nep_phase_elapsed(phase_mark);
+  }
 
   SpinCache spin_cache;
   fill_spin_descriptor(
     paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
     r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
-    descriptor.data(), &spin_cache);
+    descriptor.data(), &spin_cache, phase_timing ? &spin_phase : nullptr);
+  if (phase_timing) {
+    phase_mark = NepPhaseClock::now();
+  }
 
   for (std::size_t atom = 0; atom < N; ++atom) {
     double q[MAX_DIM] = {0.0};
@@ -6497,6 +6592,9 @@ void NEP::compute(
       Fp[atom * annmb.dim + d] = Fp_local[d] * paramb.q_scaler[d];
     }
   }
+  if (phase_timing) {
+    phase_ann = nep_phase_elapsed(phase_mark);
+  }
 
   find_force_radial_small_box(
     false, paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
@@ -6505,6 +6603,9 @@ void NEP::compute(
     gn_radial.data(), gnp_radial.data(),
 #endif
     force.data(), force.data() + N, force.data() + N * 2, virial.data());
+  if (phase_timing) {
+    phase_radial = nep_phase_elapsed(phase_mark);
+  }
   find_force_angular_small_box(
     false, paramb, annmb, static_cast<int>(N), NN_angular.data(), NL_angular.data(), type.data(),
     r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
@@ -6513,15 +6614,49 @@ void NEP::compute(
     gn_angular.data(), gnp_angular.data(),
 #endif
     force.data(), force.data() + N, force.data() + N * 2, virial.data());
+  if (phase_timing) {
+    phase_angular = nep_phase_elapsed(phase_mark);
+  }
   if (zbl.enabled) {
     find_force_ZBL_small_box(
       static_cast<int>(N), paramb, zbl, NN_angular.data(), NL_angular.data(), type.data(),
       r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
       force.data(), force.data() + N, force.data() + N * 2, virial.data(), potential.data());
   }
+  if (phase_timing) {
+    phase_zbl = nep_phase_elapsed(phase_mark);
+  }
   add_spin_gradient(
     paramb, annmb, static_cast<int>(N), type.data(), spins.data(), spin_cache, Fp.data(),
-    force.data(), virial.data(), mforce.data());
+    force.data(), virial.data(), mforce.data(), phase_timing ? &spin_phase : nullptr);
+  if (phase_timing) {
+    phase_spin_gradient = nep_phase_elapsed(phase_mark);
+    NepPhaseTotals& totals = nep_phase_timer_state().batch;
+    ++totals.calls;
+    totals.active_atoms += static_cast<long long>(N);
+    totals.centers += static_cast<long long>(N);
+    for (std::size_t n = 0; n < N; ++n) {
+      totals.neighbors += NN_radial[n];
+    }
+    totals.setup += phase_setup;
+    totals.neighbor += phase_neighbor;
+    totals.table += phase_table;
+    totals.descriptor += phase_descriptor;
+    totals.ann += phase_ann;
+    totals.radial += phase_radial;
+    totals.angular += phase_angular;
+    totals.zbl += phase_zbl;
+    totals.spin_setup += spin_phase.setup;
+    totals.spin_edges += spin_phase.edges;
+    totals.spin_unpack += spin_phase.unpack;
+    totals.spin_merge += spin_phase.merge;
+    totals.spin_contract += spin_phase.contract;
+    totals.spin_chiral += spin_phase.chiral;
+    totals.spin_copy += spin_phase.copy;
+    totals.spin_gradient += phase_spin_gradient;
+    totals.spin_gradient_nonchiral += spin_phase.gradient_nonchiral;
+    totals.spin_gradient_chiral += spin_phase.gradient_chiral;
+  }
 }
 
 void NEP::compute(
