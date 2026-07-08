@@ -2602,7 +2602,8 @@ void find_descriptor_for_lammps(
   std::vector<double>& ann_coeff_workspace,
   std::vector<double>& ann_fp_group_workspace,
   double* g_descriptor = nullptr,
-  bool skip_ann = false)
+  bool skip_ann = false,
+  double* g_descriptor_aos = nullptr)
 {
   double total_potential = 0.0;
   const int n_max_radial_plus_1 = paramb.n_max_radial + 1;
@@ -2946,9 +2947,14 @@ void find_descriptor_for_lammps(
     for (int d = 0; d < annmb.dim; ++d) {
       q[d] = q[d] * paramb.q_scaler[d];
     }
-    if (g_descriptor) {
+    if (g_descriptor || g_descriptor_aos) {
       for (int d = 0; d < annmb.dim; ++d) {
-        g_descriptor[static_cast<std::size_t>(d) * nlocal + n1] = q[d];
+        if (g_descriptor) {
+          g_descriptor[static_cast<std::size_t>(d) * nlocal + n1] = q[d];
+        }
+        if (g_descriptor_aos) {
+          g_descriptor_aos[static_cast<std::size_t>(ii) * annmb.dim + d] = q[d];
+        }
       }
     }
     if (skip_ann) {
@@ -4560,7 +4566,8 @@ void fill_spin_descriptor(
   const int center_count = 0,
   const int* centers = nullptr,
   int** lammps_NL = nullptr,
-  double** lammps_pos = nullptr)
+  double** lammps_pos = nullptr,
+  double* center_descriptor_aos = nullptr)
 {
   auto phase_mark = NepPhaseClock::now();
   auto add_phase = [&](double SpinPhaseBreakdown::*slot) {
@@ -5037,10 +5044,24 @@ void fill_spin_descriptor(
   }
   add_phase(&SpinPhaseBreakdown::chiral);
 
-  for (int atom = 0; atom < N; ++atom) {
-    for (int d = 0; d < paramb.spin_dim; ++d) {
-      descriptor_soa[(offset0 + d) * N + atom] =
-        qref(atom, d) * paramb.q_scaler[offset0 + d];
+  if (center_descriptor_aos && use_lammps_edges) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+    for (int idx = 0; idx < loop_count; ++idx) {
+      const int atom = center_atom(idx);
+      double* dst =
+        center_descriptor_aos + static_cast<std::size_t>(idx) * annmb.dim + offset0;
+      for (int d = 0; d < paramb.spin_dim; ++d) {
+        dst[d] = qref(atom, d) * paramb.q_scaler[offset0 + d];
+      }
+    }
+  } else if (descriptor_soa) {
+    for (int atom = 0; atom < N; ++atom) {
+      for (int d = 0; d < paramb.spin_dim; ++d) {
+        descriptor_soa[(offset0 + d) * N + atom] =
+          qref(atom, d) * paramb.q_scaler[offset0 + d];
+      }
     }
   }
   add_phase(&SpinPhaseBreakdown::copy);
@@ -8069,8 +8090,7 @@ void NEP::compute_for_lammps(
 
   lammps_spin_types.resize(static_cast<std::size_t>(atom_capacity));
   lammps_spin_spins_soa.resize(static_cast<std::size_t>(atom_capacity) * 3);
-  lammps_spin_descriptor.assign(
-    static_cast<std::size_t>(atom_capacity) * annmb.dim, 0.0);
+  lammps_spin_descriptor.resize(static_cast<std::size_t>(inum) * annmb.dim);
 
   for (int atom = 0; atom < atom_capacity; ++atom) {
     lammps_spin_types[atom] = type_map[type[atom]];
@@ -8173,23 +8193,21 @@ void NEP::compute_for_lammps(
 #endif
     Fp.data(), sum_fxyz.data(), total_potential, potential, &lammps_radial_cache,
     &lammps_angular_cache, ann_q_group, ann_hidden, ann_coeff, ann_fp_group,
-    lammps_spin_descriptor.data(), true);
+    nullptr, true, lammps_spin_descriptor.data());
 
   fill_spin_descriptor(
     paramb, annmb, atom_capacity, NN, nullptr, lammps_spin_types.data(), nullptr, nullptr,
-    nullptr, lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(), &lammps_spin_cache,
-    phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos);
+    nullptr, lammps_spin_spins_soa.data(), nullptr, &lammps_spin_cache,
+    phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos,
+    lammps_spin_descriptor.data());
 
   for (int ii = 0; ii < inum; ++ii) {
     const int atom = ilist[ii];
-    double q[MAX_DIM] = {0.0};
     double F = 0.0;
     double Fp_local[MAX_DIM] = {0.0};
     double latent[MAX_NEURON] = {0.0};
     const int mapped_type = lammps_spin_types[atom];
-    for (int d = 0; d < annmb.dim; ++d) {
-      q[d] = lammps_spin_descriptor[static_cast<std::size_t>(d) * atom_capacity + atom];
-    }
+    double* q = lammps_spin_descriptor.data() + static_cast<std::size_t>(ii) * annmb.dim;
     apply_ann_one_layer(
       annmb.dim, annmb.num_neurons1, annmb.w0[mapped_type], annmb.b0[mapped_type],
       annmb.w1[mapped_type], annmb.b1, q, F, Fp_local, latent, false, nullptr);
