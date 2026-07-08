@@ -5447,21 +5447,23 @@ void add_spin_chiral_gradient(
     const std::array<double, 3> x = cross3(si, sj);
     std::array<double, 3> gx = {0.0, 0.0, 0.0};
     std::array<double, 3> gu = {0.0, 0.0, 0.0};
+    const double xu = dot3(x, edge.rhat);
     for (int c = 0; c < chiC; ++c) {
       const double alpha = fp(edge.i, base_offset + c);
       const double chi = cache.chirals[static_cast<std::size_t>(edge.i) * chiC + c];
-      const double xu = dot3(x, edge.rhat);
+      const double aw = alpha * edge.weights[c];
       egw(e, c) += alpha * xu * chi;
       local_grad_chi[static_cast<std::size_t>(edge.i) * chiC + c] +=
-        alpha * edge.weights[c] * xu;
+        aw * xu;
       for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha * edge.weights[c] * chi * edge.rhat[d];
-        gu[d] += alpha * edge.weights[c] * chi * x[d];
+        gx[d] += aw * chi * edge.rhat[d];
+        gu[d] += aw * chi * x[d];
       }
     }
     int chiral_offset = base_offset + chiC;
     for (int c = 0; c < C; ++c) {
       const double alpha = fp(edge.i, chiral_offset + c);
+      const double aw = alpha * edge.weights[c];
       const double* p = cblockC(cache.polars, edge.i, c, 3);
       const std::array<double, 3> polar = {p[0], p[1], p[2]};
       const std::array<double, 3> axis = cross3(polar, edge.rhat);
@@ -5469,8 +5471,8 @@ void add_spin_chiral_gradient(
       egw(e, c) += alpha * xa;
       std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
       for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha * edge.weights[c] * axis[d];
-        gaxis[d] = alpha * edge.weights[c] * x[d];
+        gx[d] += aw * axis[d];
+        gaxis[d] = aw * x[d];
       }
       const std::array<double, 3> gp = cross3(edge.rhat, gaxis);
       const std::array<double, 3> gu_part = cross3(gaxis, polar);
@@ -5483,6 +5485,7 @@ void add_spin_chiral_gradient(
     chiral_offset += C;
     for (int c = 0; c < C; ++c) {
       const double alpha = fp(edge.i, chiral_offset + c);
+      const double aw = alpha * edge.weights[c];
       const double* P = cblockC(cache.pseudodevs, edge.i, c, 9);
       std::array<double, 3> axis = {0.0, 0.0, 0.0};
       for (int a = 0; a < 3; ++a) {
@@ -5494,8 +5497,8 @@ void add_spin_chiral_gradient(
       egw(e, c) += alpha * xa;
       std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
       for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha * edge.weights[c] * axis[d];
-        gaxis[d] = alpha * edge.weights[c] * x[d];
+        gx[d] += aw * axis[d];
+        gaxis[d] = aw * x[d];
       }
       double* gP = local_grad_pseudodev + (static_cast<std::size_t>(edge.i) * C + c) * 9;
       for (int a = 0; a < 3; ++a) {
