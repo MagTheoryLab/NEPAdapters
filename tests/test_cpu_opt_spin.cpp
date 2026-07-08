@@ -20,7 +20,7 @@ constexpr int kDescriptorDim = 1 + kSpinDim;
 constexpr int kChiralSpinDim = 19;
 constexpr int kChiralDescriptorDim = 1 + kChiralSpinDim;
 
-int spin_nep_lite_dim(int compress, int lmax, bool chiral = false) {
+int spin_descriptor_dim(int compress, int lmax, bool chiral = false) {
   int dim = 2 + 4 * compress;
   if (lmax >= 0) {
     dim += compress;
@@ -44,16 +44,15 @@ int spin_nep_lite_dim(int compress, int lmax, bool chiral = false) {
 
 void write_model(
     const std::string& path,
-    const std::string& descriptor,
+    bool chiral = false,
     int active_descriptor_dim = 1,
-    double energy_baseline = 0.0) {
+    double spin_baseline = 0.0) {
   std::ofstream out(path);
   out << std::setprecision(17);
-  const bool chiral = descriptor == "spin_nep_lite_chiral";
   const int descriptor_dim = chiral ? kChiralDescriptorDim : kDescriptorDim;
   out << "nep4_spin1 1 Fe\n";
-  out << "energy_baseline " << energy_baseline << "\n";
-  out << "spin_mode 1 9\n";
+  out << "spin_mode 1 10\n";
+  out << "spin_baseline " << spin_baseline << "\n";
   out << "spin_n_max 0 0\n";
   out << "spin_basis_size 0 0\n";
   out << "spin_l_max 4 0 0\n";
@@ -94,7 +93,7 @@ double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& r
   return out;
 }
 
-double expected_energy(const std::vector<double>& spins_aos3, double energy_baseline = 0.0) {
+double expected_energy(const std::vector<double>& spins_aos3, double spin_baseline = 0.0) {
   double energy = 0.0;
   for (int atom = 0; atom < kAtomCount; ++atom) {
     const double sx = spins_aos3[3 * atom + 0];
@@ -102,7 +101,7 @@ double expected_energy(const std::vector<double>& spins_aos3, double energy_base
     const double sz = spins_aos3[3 * atom + 2];
     energy += std::tanh(0.25 * (sx * sx + sy * sy + sz * sz));
   }
-  return energy + kAtomCount * energy_baseline;
+  return energy + kAtomCount * spin_baseline;
 }
 
 std::vector<double> expected_mforce(const std::vector<double>& spins_aos3) {
@@ -130,7 +129,7 @@ BatchPrediction predict_batch(
     NepaModel* model,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    double energy_baseline = 0.0) {
+    double spin_baseline = 0.0) {
   std::int32_t atom_counts[1] = {kAtomCount};
   std::int32_t atom_offsets[1] = {0};
   std::int32_t types[kAtomCount] = {0, 0};
@@ -394,7 +393,7 @@ bool run_batch(
     NepaModel* model,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    double energy_baseline = 0.0) {
+    double spin_baseline = 0.0) {
   std::int32_t atom_counts[1] = {kAtomCount};
   std::int32_t atom_offsets[1] = {0};
   std::int32_t types[kAtomCount] = {0, 0};
@@ -427,11 +426,11 @@ bool run_batch(
   }
 
   const std::vector<double> zeros(forces.size(), 0.0);
-  const double energy_diff = std::abs(energy - expected_energy(spins, energy_baseline));
+  const double energy_diff = std::abs(energy - expected_energy(spins, spin_baseline));
   const double force_diff = max_abs_diff(forces, zeros);
   const double mforce_diff = max_abs_diff(mforces, expected_mforce(spins));
   if (energy_diff > 1.0e-11 || force_diff > 1.0e-9 || mforce_diff > 1.0e-9) {
-    std::cerr << "batch spin_nep_lite mismatch: energy_diff=" << energy_diff
+    std::cerr << "batch spin mismatch: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " mforce_diff=" << mforce_diff << '\n';
     return false;
@@ -443,7 +442,7 @@ bool run_lammps(
     NepaModel* model,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    double energy_baseline = 0.0) {
+    double spin_baseline = 0.0) {
   int ilist[kAtomCount] = {0, 1};
   int numneigh[kAtomCount] = {1, 1};
   int neigh0[1] = {1};
@@ -489,11 +488,11 @@ bool run_lammps(
   }
 
   const std::vector<double> zeros(forces.size(), 0.0);
-  const double energy_diff = std::abs(total_potential - expected_energy(spins, energy_baseline));
+  const double energy_diff = std::abs(total_potential - expected_energy(spins, spin_baseline));
   const double force_diff = max_abs_diff(forces, zeros);
   const double mforce_diff = max_abs_diff(mforces, expected_mforce(spins));
   if (energy_diff > 1.0e-11 || force_diff > 1.0e-9 || mforce_diff > 1.0e-9) {
-    std::cerr << "LAMMPS spin_nep_lite mismatch: energy_diff=" << energy_diff
+    std::cerr << "LAMMPS spin mismatch: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " mforce_diff=" << mforce_diff << '\n';
     return false;
@@ -504,31 +503,31 @@ bool run_lammps(
 }  // namespace
 
 int main() {
-  if (spin_nep_lite_dim(1, 4) != kSpinDim ||
-      spin_nep_lite_dim(1, 4, true) != kChiralSpinDim ||
+  if (spin_descriptor_dim(1, 4) != kSpinDim ||
+      spin_descriptor_dim(1, 4, true) != kChiralSpinDim ||
       !nep_adapters::register_cpu_opt_engine()) {
     return EXIT_FAILURE;
   }
 
-  const std::string model_path = "spin_nep_lite_generated.nep";
-  const std::string chiral_path = "spin_nep_lite_chiral_generated.nep";
-  const std::string edge_path = "spin_nep_lite_edge_generated.nep";
-  const std::string baseline_path = "spin_nep_lite_baseline_generated.nep";
-  const std::string chiral_bulk_path = "spin_nep_lite_chiral_bulk_generated.nep";
-  const std::string chiral_polar_path = "spin_nep_lite_chiral_polar_generated.nep";
-  const std::string chiral_pseudo_path = "spin_nep_lite_chiral_pseudo_generated.nep";
-  write_model(model_path, "spin_nep_lite");
-  write_model(chiral_path, "spin_nep_lite_chiral");
-  write_model(edge_path, "spin_nep_lite", 3);
-  write_model(baseline_path, "spin_nep_lite", 1, 1.25);
-  write_model(chiral_bulk_path, "spin_nep_lite_chiral", 1 + kSpinDim);
-  write_model(chiral_polar_path, "spin_nep_lite_chiral", 1 + kSpinDim + 1);
-  write_model(chiral_pseudo_path, "spin_nep_lite_chiral", 1 + kSpinDim + 2);
+  const std::string model_path = "spin_generated.nep";
+  const std::string chiral_path = "spin_chiral_generated.nep";
+  const std::string edge_path = "spin_edge_generated.nep";
+  const std::string baseline_path = "spin_baseline_generated.nep";
+  const std::string chiral_bulk_path = "spin_chiral_bulk_generated.nep";
+  const std::string chiral_polar_path = "spin_chiral_polar_generated.nep";
+  const std::string chiral_pseudo_path = "spin_chiral_pseudo_generated.nep";
+  write_model(model_path);
+  write_model(chiral_path, true);
+  write_model(edge_path, false, 3);
+  write_model(baseline_path, false, 1, 1.25);
+  write_model(chiral_bulk_path, true, 1 + kSpinDim);
+  write_model(chiral_polar_path, true, 1 + kSpinDim + 1);
+  write_model(chiral_pseudo_path, true, 1 + kSpinDim + 2);
 
   NepaModel* chiral_model = nullptr;
   if (nepa_load_model("cpu_opt", chiral_path.c_str(), &chiral_model) != NEPA_STATUS_OK ||
       chiral_model == nullptr) {
-    std::cerr << "spin_nep_lite_chiral did not load\n";
+    std::cerr << "spin chiral model did not load\n";
     return EXIT_FAILURE;
   }
   NepaModelInfo chiral_info{};
@@ -536,7 +535,7 @@ int main() {
       chiral_info.descriptor_dim != kChiralDescriptorDim ||
       !nep_adapters::has_capability(chiral_info.capabilities, nep_adapters::Capability::spin)) {
     nepa_free_model(chiral_model);
-    std::cerr << "spin_nep_lite_chiral model_info mismatch\n";
+    std::cerr << "spin chiral model_info mismatch\n";
     return EXIT_FAILURE;
   }
   nepa_free_model(chiral_model);

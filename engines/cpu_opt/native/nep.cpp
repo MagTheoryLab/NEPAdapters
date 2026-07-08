@@ -3765,7 +3765,7 @@ double get_double_from_token(const std::string& token, const char* filename, con
   return value;
 }
 
-int spin_nep_lite_dim(const int compress, const int l_max, const bool chiral)
+int spin_descriptor_dim(const int compress, const int l_max, const bool chiral)
 {
   int dim = 2 + 4 * compress;
   if (l_max >= 0) {
@@ -3925,7 +3925,7 @@ void rank4_stf_edge(const std::array<double, 3>& u, double* out)
   }
 }
 
-int real_spherical_harmonics_lite(
+int real_spherical_harmonics_spin(
   const std::array<double, 3>& rhat,
   const int ell,
   double* out)
@@ -3985,7 +3985,7 @@ void add_density(
   }
 }
 
-struct SpinLiteEdge {
+struct SpinEdge {
   int i;
   int j;
   int t12;
@@ -4001,8 +4001,8 @@ struct SpinLiteEdge {
   double bond_axis;
 };
 
-struct SpinLiteCache {
-  std::vector<SpinLiteEdge> edges;
+struct SpinCache {
+  std::vector<SpinEdge> edges;
   std::vector<double> rho0;
   std::vector<double> raw1;
   std::vector<double> l1_rdot;
@@ -4021,7 +4021,7 @@ struct SpinLiteCache {
   std::vector<double> raw1_dot;
 };
 
-void fill_spin_nep_lite_descriptor(
+void fill_spin_descriptor(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
   const int N,
@@ -4033,16 +4033,16 @@ void fill_spin_nep_lite_descriptor(
   const double* z12,
   const double* spins,
   double* descriptor_soa,
-  SpinLiteCache* cache_out = nullptr)
+  SpinCache* cache_out = nullptr)
 {
   const int C = paramb.spin_compress;
   const int B = paramb.spin_basis_size + 1;
   const int l_max = paramb.spin_l_max;
   const int offset0 = paramb.struct_dim;
   std::vector<double> q(static_cast<std::size_t>(N) * paramb.spin_dim, 0.0);
-  SpinLiteCache local_cache;
-  SpinLiteCache& cache = cache_out ? *cache_out : local_cache;
-  cache = SpinLiteCache{};
+  SpinCache local_cache;
+  SpinCache& cache = cache_out ? *cache_out : local_cache;
+  cache = SpinCache{};
 
   auto qref = [&](const int atom, const int dim) -> double& {
     return q[static_cast<std::size_t>(atom) * paramb.spin_dim + dim];
@@ -4107,7 +4107,7 @@ void fill_spin_nep_lite_descriptor(
 #endif
   const bool use_parallel_edges = num_threads > 1 && N > 8;
   const bool keep_edges = cache_out || paramb.spin_chiral;
-  std::vector<std::vector<SpinLiteEdge>> private_edges(
+  std::vector<std::vector<SpinEdge>> private_edges(
     keep_edges && use_parallel_edges ? static_cast<std::size_t>(num_threads) : 0);
   if (keep_edges && !use_parallel_edges) {
     cache.edges.reserve(static_cast<std::size_t>(N) * 8);
@@ -4140,7 +4140,7 @@ void fill_spin_nep_lite_descriptor(
       double fn[MAX_NUM_N];
       find_fc(paramb.spin_cutoff_radial, 1.0 / paramb.spin_cutoff_radial, d, fc);
       find_fn(paramb.spin_basis_size, 1.0 / paramb.spin_cutoff_radial, d, fc, fn);
-      SpinLiteEdge edge;
+      SpinEdge edge;
       edge.i = i;
       edge.j = j;
       edge.t12 = type[i] * paramb.num_types + type[j];
@@ -4199,7 +4199,7 @@ void fill_spin_nep_lite_descriptor(
       }
       for (int ell = 2; ell <= l_max; ++ell) {
         double ylm[9];
-        const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+        const int ylm_width = real_spherical_harmonics_spin(edge.rhat, ell, ylm);
         double value[27];
         int width = 0;
         for (int m = 0; m < ylm_width; ++m) {
@@ -4327,7 +4327,7 @@ void fill_spin_nep_lite_descriptor(
         chirals[static_cast<std::size_t>(atom) * chiC + c] = value;
       }
     }
-    for (const SpinLiteEdge& edge : cache.edges) {
+    for (const SpinEdge& edge : cache.edges) {
       for (int c = 0; c < C; ++c) {
         const double* Q = block(geom, edge.i, c, 9);
         std::array<double, 3> Qu = {0.0, 0.0, 0.0};
@@ -4344,7 +4344,7 @@ void fill_spin_nep_lite_descriptor(
         }
       }
     }
-    for (const SpinLiteEdge& edge : cache.edges) {
+    for (const SpinEdge& edge : cache.edges) {
       const std::array<double, 3> spin_cross = cross3(edge.si, edge.sj);
       for (int c = 0; c < chiC; ++c) {
         qref(edge.i, offset + c) += edge.weights[c] * dot3(spin_cross, edge.rhat) *
@@ -4473,12 +4473,12 @@ void add_real_spherical_harmonics_vjp(
                grad_y[7] * b * x * (x2 - 3.0 * y2);
 }
 
-void add_spin_nep_lite_chiral_vjp(
+void add_spin_chiral_vjp(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
   const int N,
   const int* type,
-  const SpinLiteCache& cache,
+  const SpinCache& cache,
   const double* Fp,
   std::vector<double>& grad_spin,
   double* force,
@@ -4490,7 +4490,7 @@ void add_spin_nep_lite_chiral_vjp(
   const int C = paramb.spin_compress;
   const int B = paramb.spin_basis_size + 1;
   const int chiC = std::min(2, C);
-  const int base_offset = spin_nep_lite_dim(C, paramb.spin_l_max, false);
+  const int base_offset = spin_descriptor_dim(C, paramb.spin_l_max, false);
   const int offset0 = paramb.struct_dim;
   const std::size_t edge_count = cache.edges.size();
   std::vector<double> grad_weight(edge_count * C, 0.0);
@@ -4532,7 +4532,7 @@ void add_spin_nep_lite_chiral_vjp(
   };
 
   for (std::size_t e = 0; e < edge_count; ++e) {
-    const SpinLiteEdge& edge = cache.edges[e];
+    const SpinEdge& edge = cache.edges[e];
     const std::array<double, 3> x = cross3(edge.si, edge.sj);
     std::array<double, 3> gx = {0.0, 0.0, 0.0};
     std::array<double, 3> gu = {0.0, 0.0, 0.0};
@@ -4638,7 +4638,7 @@ void add_spin_nep_lite_chiral_vjp(
   }
 
   for (std::size_t e = 0; e < edge_count; ++e) {
-    const SpinLiteEdge& edge = cache.edges[e];
+    const SpinEdge& edge = cache.edges[e];
     for (int c = 0; c < C; ++c) {
       const double* gp = cblockC(grad_polar, edge.i, c, 3);
       egw(e, c) += gp[0] * edge.rhat[0] + gp[1] * edge.rhat[1] + gp[2] * edge.rhat[2];
@@ -4680,7 +4680,7 @@ void add_spin_nep_lite_chiral_vjp(
   }
 
   for (std::size_t e = 0; e < edge_count; ++e) {
-    const SpinLiteEdge& edge = cache.edges[e];
+    const SpinEdge& edge = cache.edges[e];
     const auto rr = stf_outer3(edge.rhat, edge.rhat);
     for (int c = 0; c < C; ++c) {
       const double* gQ = cblockC(grad_Q, edge.i, c, 9);
@@ -4723,7 +4723,7 @@ void add_spin_nep_lite_chiral_vjp(
   }
 
   for (std::size_t e = 0; e < edge_count; ++e) {
-    const SpinLiteEdge& edge = cache.edges[e];
+    const SpinEdge& edge = cache.edges[e];
     double fc = 0.0;
     double fcp = 0.0;
     double fn[MAX_NUM_N];
@@ -4761,13 +4761,13 @@ void add_spin_nep_lite_chiral_vjp(
   }
 }
 
-void add_spin_nep_lite_vjp(
+void add_spin_vjp(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
   const int N,
   const int* type,
   const double* spins,
-  const SpinLiteCache& cache,
+  const SpinCache& cache,
   const double* Fp,
   double* force,
   double* virial,
@@ -4822,7 +4822,7 @@ void add_spin_nep_lite_vjp(
 #pragma omp parallel for schedule(static) if (use_parallel_edges)
 #endif
   for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(cache.edges.size()); ++edge_index) {
-    const SpinLiteEdge& edge = cache.edges[static_cast<std::size_t>(edge_index)];
+    const SpinEdge& edge = cache.edges[static_cast<std::size_t>(edge_index)];
 #if defined(_OPENMP)
     const int tid = omp_get_thread_num();
 #else
@@ -4931,7 +4931,7 @@ void add_spin_nep_lite_vjp(
     };
     auto apply_angular = [&](const int ell, const double* ge) {
       double ylm[9];
-      const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+      const int ylm_width = real_spherical_harmonics_spin(edge.rhat, ell, ylm);
       double grad_ylm[9] = {0.0};
       for (int m = 0; m < ylm_width; ++m) {
         for (int d = 0; d < 3; ++d) {
@@ -4975,7 +4975,7 @@ void add_spin_nep_lite_vjp(
     for (int ell = 2; ell <= l_max; ++ell) {
       const std::vector<double>& angular = ell == 2 ? cache.angular2 : ell == 3 ? cache.angular3 : cache.angular4;
       double ylm[9];
-      const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+      const int ylm_width = real_spherical_harmonics_spin(edge.rhat, ell, ylm);
       double value[27];
       int width = 0;
       for (int m = 0; m < ylm_width; ++m) {
@@ -5103,7 +5103,7 @@ void add_spin_nep_lite_vjp(
     }
   }
 
-  add_spin_nep_lite_chiral_vjp(
+  add_spin_chiral_vjp(
     paramb, annmb, N, type, cache, Fp, grad_spin, force, virial);
 
   for (int atom = 0; atom < N; ++atom) {
@@ -5157,9 +5157,6 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     paramb.model_type = 0;
     paramb.version = 4;
     paramb.spin_mode = 1;
-    if (tokens[0] == "nep4_spin1") {
-      paramb.spin_descriptor_kind = "spin_nep_lite";
-    }
     zbl.enabled = false;
   } else if (tokens[0] == "nep4_zbl") {
     paramb.model_type = 0;
@@ -5239,34 +5236,23 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
 
   tokens = get_tokens(input);
-  energy_baseline.clear();
-  if (!tokens.empty() && tokens[0] == "energy_baseline") {
-    if (tokens.size() != 1 + paramb.num_types) {
-      throw std::runtime_error("energy_baseline must have one value per type");
-    }
-    for (std::size_t t = 0; t < paramb.num_types; ++t) {
-      energy_baseline.push_back(get_double_from_token(tokens[1 + t], __FILE__, __LINE__));
-    }
-    tokens = get_tokens(input);
-  } else {
-    energy_baseline.assign(paramb.num_types, 0.0);
-  }
-  bool spin_descriptor_explicit = false;
+  spin_baseline.clear();
+  spin_baseline.assign(paramb.num_types, 0.0);
   auto parse_spin_line = [&](const std::vector<std::string>& spin_tokens) {
     if (spin_tokens.empty()) {
       return;
     }
-    if (spin_tokens[0] == "spin_descriptor") {
-      paramb.spin_descriptor_kind = spin_tokens[1];
-      spin_descriptor_explicit = true;
+    if (spin_tokens[0] == "spin_baseline") {
+      if (spin_tokens.size() != 1 + paramb.num_types) {
+        throw std::runtime_error("spin_baseline must have one value per type");
+      }
+      for (std::size_t t = 0; t < paramb.num_types; ++t) {
+        spin_baseline[t] = get_double_from_token(spin_tokens[1 + t], __FILE__, __LINE__);
+      }
     } else if (spin_tokens[0] == "spin_chiral") {
       paramb.spin_chiral = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (paramb.spin_chiral != 0 && paramb.spin_chiral != 1) {
         throw std::runtime_error("spin_chiral must be 0 or 1");
-      }
-      if (!spin_descriptor_explicit) {
-        paramb.spin_descriptor_kind =
-          paramb.spin_chiral ? "spin_nep_lite_chiral" : "spin_nep_lite";
       }
     } else if (spin_tokens[0] == "spin_compress") {
       paramb.spin_compress = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
@@ -5324,22 +5310,14 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     }
   }
   if (paramb.spin_mode) {
-    if (paramb.spin_descriptor_kind.empty()) {
-      paramb.spin_descriptor_kind = "spin_nep_lite";
-    }
-    if (paramb.spin_descriptor_kind != "spin_nep_lite" &&
-        paramb.spin_descriptor_kind != "spin_nep_lite_chiral") {
-      throw std::runtime_error("only spin_nep_lite spin descriptors are supported by cpu_opt");
-    }
-    paramb.spin_chiral = paramb.spin_descriptor_kind == "spin_nep_lite_chiral" ? 1 : 0;
     if (paramb.spin_compress <= 0 || paramb.spin_l_max < 0 || paramb.spin_l_max > 4) {
-      throw std::runtime_error("invalid spin_nep_lite settings");
+      throw std::runtime_error("invalid spin settings");
     }
     if (paramb.spin_basis_size + 1 < paramb.spin_compress) {
       throw std::runtime_error("spin_basis_size must cover spin_compress");
     }
     if (paramb.spin_basis_size + 1 > MAX_NUM_N || paramb.spin_compress > MAX_NUM_N) {
-      throw std::runtime_error("spin_nep_lite spin basis is too large for cpu_opt");
+      throw std::runtime_error("spin basis is too large for cpu_opt");
     }
     if (paramb.spin_dof_type_active.empty()) {
       paramb.spin_dof_type_active.assign(paramb.num_types, 1);
@@ -5478,7 +5456,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   annmb.num_neurons1 = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.struct_dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
   paramb.spin_dim =
-    paramb.spin_mode ? spin_nep_lite_dim(paramb.spin_compress, paramb.spin_l_max, paramb.spin_chiral != 0) : 0;
+    paramb.spin_mode ? spin_descriptor_dim(paramb.spin_compress, paramb.spin_l_max, paramb.spin_chiral != 0) : 0;
   annmb.dim = paramb.struct_dim + paramb.spin_dim;
 
   // calculated parameters:
@@ -5948,14 +5926,12 @@ void NEP::find_descriptor(
 {
   const std::size_t N = type.size();
   const std::size_t size_x12 = N * MN;
-  if (!paramb.spin_mode ||
-      (paramb.spin_descriptor_kind != "spin_nep_lite" &&
-       paramb.spin_descriptor_kind != "spin_nep_lite_chiral")) {
-    throw std::runtime_error("spin_nep_lite descriptor requested for a non-spin-lite model");
+  if (!paramb.spin_mode) {
+    throw std::runtime_error("spin descriptor requested for a non-spin model");
   }
   if (N * 3 != position.size() || N * 3 != spins.size() ||
       N * annmb.dim != descriptor.size()) {
-    throw std::runtime_error("spin_nep_lite input sizes are inconsistent");
+    throw std::runtime_error("spin input sizes are inconsistent");
   }
 
   allocate_memory(N);
@@ -5976,7 +5952,7 @@ void NEP::find_descriptor(
 #endif
     Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
     ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
-  fill_spin_nep_lite_descriptor(
+  fill_spin_descriptor(
     paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
     r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
     descriptor.data());
@@ -5996,7 +5972,7 @@ void NEP::compute(
   const std::size_t N = type.size();
   if (N != potential.size() || N * 3 != force.size() || N * 9 != virial.size() ||
       N * annmb.dim != descriptor.size() || N * 3 != mforce.size()) {
-    throw std::runtime_error("spin_nep_lite output sizes are inconsistent");
+    throw std::runtime_error("spin output sizes are inconsistent");
   }
 
   const std::size_t size_x12 = N * MN;
@@ -6025,8 +6001,8 @@ void NEP::compute(
     Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
     ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
 
-  SpinLiteCache spin_cache;
-  fill_spin_nep_lite_descriptor(
+  SpinCache spin_cache;
+  fill_spin_descriptor(
     paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
     r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
     descriptor.data(), &spin_cache);
@@ -6042,7 +6018,7 @@ void NEP::compute(
     apply_ann_one_layer(
       annmb.dim, annmb.num_neurons1, annmb.w0[type[atom]], annmb.b0[type[atom]],
       annmb.w1[type[atom]], annmb.b1, q, F, Fp_local, latent, false, nullptr);
-    potential[atom] = F + (energy_baseline.empty() ? 0.0 : energy_baseline[static_cast<std::size_t>(type[atom])]);
+    potential[atom] = F + spin_baseline[static_cast<std::size_t>(type[atom])];
     for (int d = 0; d < annmb.dim; ++d) {
       Fp[atom * annmb.dim + d] = Fp_local[d] * paramb.q_scaler[d];
     }
@@ -6069,7 +6045,7 @@ void NEP::compute(
       r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
       force.data(), force.data() + N, force.data() + N * 2, virial.data(), potential.data());
   }
-  add_spin_nep_lite_vjp(
+  add_spin_vjp(
     paramb, annmb, static_cast<int>(N), type.data(), spins.data(), spin_cache, Fp.data(),
     force.data(), virial.data(), mforce.data());
 }
@@ -6860,7 +6836,7 @@ void NEP::compute_for_lammps(
   double** virial)
 {
   if (!spins) {
-    throw std::runtime_error("spin_nep_lite LAMMPS path requires spins");
+    throw std::runtime_error("spin LAMMPS path requires spins");
   }
   std::vector<int> mapped_type(static_cast<std::size_t>(N));
   std::vector<double> box(9, 0.0);

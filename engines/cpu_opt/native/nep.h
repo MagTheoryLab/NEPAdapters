@@ -34,7 +34,6 @@ public:
     int spin_l_max = 0;
     int spin_chiral = 0;
     double spin_cutoff_radial = 0.0;
-    std::string spin_descriptor_kind;
     std::vector<int> spin_dof_type_active;
     std::vector<int> spin_env_type_active;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
@@ -286,7 +285,7 @@ public:
   std::vector<double> D_real;
   std::vector<double> charge_derivative;
   std::vector<double> parameters;
-  std::vector<double> energy_baseline;
+  std::vector<double> spin_baseline;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
   std::vector<double> lammps_total_virial_private;

@@ -15,10 +15,10 @@
 namespace nep_adapters {
 
 template <typename T, typename = void>
-struct HasSpinLite : std::false_type {};
+struct HasSpin : std::false_type {};
 
 template <typename T>
-struct HasSpinLite<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
+struct HasSpin<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
     : std::true_type {};
 
 template <typename NativeNep>
@@ -41,7 +41,7 @@ class CpuModel final : public Model {
     if (nep_.paramb.charge_mode > 0) {
       out.capabilities |= to_mask(Capability::charge);
     }
-    if constexpr (HasSpinLite<NativeNep>::value) {
+    if constexpr (HasSpin<NativeNep>::value) {
       if (nep_.paramb.spin_mode > 0) {
         out.capabilities |= to_mask(Capability::spin);
       }
@@ -92,7 +92,7 @@ class CpuModel final : public Model {
 
         std::vector<double> charge;
         std::vector<double> bec_soa;
-        if constexpr (HasSpinLite<NativeNep>::value) {
+        if constexpr (HasSpin<NativeNep>::value) {
           if (nep_.paramb.spin_mode > 0) {
             if (batch.spins_aos3 == nullptr) {
               return NEPA_STATUS_INVALID_ARGUMENT;
@@ -266,7 +266,7 @@ class CpuModel final : public Model {
             9,
             box.data());
 
-        if constexpr (HasSpinLite<NativeNep>::value) {
+        if constexpr (HasSpin<NativeNep>::value) {
           if (nep_.paramb.spin_mode > 0) {
             if (batch.spins_aos3 == nullptr) {
               return NEPA_STATUS_INVALID_ARGUMENT;
@@ -319,7 +319,7 @@ class CpuModel final : public Model {
     try {
       double total_potential = 0.0;
       double total_virial[6] = {};
-      if constexpr (HasSpinLite<NativeNep>::value) {
+      if constexpr (HasSpin<NativeNep>::value) {
         if (nep_.paramb.spin_mode > 0) {
           if (input.spins == nullptr) {
             return NEPA_STATUS_INVALID_ARGUMENT;

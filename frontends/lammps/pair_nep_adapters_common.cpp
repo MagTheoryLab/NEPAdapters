@@ -211,7 +211,7 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
   const int nall = atom->nlocal + atom->nghost;
   if (spin_model_ && (!atom->sp_flag || atom->sp == nullptr || atom->fm == nullptr)) {
     const std::string message =
-        label_ + ": spin_nep_lite model requires atom_style spin";
+        label_ + ": spin model requires atom_style spin";
     error->all(FLERR, message.c_str());
   }
   for (int i = 0; i < nall; ++i) {
