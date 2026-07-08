@@ -5888,6 +5888,41 @@ void add_spin_gradient(
       const double* value,
       const int q_offset,
       double* grad_value) {
+      if (C == 4) {
+        const double* self0 = block(density, edge.i, 0, width);
+        const double* self1 = block(density, edge.i, 1, width);
+        const double* self2 = block(density, edge.i, 2, width);
+        const double* self3 = block(density, edge.i, 3, width);
+        const double alpha0 = 2.0 * fp(edge.i, q_offset + 0);
+        const double alpha1 = 2.0 * fp(edge.i, q_offset + 1);
+        const double alpha2 = 2.0 * fp(edge.i, q_offset + 2);
+        const double alpha3 = 2.0 * fp(edge.i, q_offset + 3);
+        const double w0 = edge.weights[0];
+        const double w1 = edge.weights[1];
+        const double w2 = edge.weights[2];
+        const double w3 = edge.weights[3];
+        double gw0 = grad_weight[0];
+        double gw1 = grad_weight[1];
+        double gw2 = grad_weight[2];
+        double gw3 = grad_weight[3];
+        for (int k = 0; k < width; ++k) {
+          const double v = value[k];
+          const double gd0 = alpha0 * self0[k];
+          const double gd1 = alpha1 * self1[k];
+          const double gd2 = alpha2 * self2[k];
+          const double gd3 = alpha3 * self3[k];
+          gw0 += gd0 * v;
+          gw1 += gd1 * v;
+          gw2 += gd2 * v;
+          gw3 += gd3 * v;
+          grad_value[k] += gd0 * w0 + gd1 * w1 + gd2 * w2 + gd3 * w3;
+        }
+        grad_weight[0] = gw0;
+        grad_weight[1] = gw1;
+        grad_weight[2] = gw2;
+        grad_weight[3] = gw3;
+        return;
+      }
       for (int c = 0; c < C; ++c) {
         const double* self = block(density, edge.i, c, width);
         const double alpha2 = 2.0 * fp(edge.i, q_offset + c);
