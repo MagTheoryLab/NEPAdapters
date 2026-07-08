@@ -6305,11 +6305,15 @@ void add_spin_gradient(
     auto apply_angular = [&](const int ell, const double* ylm, const int ylm_width, const double* ge) {
       double grad_ylm[9] = {0.0};
       for (int m = 0; m < ylm_width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          const double g = ge[m * 3 + d];
-          grad_sj[d] += g * ylm[m];
-          grad_ylm[m] += g * sj[d];
-        }
+        const int base = m * 3;
+        const double y = ylm[m];
+        const double g0 = ge[base + 0];
+        const double g1 = ge[base + 1];
+        const double g2 = ge[base + 2];
+        grad_sj[0] += g0 * y;
+        grad_sj[1] += g1 * y;
+        grad_sj[2] += g2 * y;
+        grad_ylm[m] += g0 * sj[0] + g1 * sj[1] + g2 * sj[2];
       }
       add_real_spherical_harmonics_gradient(edge.rhat, ell, grad_ylm, grad_rhat);
     };
