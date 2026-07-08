@@ -4474,7 +4474,6 @@ struct SpinPhaseBreakdown {
 
 void clear_spin_cache(SpinCache& cache)
 {
-  cache.edges.clear();
   cache.edge_offsets.clear();
   cache.rho0.clear();
   cache.raw1.clear();
@@ -4639,12 +4638,14 @@ void fill_spin_descriptor(
       }
       cache.edges.resize(static_cast<std::size_t>(edge_offsets[loop_count]));
     } else if (use_parallel_edges) {
+      cache.edges.clear();
       const std::size_t reserve_per_thread =
         edge_capacity / static_cast<std::size_t>(num_threads) + 64;
       for (auto& thread_edges : private_edges) {
         thread_edges.reserve(reserve_per_thread);
       }
     } else {
+      cache.edges.clear();
       cache.edges.reserve(edge_capacity);
     }
   }
