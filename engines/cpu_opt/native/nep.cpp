@@ -5420,17 +5420,37 @@ void add_spin_chiral_gradient(
         }
       }
       const std::array<double, 3> pseudo_axis = cross3(edge.rhat, Qu);
-      const auto pseudo = stf_outer3(pseudo_axis, edge.rhat);
-      double dot = 0.0;
-      double gpseudo[9] = {0.0};
-      for (int k = 0; k < 9; ++k) {
-        dot += gPd[k] * pseudo[k];
-        gpseudo[k] = gPd[k] * edge.weights[c];
-      }
+      const double pseudo_trace = dot3(pseudo_axis, edge.rhat) / 3.0;
+      const double pseudo00 = pseudo_axis[0] * edge.rhat[0] - pseudo_trace;
+      const double pseudo01 =
+        0.5 * (pseudo_axis[0] * edge.rhat[1] + pseudo_axis[1] * edge.rhat[0]);
+      const double pseudo02 =
+        0.5 * (pseudo_axis[0] * edge.rhat[2] + pseudo_axis[2] * edge.rhat[0]);
+      const double pseudo10 = pseudo01;
+      const double pseudo11 = pseudo_axis[1] * edge.rhat[1] - pseudo_trace;
+      const double pseudo12 =
+        0.5 * (pseudo_axis[1] * edge.rhat[2] + pseudo_axis[2] * edge.rhat[1]);
+      const double pseudo20 = pseudo02;
+      const double pseudo21 = pseudo12;
+      const double pseudo22 = pseudo_axis[2] * edge.rhat[2] - pseudo_trace;
+      const double dot =
+        gPd[0] * pseudo00 + gPd[1] * pseudo01 + gPd[2] * pseudo02 +
+        gPd[3] * pseudo10 + gPd[4] * pseudo11 + gPd[5] * pseudo12 +
+        gPd[6] * pseudo20 + gPd[7] * pseudo21 + gPd[8] * pseudo22;
       egw(e, c) += dot;
-      std::array<double, 3> g_axis = {0.0, 0.0, 0.0};
-      std::array<double, 3> gu2 = {0.0, 0.0, 0.0};
-      add_stf_outer_gradient(gpseudo, pseudo_axis, edge.rhat, g_axis, gu2);
+      const double trace_grad = (gPd[0] + gPd[4] + gPd[8]) / 3.0;
+      const double s01 = 0.5 * (gPd[1] + gPd[3]);
+      const double s02 = 0.5 * (gPd[2] + gPd[6]);
+      const double s12 = 0.5 * (gPd[5] + gPd[7]);
+      const double w = edge.weights[c];
+      const std::array<double, 3> g_axis = {
+        w * ((gPd[0] - trace_grad) * edge.rhat[0] + s01 * edge.rhat[1] + s02 * edge.rhat[2]),
+        w * (s01 * edge.rhat[0] + (gPd[4] - trace_grad) * edge.rhat[1] + s12 * edge.rhat[2]),
+        w * (s02 * edge.rhat[0] + s12 * edge.rhat[1] + (gPd[8] - trace_grad) * edge.rhat[2])};
+      const std::array<double, 3> gu2 = {
+        w * ((gPd[0] - trace_grad) * pseudo_axis[0] + s01 * pseudo_axis[1] + s02 * pseudo_axis[2]),
+        w * (s01 * pseudo_axis[0] + (gPd[4] - trace_grad) * pseudo_axis[1] + s12 * pseudo_axis[2]),
+        w * (s02 * pseudo_axis[0] + s12 * pseudo_axis[1] + (gPd[8] - trace_grad) * pseudo_axis[2])};
       const std::array<double, 3> g_u_cross = cross3(Qu, g_axis);
       const std::array<double, 3> g_Qu = cross3(g_axis, edge.rhat);
       double* gQ = local_grad_Q + (static_cast<std::size_t>(edge.i) * C + c) * 9;
