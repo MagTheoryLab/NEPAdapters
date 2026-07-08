@@ -4619,7 +4619,7 @@ void fill_spin_descriptor(
   const bool keep_edges = cache_out || paramb.spin_chiral;
   // ponytail: direct edge fill wins on large LMP cases; retune if benchmark mix changes.
   const bool direct_edge_cache =
-    keep_edges && use_parallel_edges && use_lammps_edges && loop_count >= 4096;
+    keep_edges && use_parallel_edges && use_lammps_edges && loop_count >= 1024;
   std::vector<int>& edge_offsets = cache.edge_offsets;
   std::vector<std::vector<SpinEdge>> private_edges(
     keep_edges && use_parallel_edges && !direct_edge_cache ? static_cast<std::size_t>(num_threads) : 0);
