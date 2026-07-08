@@ -447,6 +447,26 @@ if(TARGET NEPAdapters::cpu_nep3 AND
     LABELS "parity;engine;cpu_opt;cpu_nep3;lammps")
 endif()
 
+if(TARGET NEPAdapters::cpu_opt)
+  add_executable(nep_adapters_cpu_opt_spin_nep_lite_test
+    test_cpu_opt_spin_nep_lite.cpp)
+  target_link_libraries(
+    nep_adapters_cpu_opt_spin_nep_lite_test
+    PRIVATE
+      NEPAdapters::cpu_opt
+  )
+  target_compile_definitions(
+    nep_adapters_cpu_opt_spin_nep_lite_test
+    PRIVATE
+      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_nep_lite_chiral_protocol/nep.txt"
+  )
+  add_test(
+    NAME nep_adapters_cpu_opt_spin_nep_lite_test
+    COMMAND nep_adapters_cpu_opt_spin_nep_lite_test)
+  set_tests_properties(nep_adapters_cpu_opt_spin_nep_lite_test PROPERTIES
+    LABELS "smoke;engine;cpu_opt;spin")
+endif()
+
 if(TARGET NEPAdapters::cpu_nep3 AND
    EXISTS "${NEP_ADAPTERS_NEP89_MODEL_PATH}" AND
    EXISTS "${NEP_ADAPTERS_NEP89_XYZ_PATH}")

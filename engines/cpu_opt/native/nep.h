@@ -26,6 +26,17 @@ public:
     double typewise_cutoff_zbl_factor = 0.65;
 
     int charge_mode = 0;
+    int spin_mode = 0;
+    int spin_dim = 0;
+    int struct_dim = 0;
+    int spin_compress = 0;
+    int spin_basis_size = 0;
+    int spin_l_max = 0;
+    int spin_chiral = 0;
+    double spin_cutoff_radial = 0.0;
+    std::string spin_descriptor_kind;
+    std::vector<int> spin_dof_type_active;
+    std::vector<int> spin_env_type_active;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
     int version = 4;
     double rc_radial_max = 0.0;
@@ -74,6 +85,7 @@ public:
     const double* w1[94];
     const double* b1;
     const double* c;
+    const double* c_spin = nullptr;
     const double* sqrt_epsilon_inf;
     // for the scalar part of polarizability
     const double* w0_pol[94];
@@ -143,6 +155,17 @@ public:
     const std::vector<int>& type,
     const std::vector<double>& box,
     const std::vector<double>& position,
+    const std::vector<double>& spins,
+    std::vector<double>& potential,
+    std::vector<double>& force,
+    std::vector<double>& virial,
+    std::vector<double>& descriptor,
+    std::vector<double>& mforce);
+
+  void compute(
+    const std::vector<int>& type,
+    const std::vector<double>& box,
+    const std::vector<double>& position,
     std::vector<double>& potential,
     std::vector<double>& force,
     std::vector<double>& virial,
@@ -175,6 +198,13 @@ public:
     const std::vector<int>& type,
     const std::vector<double>& box,
     const std::vector<double>& position,
+    std::vector<double>& descriptor);
+
+  void find_descriptor(
+    const std::vector<int>& type,
+    const std::vector<double>& box,
+    const std::vector<double>& position,
+    const std::vector<double>& spins,
     std::vector<double>& descriptor);
 
   void find_latent_space(
@@ -219,6 +249,23 @@ public:
     double** virial          // cvatom or nullptr
   );
 
+  void compute_for_lammps(
+    int nlocal,
+    int inum,
+    int* ilist,
+    int* numneigh,
+    int** firstneigh,
+    int* type,
+    int* type_map,
+    double** x,
+    double** spins,
+    double& total_potential,
+    double total_virial[6],
+    double* potential,
+    double** f,
+    double** mforce,
+    double** virial);
+
   int num_atoms = 0;
   int num_cells[3];
   double ebox[18];
@@ -239,6 +286,7 @@ public:
   std::vector<double> D_real;
   std::vector<double> charge_derivative;
   std::vector<double> parameters;
+  std::vector<double> energy_baseline;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
   std::vector<double> lammps_total_virial_private;

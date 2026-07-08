@@ -179,6 +179,7 @@ void PairNEPAdaptersCommon::load_model(const std::string& model_path) {
     error->all(FLERR, message.c_str());
   }
   cutoff_ = info.cutoff_max;
+  spin_model_ = (info.capabilities & NEPA_CAPABILITY_SPIN) != 0;
 }
 
 void PairNEPAdaptersCommon::init_style() {
@@ -208,6 +209,11 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
   }
 
   const int nall = atom->nlocal + atom->nghost;
+  if (spin_model_ && (!atom->sp_flag || atom->sp == nullptr || atom->fm == nullptr)) {
+    const std::string message =
+        label_ + ": spin_nep_lite model requires atom_style spin";
+    error->all(FLERR, message.c_str());
+  }
   for (int i = 0; i < nall; ++i) {
     const int lammps_type = atom->type[i];
     if (lammps_type < 1 || lammps_type > atom->ntypes ||
@@ -272,12 +278,14 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
   input.types = atom->type;
   input.type_map = type_map_;
   input.positions = atom->x;
+  input.spins = spin_model_ ? atom->sp : nullptr;
 
   NepaLammpsNeighborResult result{};
   result.total_potential = &total_potential;
   result.total_virial6 = total_virial;
   result.potential_per_atom = eflag_atom ? potential_.data() : nullptr;
   result.forces = atom->f;
+  result.mforces = spin_model_ ? atom->fm : nullptr;
   result.virials_per_atom9 = want_atom_virial ? virial_rows_.data() : nullptr;
 
   const NepaStatus status =

@@ -37,7 +37,7 @@ const int MAX_NEURON = 120; // maximum number of neurons in the hidden layer
 const int MN = 1000;        // maximum number of neighbors for one atom
 const int NUM_OF_ABC = 80;  // 3 + 5 + 7 + 9 + 11 + 13 + 15 + 17 for L_max = 8
 const int MAX_NUM_N = 17;   // basis_size_radial+1 = 16+1
-const int MAX_DIM = 103;
+const int MAX_DIM = 256;
 const int MAX_DIM_ANGULAR = 90;
 const double C3B[NUM_OF_ABC] = {
   0.238732414637843, 0.119366207318922, 0.119366207318922, 0.099471839432435, 0.596831036594608,

@@ -63,6 +63,7 @@ typedef struct NepaStructureBatch {
   const int32_t* atom_offsets;
   const int32_t* types;
   const double* positions_aos3;
+  const double* spins_aos3;
   /* 3x3 cell in NEP order: ax, bx, cx, ay, by, cy, az, bz, cz. */
   const double* boxes_row_major9;
   const int32_t* pbc_flags3;
@@ -79,6 +80,8 @@ typedef struct NepaFindForceResult {
   double* charge_per_atom;
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* bec_per_atom_row_major9;
+  double* mforces_aos3;
+  double* tau_aos3;
 } NepaFindForceResult;
 
 typedef struct NepaFindDescriptorResult {
@@ -95,6 +98,7 @@ typedef struct NepaLammpsNeighborInput {
   int* types;
   int* type_map;
   double** positions;
+  double** spins;
 } NepaLammpsNeighborInput;
 
 typedef struct NepaLammpsNeighborResult {
@@ -103,6 +107,7 @@ typedef struct NepaLammpsNeighborResult {
   double* total_virial6;
   double* potential_per_atom;
   double** forces;
+  double** mforces;
   /* Per-atom 9 components in NEP compute_for_lammps() order:
      xx, yy, zz, xy, xz, yz, yx, zx, zy. */
   double** virials_per_atom9;

@@ -8,9 +8,18 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace nep_adapters {
+
+template <typename T, typename = void>
+struct HasSpinLite : std::false_type {};
+
+template <typename T>
+struct HasSpinLite<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
+    : std::true_type {};
 
 template <typename NativeNep>
 class CpuModel final : public Model {
@@ -31,6 +40,11 @@ class CpuModel final : public Model {
                        to_mask(Capability::descriptors);
     if (nep_.paramb.charge_mode > 0) {
       out.capabilities |= to_mask(Capability::charge);
+    }
+    if constexpr (HasSpinLite<NativeNep>::value) {
+      if (nep_.paramb.spin_mode > 0) {
+        out.capabilities |= to_mask(Capability::spin);
+      }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
     out.descriptor_dim = static_cast<std::int32_t>(nep_.annmb.dim);
@@ -78,7 +92,70 @@ class CpuModel final : public Model {
 
         std::vector<double> charge;
         std::vector<double> bec_soa;
-        if (nep_.paramb.charge_mode > 0) {
+        if constexpr (HasSpinLite<NativeNep>::value) {
+          if (nep_.paramb.spin_mode > 0) {
+            if (batch.spins_aos3 == nullptr) {
+              return NEPA_STATUS_INVALID_ARGUMENT;
+            }
+            std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
+            for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+              const std::int32_t global_atom = atom_offset + atom;
+              spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
+              spins_soa[static_cast<std::size_t>(atom_count) + atom] =
+                  batch.spins_aos3[3 * global_atom + 1];
+              spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+                  batch.spins_aos3[3 * global_atom + 2];
+            }
+            std::vector<double> descriptor_soa(
+                static_cast<std::size_t>(atom_count) * nep_.annmb.dim, 0.0);
+            std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
+            nep_.compute(
+                types,
+                box,
+                positions_soa,
+                spins_soa,
+                potential,
+                force_soa,
+                virial_soa,
+                descriptor_soa,
+                mforce_soa);
+            for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+              const std::int32_t global_atom = atom_offset + atom;
+              if (result.mforces_aos3 != nullptr) {
+                result.mforces_aos3[3 * global_atom + 0] = mforce_soa[atom];
+                result.mforces_aos3[3 * global_atom + 1] =
+                    mforce_soa[static_cast<std::size_t>(atom_count) + atom];
+                result.mforces_aos3[3 * global_atom + 2] =
+                    mforce_soa[static_cast<std::size_t>(2) * atom_count + atom];
+              }
+              if (result.tau_aos3 != nullptr) {
+                const double sx = batch.spins_aos3[3 * global_atom + 0];
+                const double sy = batch.spins_aos3[3 * global_atom + 1];
+                const double sz = batch.spins_aos3[3 * global_atom + 2];
+                const double mx = mforce_soa[atom];
+                const double my = mforce_soa[static_cast<std::size_t>(atom_count) + atom];
+                const double mz = mforce_soa[static_cast<std::size_t>(2) * atom_count + atom];
+                result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
+                result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
+                result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
+              }
+            }
+          } else if (nep_.paramb.charge_mode > 0) {
+            charge.assign(static_cast<std::size_t>(atom_count), 0.0);
+            bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+            nep_.compute(
+                types,
+                box,
+                positions_soa,
+                potential,
+                force_soa,
+                virial_soa,
+                charge,
+                bec_soa);
+          } else {
+            nep_.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+          }
+        } else if (nep_.paramb.charge_mode > 0) {
           charge.assign(static_cast<std::size_t>(atom_count), 0.0);
           bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
           nep_.compute(
@@ -189,7 +266,27 @@ class CpuModel final : public Model {
             9,
             box.data());
 
-        nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+        if constexpr (HasSpinLite<NativeNep>::value) {
+          if (nep_.paramb.spin_mode > 0) {
+            if (batch.spins_aos3 == nullptr) {
+              return NEPA_STATUS_INVALID_ARGUMENT;
+            }
+            std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
+            for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+              const std::int32_t global_atom = atom_offset + atom;
+              spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
+              spins_soa[static_cast<std::size_t>(atom_count) + atom] =
+                  batch.spins_aos3[3 * global_atom + 1];
+              spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+                  batch.spins_aos3[3 * global_atom + 2];
+            }
+            nep_.find_descriptor(types, box, positions_soa, spins_soa, descriptor_soa);
+          } else {
+            nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+          }
+        } else {
+          nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+        }
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
           const std::int32_t global_atom = atom_offset + atom;
@@ -222,7 +319,45 @@ class CpuModel final : public Model {
     try {
       double total_potential = 0.0;
       double total_virial[6] = {};
-      nep_.compute_for_lammps(
+      if constexpr (HasSpinLite<NativeNep>::value) {
+        if (nep_.paramb.spin_mode > 0) {
+          if (input.spins == nullptr) {
+            return NEPA_STATUS_INVALID_ARGUMENT;
+          }
+          nep_.compute_for_lammps(
+              input.nlocal,
+              input.inum,
+              input.ilist,
+              input.numneigh,
+              input.firstneigh,
+              input.types,
+              input.type_map,
+              input.positions,
+              input.spins,
+              total_potential,
+              total_virial,
+              result.potential_per_atom,
+              result.forces,
+              result.mforces,
+              result.virials_per_atom9);
+        } else {
+          nep_.compute_for_lammps(
+              input.nlocal,
+              input.inum,
+              input.ilist,
+              input.numneigh,
+              input.firstneigh,
+              input.types,
+              input.type_map,
+              input.positions,
+              total_potential,
+              total_virial,
+              result.potential_per_atom,
+              result.forces,
+              result.virials_per_atom9);
+        }
+      } else {
+        nep_.compute_for_lammps(
           input.nlocal,
           input.inum,
           input.ilist,
@@ -236,6 +371,7 @@ class CpuModel final : public Model {
           result.potential_per_atom,
           result.forces,
           result.virials_per_atom9);
+      }
 
       *result.total_potential = total_potential;
       std::copy(total_virial, total_virial + 6, result.total_virial6);

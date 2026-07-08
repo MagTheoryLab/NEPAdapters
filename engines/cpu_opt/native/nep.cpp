@@ -32,6 +32,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3764,6 +3765,1354 @@ double get_double_from_token(const std::string& token, const char* filename, con
   return value;
 }
 
+int spin_nep_lite_dim(const int compress, const int l_max, const bool chiral)
+{
+  int dim = 2 + 4 * compress;
+  if (l_max >= 0) {
+    dim += compress;
+  }
+  if (l_max >= 1) {
+    dim += 3 * compress;
+  }
+  for (int ell = 2; ell <= l_max; ++ell) {
+    dim += compress;
+  }
+  dim += compress;
+  dim += compress;
+  if (l_max >= 1) {
+    dim += compress;
+  }
+  if (chiral) {
+    dim += std::min(2, compress) + 2 * compress;
+  }
+  return dim;
+}
+
+double dot3(const std::array<double, 3>& a, const std::array<double, 3>& b)
+{
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+std::array<double, 3> cross3(
+  const std::array<double, 3>& a,
+  const std::array<double, 3>& b)
+{
+  return {
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]};
+}
+
+int levi_civita(const int a, const int b, const int c)
+{
+  if (a == b || b == c || a == c) {
+    return 0;
+  }
+  return ((a == 0 && b == 1 && c == 2) ||
+          (a == 1 && b == 2 && c == 0) ||
+          (a == 2 && b == 0 && c == 1)) ? 1 : -1;
+}
+
+std::array<double, 9> stf_outer3(const std::array<double, 3>& a, const std::array<double, 3>& b)
+{
+  std::array<double, 9> out;
+  double trace = 0.0;
+  for (int i = 0; i < 3; ++i) {
+    trace += a[i] * b[i];
+  }
+  trace /= 3.0;
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      out[3 * i + j] = 0.5 * (a[i] * b[j] + a[j] * b[i]);
+      if (i == j) {
+        out[3 * i + j] -= trace;
+      }
+    }
+  }
+  return out;
+}
+
+void add_rank3_stf_vjp(
+  const double* grad,
+  const std::array<double, 3>& u,
+  std::array<double, 3>& grad_u)
+{
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        const double g = grad[(a * 3 + b) * 3 + c];
+        for (int p = 0; p < 3; ++p) {
+          grad_u[p] += g * (
+            (a == p ? u[b] * u[c] : 0.0) +
+            (b == p ? u[a] * u[c] : 0.0) +
+            (c == p ? u[a] * u[b] : 0.0) -
+            (((a == b && c == p) ? 1.0 : 0.0) +
+             ((a == c && b == p) ? 1.0 : 0.0) +
+             ((b == c && a == p) ? 1.0 : 0.0)) / 5.0);
+        }
+      }
+    }
+  }
+}
+
+void add_rank4_stf_vjp(
+  const double* grad,
+  const std::array<double, 3>& u,
+  std::array<double, 3>& grad_u)
+{
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        for (int d = 0; d < 3; ++d) {
+          const double g = grad[((a * 3 + b) * 3 + c) * 3 + d];
+          for (int p = 0; p < 3; ++p) {
+            double v =
+              (a == p ? u[b] * u[c] * u[d] : 0.0) +
+              (b == p ? u[a] * u[c] * u[d] : 0.0) +
+              (c == p ? u[a] * u[b] * u[d] : 0.0) +
+              (d == p ? u[a] * u[b] * u[c] : 0.0);
+            v -= (((a == b) ? ((c == p ? u[d] : 0.0) + (d == p ? u[c] : 0.0)) : 0.0) +
+                  ((a == c) ? ((b == p ? u[d] : 0.0) + (d == p ? u[b] : 0.0)) : 0.0) +
+                  ((a == d) ? ((b == p ? u[c] : 0.0) + (c == p ? u[b] : 0.0)) : 0.0) +
+                  ((b == c) ? ((a == p ? u[d] : 0.0) + (d == p ? u[a] : 0.0)) : 0.0) +
+                  ((b == d) ? ((a == p ? u[c] : 0.0) + (c == p ? u[a] : 0.0)) : 0.0) +
+                  ((c == d) ? ((a == p ? u[b] : 0.0) + (b == p ? u[a] : 0.0)) : 0.0)) / 7.0;
+            grad_u[p] += g * v;
+          }
+        }
+      }
+    }
+  }
+}
+
+void rank3_stf_edge(const std::array<double, 3>& u, double* out)
+{
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        const double trace =
+          ((a == b) ? u[c] : 0.0) +
+          ((a == c) ? u[b] : 0.0) +
+          ((b == c) ? u[a] : 0.0);
+        out[(a * 3 + b) * 3 + c] = u[a] * u[b] * u[c] - trace / 5.0;
+      }
+    }
+  }
+}
+
+void rank4_stf_edge(const std::array<double, 3>& u, double* out)
+{
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        for (int d = 0; d < 3; ++d) {
+          const double six =
+            ((a == b) ? u[c] * u[d] : 0.0) +
+            ((a == c) ? u[b] * u[d] : 0.0) +
+            ((a == d) ? u[b] * u[c] : 0.0) +
+            ((b == c) ? u[a] * u[d] : 0.0) +
+            ((b == d) ? u[a] * u[c] : 0.0) +
+            ((c == d) ? u[a] * u[b] : 0.0);
+          const double three =
+            ((a == b && c == d) ? 1.0 : 0.0) +
+            ((a == c && b == d) ? 1.0 : 0.0) +
+            ((a == d && b == c) ? 1.0 : 0.0);
+          out[((a * 3 + b) * 3 + c) * 3 + d] =
+            u[a] * u[b] * u[c] * u[d] - six / 7.0 + three / 35.0;
+        }
+      }
+    }
+  }
+}
+
+int real_spherical_harmonics_lite(
+  const std::array<double, 3>& rhat,
+  const int ell,
+  double* out)
+{
+  const double x = rhat[0];
+  const double y = rhat[1];
+  const double z = rhat[2];
+  if (ell == 2) {
+    out[0] = std::sqrt(15.0 / (4.0 * PI)) * x * y;
+    out[1] = std::sqrt(15.0 / (4.0 * PI)) * y * z;
+    out[2] = std::sqrt(5.0 / (16.0 * PI)) * (2.0 * z * z - x * x - y * y);
+    out[3] = std::sqrt(15.0 / (4.0 * PI)) * x * z;
+    out[4] = std::sqrt(15.0 / (16.0 * PI)) * (x * x - y * y);
+    return 5;
+  }
+  if (ell == 3) {
+    const double rho2 = x * x + y * y;
+    out[0] = std::sqrt(35.0 / (32.0 * PI)) * y * (3.0 * x * x - y * y);
+    out[1] = std::sqrt(105.0 / (4.0 * PI)) * x * y * z;
+    out[2] = std::sqrt(21.0 / (32.0 * PI)) * y * (4.0 * z * z - rho2);
+    out[3] = std::sqrt(7.0 / (16.0 * PI)) * z * (2.0 * z * z - 3.0 * rho2);
+    out[4] = std::sqrt(21.0 / (32.0 * PI)) * x * (4.0 * z * z - rho2);
+    out[5] = std::sqrt(105.0 / (16.0 * PI)) * z * (x * x - y * y);
+    out[6] = std::sqrt(35.0 / (32.0 * PI)) * x * (x * x - 3.0 * y * y);
+    return 7;
+  }
+  const double x2 = x * x;
+  const double y2 = y * y;
+  const double z2 = z * z;
+  out[0] = 0.75 * std::sqrt(35.0 / PI) * x * y * (x2 - y2);
+  out[1] = 0.75 * std::sqrt(35.0 / (2.0 * PI)) * y * z * (3.0 * x2 - y2);
+  out[2] = 0.75 * std::sqrt(5.0 / PI) * x * y * (7.0 * z2 - 1.0);
+  out[3] = 0.75 * std::sqrt(5.0 / (2.0 * PI)) * y * z * (7.0 * z2 - 3.0);
+  out[4] = (3.0 / 16.0) * std::sqrt(1.0 / PI) * (35.0 * z2 * z2 - 30.0 * z2 + 3.0);
+  out[5] = 0.75 * std::sqrt(5.0 / (2.0 * PI)) * x * z * (7.0 * z2 - 3.0);
+  out[6] = 0.375 * std::sqrt(5.0 / PI) * (x2 - y2) * (7.0 * z2 - 1.0);
+  out[7] = 0.75 * std::sqrt(35.0 / (2.0 * PI)) * x * z * (x2 - 3.0 * y2);
+  out[8] = (3.0 / 16.0) * std::sqrt(35.0 / PI) * (x2 * x2 - 6.0 * x2 * y2 + y2 * y2);
+  return 9;
+}
+
+void add_density(
+  std::vector<double>& density,
+  const int C,
+  const int atom,
+  const double* values,
+  const int width,
+  const double* weights,
+  const double weight_scale = 1.0)
+{
+  for (int c = 0; c < C; ++c) {
+    double* out = density.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+    const double weight = weight_scale * weights[c];
+    for (int k = 0; k < width; ++k) {
+      out[k] += weight * values[k];
+    }
+  }
+}
+
+struct SpinLiteEdge {
+  int i;
+  int j;
+  int t12;
+  double dist;
+  std::array<double, 3> rhat;
+  std::array<double, 3> si;
+  std::array<double, 3> sj;
+  std::array<double, MAX_NUM_N> weights;
+  double dot;
+  double sj2;
+  double ri_dot_si;
+  double ri_dot_sj;
+  double bond_axis;
+};
+
+struct SpinLiteCache {
+  std::vector<SpinLiteEdge> edges;
+  std::vector<double> rho0;
+  std::vector<double> raw1;
+  std::vector<double> l1_rdot;
+  std::vector<double> l1_cross;
+  std::vector<double> l1_stf;
+  std::vector<double> angular2;
+  std::vector<double> angular3;
+  std::vector<double> angular4;
+  std::vector<double> geom;
+  std::vector<double> polars;
+  std::vector<double> octupoles;
+  std::vector<double> hexadecapoles;
+  std::vector<double> chirals;
+  std::vector<double> pseudodevs;
+  std::vector<double> rho0_dot;
+  std::vector<double> raw1_dot;
+};
+
+void fill_spin_nep_lite_descriptor(
+  const NEP::ParaMB& paramb,
+  const NEP::ANN& annmb,
+  const int N,
+  const int* NN,
+  const int* NL,
+  const int* type,
+  const double* x12,
+  const double* y12,
+  const double* z12,
+  const double* spins,
+  double* descriptor_soa,
+  SpinLiteCache* cache_out = nullptr)
+{
+  const int C = paramb.spin_compress;
+  const int B = paramb.spin_basis_size + 1;
+  const int l_max = paramb.spin_l_max;
+  const int offset0 = paramb.struct_dim;
+  std::vector<double> q(static_cast<std::size_t>(N) * paramb.spin_dim, 0.0);
+  SpinLiteCache local_cache;
+  SpinLiteCache& cache = cache_out ? *cache_out : local_cache;
+  cache = SpinLiteCache{};
+
+  auto qref = [&](const int atom, const int dim) -> double& {
+    return q[static_cast<std::size_t>(atom) * paramb.spin_dim + dim];
+  };
+  auto spin = [&](const int atom, const int component) -> double {
+    return spins[static_cast<std::size_t>(component) * N + atom];
+  };
+  auto active = [&](const std::vector<int>& mask, const int t) -> bool {
+    return mask.empty() || mask[static_cast<std::size_t>(t)] != 0;
+  };
+
+  for (int atom = 0; atom < N; ++atom) {
+    const bool dof = active(paramb.spin_dof_type_active, type[atom]);
+    const double sx = spin(atom, 0);
+    const double sy = spin(atom, 1);
+    const double sz = spin(atom, 2);
+    const double s2 = sx * sx + sy * sy + sz * sz;
+    qref(atom, 0) = dof ? s2 : 0.0;
+    qref(atom, 1) = dof ? s2 * s2 : 0.0;
+  }
+
+  cache.rho0.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
+  cache.raw1.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
+  cache.l1_rdot.assign(static_cast<std::size_t>(N) * C, 0.0);
+  cache.l1_cross.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
+  cache.l1_stf.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
+  cache.angular2.assign(static_cast<std::size_t>(N) * C * 15, 0.0);
+  cache.angular3.assign(static_cast<std::size_t>(N) * C * 21, 0.0);
+  cache.angular4.assign(static_cast<std::size_t>(N) * C * 27, 0.0);
+  cache.geom.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
+  cache.rho0_dot.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
+  cache.raw1_dot.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
+  std::vector<double>& rho0 = cache.rho0;
+  std::vector<double>& raw1 = cache.raw1;
+  std::vector<double>& l1_rdot = cache.l1_rdot;
+  std::vector<double>& l1_cross = cache.l1_cross;
+  std::vector<double>& l1_stf = cache.l1_stf;
+  std::vector<double>& angular2 = cache.angular2;
+  std::vector<double>& angular3 = cache.angular3;
+  std::vector<double>& angular4 = cache.angular4;
+  std::vector<double>& geom = cache.geom;
+  std::vector<double>& polars = cache.polars;
+  std::vector<double>& octupoles = cache.octupoles;
+  std::vector<double>& hexadecapoles = cache.hexadecapoles;
+  std::vector<double>& chirals = cache.chirals;
+  std::vector<double>& pseudodevs = cache.pseudodevs;
+  std::vector<double>& rho0_dot = cache.rho0_dot;
+  std::vector<double>& raw1_dot = cache.raw1_dot;
+  const int chiC = std::min(2, C);
+  if (paramb.spin_chiral) {
+    polars.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
+    octupoles.assign(static_cast<std::size_t>(N) * chiC * 27, 0.0);
+    hexadecapoles.assign(static_cast<std::size_t>(N) * chiC * 81, 0.0);
+    chirals.assign(static_cast<std::size_t>(N) * chiC, 0.0);
+    pseudodevs.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
+  }
+
+#if defined(_OPENMP)
+  const int num_threads = omp_get_max_threads();
+#else
+  const int num_threads = 1;
+#endif
+  const bool use_parallel_edges = num_threads > 1 && N > 8;
+  const bool keep_edges = cache_out || paramb.spin_chiral;
+  std::vector<std::vector<SpinLiteEdge>> private_edges(
+    keep_edges && use_parallel_edges ? static_cast<std::size_t>(num_threads) : 0);
+  if (keep_edges && !use_parallel_edges) {
+    cache.edges.reserve(static_cast<std::size_t>(N) * 8);
+  }
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (int i = 0; i < N; ++i) {
+#if defined(_OPENMP)
+    const int tid = omp_get_thread_num();
+#else
+    const int tid = 0;
+#endif
+    for (int n = 0; n < NN[i]; ++n) {
+      const int index = n * N + i;
+      const int j = NL[index];
+      const double dx = x12[index];
+      const double dy = y12[index];
+      const double dz = z12[index];
+      const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (d <= 1.0e-12 || d >= paramb.spin_cutoff_radial) {
+        continue;
+      }
+      if (!active(paramb.spin_dof_type_active, type[i]) ||
+          !active(paramb.spin_env_type_active, type[j])) {
+        continue;
+      }
+      double fc = 0.0;
+      double fn[MAX_NUM_N];
+      find_fc(paramb.spin_cutoff_radial, 1.0 / paramb.spin_cutoff_radial, d, fc);
+      find_fn(paramb.spin_basis_size, 1.0 / paramb.spin_cutoff_radial, d, fc, fn);
+      SpinLiteEdge edge;
+      edge.i = i;
+      edge.j = j;
+      edge.t12 = type[i] * paramb.num_types + type[j];
+      edge.dist = d;
+      edge.rhat = {dx / d, dy / d, dz / d};
+      edge.si = {spin(i, 0), spin(i, 1), spin(i, 2)};
+      edge.sj = {spin(j, 0), spin(j, 1), spin(j, 2)};
+      edge.weights.fill(0.0);
+      for (int c = 0; c < C; ++c) {
+        double w = 0.0;
+        for (int k = 0; k < B; ++k) {
+          const std::size_t idx =
+            ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
+          w += fn[k] * annmb.c_spin[idx];
+        }
+        edge.weights[c] = w;
+      }
+      edge.dot = edge.si[0] * edge.sj[0] + edge.si[1] * edge.sj[1] + edge.si[2] * edge.sj[2];
+      edge.sj2 = edge.sj[0] * edge.sj[0] + edge.sj[1] * edge.sj[1] + edge.sj[2] * edge.sj[2];
+      edge.ri_dot_si =
+        edge.rhat[0] * edge.si[0] + edge.rhat[1] * edge.si[1] + edge.rhat[2] * edge.si[2];
+      edge.ri_dot_sj =
+        edge.rhat[0] * edge.sj[0] + edge.rhat[1] * edge.sj[1] + edge.rhat[2] * edge.sj[2];
+      edge.bond_axis = edge.ri_dot_si * edge.ri_dot_sj;
+
+      int scalar_offset = 2;
+      const double scalars[4] = {
+        edge.dot, edge.dot * edge.dot, edge.sj2, edge.bond_axis};
+      for (int term = 0; term < 4; ++term) {
+        for (int c = 0; c < C; ++c) {
+          qref(edge.i, scalar_offset + c) += edge.weights[c] * scalars[term];
+        }
+        scalar_offset += C;
+      }
+
+      const double sj_value[3] = {edge.sj[0], edge.sj[1], edge.sj[2]};
+      add_density(rho0, C, edge.i, sj_value, 3, edge.weights.data());
+      double raw1_value[9];
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          raw1_value[3 * a + b] = edge.rhat[a] * edge.sj[b];
+        }
+      }
+      add_density(raw1, C, edge.i, raw1_value, 9, edge.weights.data());
+      if (l_max >= 1) {
+        const double rdot =
+          edge.rhat[0] * edge.sj[0] + edge.rhat[1] * edge.sj[1] + edge.rhat[2] * edge.sj[2];
+        add_density(l1_rdot, C, edge.i, &rdot, 1, edge.weights.data());
+        const double cross_value[3] = {
+          edge.rhat[1] * edge.sj[2] - edge.rhat[2] * edge.sj[1],
+          edge.rhat[2] * edge.sj[0] - edge.rhat[0] * edge.sj[2],
+          edge.rhat[0] * edge.sj[1] - edge.rhat[1] * edge.sj[0]};
+        add_density(l1_cross, C, edge.i, cross_value, 3, edge.weights.data());
+        const auto stf = stf_outer3(edge.rhat, edge.sj);
+        add_density(l1_stf, C, edge.i, stf.data(), 9, edge.weights.data());
+      }
+      for (int ell = 2; ell <= l_max; ++ell) {
+        double ylm[9];
+        const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+        double value[27];
+        int width = 0;
+        for (int m = 0; m < ylm_width; ++m) {
+          const double y = ylm[m];
+          value[width++] = y * edge.sj[0];
+          value[width++] = y * edge.sj[1];
+          value[width++] = y * edge.sj[2];
+        }
+        add_density(
+          ell == 2 ? angular2 : ell == 3 ? angular3 : angular4,
+          C, edge.i, value, width, edge.weights.data());
+      }
+      const auto rr = stf_outer3(edge.rhat, edge.rhat);
+      add_density(geom, C, edge.i, rr.data(), 9, edge.weights.data());
+      if (paramb.spin_chiral) {
+        add_density(polars, C, edge.i, edge.rhat.data(), 3, edge.weights.data());
+        double o_edge[27];
+        double h_edge[81];
+        rank3_stf_edge(edge.rhat, o_edge);
+        rank4_stf_edge(edge.rhat, h_edge);
+        add_density(octupoles, chiC, edge.i, o_edge, 27, edge.weights.data());
+        add_density(hexadecapoles, chiC, edge.i, h_edge, 81, edge.weights.data());
+      }
+      add_density(rho0_dot, C, edge.i, sj_value, 3, edge.weights.data(), edge.dot);
+      add_density(raw1_dot, C, edge.i, raw1_value, 9, edge.weights.data(), edge.dot);
+      if (keep_edges) {
+        if (use_parallel_edges) {
+          private_edges[static_cast<std::size_t>(tid)].push_back(std::move(edge));
+        } else {
+          cache.edges.push_back(std::move(edge));
+        }
+      }
+    }
+  }
+
+  if (keep_edges && use_parallel_edges) {
+    std::size_t edge_count = 0;
+    for (const auto& thread_edges : private_edges) {
+      edge_count += thread_edges.size();
+    }
+    cache.edges.reserve(edge_count);
+    for (auto& thread_edges : private_edges) {
+      cache.edges.insert(
+        cache.edges.end(),
+        std::make_move_iterator(thread_edges.begin()),
+        std::make_move_iterator(thread_edges.end()));
+    }
+  }
+
+  int offset = 2 + 4 * C;
+  auto contract = [&](const std::vector<double>& a, const std::vector<double>& b, const int width) {
+    for (int atom = 0; atom < N; ++atom) {
+      for (int c = 0; c < C; ++c) {
+        const double* av = a.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+        const double* bv = b.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+        double sum = 0.0;
+        for (int k = 0; k < width; ++k) {
+          sum += av[k] * bv[k];
+        }
+        qref(atom, offset + c) = sum;
+      }
+    }
+    offset += C;
+  };
+
+  contract(rho0, rho0, 3);
+  if (l_max >= 1) {
+    contract(l1_rdot, l1_rdot, 1);
+    contract(l1_cross, l1_cross, 3);
+    contract(l1_stf, l1_stf, 9);
+  }
+  for (int ell = 2; ell <= l_max; ++ell) {
+    contract(ell == 2 ? angular2 : ell == 3 ? angular3 : angular4, ell == 2 ? angular2 : ell == 3 ? angular3 : angular4, (2 * ell + 1) * 3);
+  }
+  for (int atom = 0; atom < N; ++atom) {
+    const std::array<double, 3> s = {spin(atom, 0), spin(atom, 1), spin(atom, 2)};
+    for (int c = 0; c < C; ++c) {
+      const double* g = geom.data() + (static_cast<std::size_t>(atom) * C + c) * 9;
+      double value = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          value += s[a] * g[3 * a + b] * s[b];
+        }
+      }
+      qref(atom, offset + c) = value;
+    }
+  }
+  offset += C;
+  contract(rho0, rho0_dot, 3);
+  if (l_max >= 1) {
+    contract(raw1, raw1_dot, 9);
+  }
+
+  if (paramb.spin_chiral) {
+    auto block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
+      return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+    };
+    auto chi_block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
+      return v.data() + (static_cast<std::size_t>(atom) * chiC + c) * width;
+    };
+    for (int atom = 0; atom < N; ++atom) {
+      for (int c = 0; c < chiC; ++c) {
+        const double* Q = block(geom, atom, c, 9);
+        const double* O = chi_block(octupoles, atom, c, 27);
+        const double* H = chi_block(hexadecapoles, atom, c, 81);
+        double value = 0.0;
+        for (int a = 0; a < 3; ++a) {
+          for (int b = 0; b < 3; ++b) {
+            for (int cc = 0; cc < 3; ++cc) {
+              const int eps = levi_civita(a, b, cc);
+              if (eps == 0) {
+                continue;
+              }
+              for (int d = 0; d < 3; ++d) {
+                for (int e = 0; e < 3; ++e) {
+                  for (int f = 0; f < 3; ++f) {
+                    value += eps * Q[3 * a + d] * O[(b * 3 + e) * 3 + f] *
+                             H[((cc * 3 + d) * 3 + e) * 3 + f];
+                  }
+                }
+              }
+            }
+          }
+        }
+        chirals[static_cast<std::size_t>(atom) * chiC + c] = value;
+      }
+    }
+    for (const SpinLiteEdge& edge : cache.edges) {
+      for (int c = 0; c < C; ++c) {
+        const double* Q = block(geom, edge.i, c, 9);
+        std::array<double, 3> Qu = {0.0, 0.0, 0.0};
+        for (int a = 0; a < 3; ++a) {
+          for (int b = 0; b < 3; ++b) {
+            Qu[a] += Q[3 * a + b] * edge.rhat[b];
+          }
+        }
+        const std::array<double, 3> axis = cross3(edge.rhat, Qu);
+        const auto pseudo = stf_outer3(axis, edge.rhat);
+        double* out = pseudodevs.data() + (static_cast<std::size_t>(edge.i) * C + c) * 9;
+        for (int k = 0; k < 9; ++k) {
+          out[k] += edge.weights[c] * pseudo[k];
+        }
+      }
+    }
+    for (const SpinLiteEdge& edge : cache.edges) {
+      const std::array<double, 3> spin_cross = cross3(edge.si, edge.sj);
+      for (int c = 0; c < chiC; ++c) {
+        qref(edge.i, offset + c) += edge.weights[c] * dot3(spin_cross, edge.rhat) *
+                                    chirals[static_cast<std::size_t>(edge.i) * chiC + c];
+      }
+      int chiral_offset = offset + chiC;
+      for (int c = 0; c < C; ++c) {
+        const double* p = block(polars, edge.i, c, 3);
+        const std::array<double, 3> polar = {p[0], p[1], p[2]};
+        const std::array<double, 3> axis = cross3(polar, edge.rhat);
+        qref(edge.i, chiral_offset + c) += edge.weights[c] * dot3(spin_cross, axis);
+      }
+      chiral_offset += C;
+      for (int c = 0; c < C; ++c) {
+        const double* P = block(pseudodevs, edge.i, c, 9);
+        std::array<double, 3> axis = {0.0, 0.0, 0.0};
+        for (int a = 0; a < 3; ++a) {
+          for (int b = 0; b < 3; ++b) {
+            axis[a] += P[3 * a + b] * edge.rhat[b];
+          }
+        }
+        qref(edge.i, chiral_offset + c) += edge.weights[c] * dot3(spin_cross, axis);
+      }
+    }
+  }
+
+  for (int atom = 0; atom < N; ++atom) {
+    for (int d = 0; d < paramb.spin_dim; ++d) {
+      descriptor_soa[(offset0 + d) * N + atom] =
+        qref(atom, d) * paramb.q_scaler[offset0 + d];
+    }
+  }
+}
+
+void add_stf_outer_vjp(
+  const double* grad,
+  const std::array<double, 3>& a,
+  const std::array<double, 3>& b,
+  std::array<double, 3>& grad_a,
+  std::array<double, 3>& grad_b)
+{
+  const double trace_grad = (grad[0] + grad[4] + grad[8]) / 3.0;
+  for (int p = 0; p < 3; ++p) {
+    double ga = -trace_grad * b[p];
+    double gb = -trace_grad * a[p];
+    for (int q = 0; q < 3; ++q) {
+      ga += 0.5 * (grad[3 * p + q] + grad[3 * q + p]) * b[q];
+      gb += 0.5 * (grad[3 * p + q] + grad[3 * q + p]) * a[q];
+    }
+    grad_a[p] += ga;
+    grad_b[p] += gb;
+  }
+}
+
+void add_real_spherical_harmonics_vjp(
+  const std::array<double, 3>& r,
+  const int ell,
+  const double* grad_y,
+  std::array<double, 3>& grad_r)
+{
+  const double x = r[0];
+  const double y = r[1];
+  const double z = r[2];
+  if (ell == 2) {
+    const double a = std::sqrt(15.0 / (4.0 * PI));
+    const double b = std::sqrt(5.0 / (16.0 * PI));
+    const double c = std::sqrt(15.0 / (16.0 * PI));
+    grad_r[0] += grad_y[0] * a * y - grad_y[2] * 2.0 * b * x + grad_y[3] * a * z + grad_y[4] * 2.0 * c * x;
+    grad_r[1] += grad_y[0] * a * x + grad_y[1] * a * z - grad_y[2] * 2.0 * b * y - grad_y[4] * 2.0 * c * y;
+    grad_r[2] += grad_y[1] * a * y + grad_y[2] * 4.0 * b * z + grad_y[3] * a * x;
+    return;
+  }
+  if (ell == 3) {
+    const double x2 = x * x;
+    const double y2 = y * y;
+    const double z2 = z * z;
+    const double rho2 = x2 + y2;
+    const double a = std::sqrt(35.0 / (32.0 * PI));
+    const double b = std::sqrt(105.0 / (4.0 * PI));
+    const double c = std::sqrt(21.0 / (32.0 * PI));
+    const double d = std::sqrt(7.0 / (16.0 * PI));
+    const double e = std::sqrt(105.0 / (16.0 * PI));
+    grad_r[0] += grad_y[0] * 6.0 * a * x * y + grad_y[1] * b * y * z -
+                 grad_y[2] * 2.0 * c * x * y + grad_y[3] * -6.0 * d * x * z +
+                 grad_y[4] * c * (4.0 * z2 - 3.0 * x2 - y2) +
+                 grad_y[5] * 2.0 * e * x * z + grad_y[6] * 3.0 * a * (x2 - y2);
+    grad_r[1] += grad_y[0] * 3.0 * a * (x2 - y2) + grad_y[1] * b * x * z +
+                 grad_y[2] * c * (4.0 * z2 - x2 - 3.0 * y2) +
+                 grad_y[3] * -6.0 * d * y * z - grad_y[4] * 2.0 * c * x * y -
+                 grad_y[5] * 2.0 * e * y * z - grad_y[6] * 6.0 * a * x * y;
+    grad_r[2] += grad_y[1] * b * x * y + grad_y[2] * 8.0 * c * y * z +
+                 grad_y[3] * d * (6.0 * z2 - 3.0 * rho2) +
+                 grad_y[4] * 8.0 * c * x * z + grad_y[5] * e * (x2 - y2);
+    return;
+  }
+  const double x2 = x * x;
+  const double y2 = y * y;
+  const double z2 = z * z;
+  const double a = 0.75 * std::sqrt(35.0 / PI);
+  const double b = 0.75 * std::sqrt(35.0 / (2.0 * PI));
+  const double c = 0.75 * std::sqrt(5.0 / PI);
+  const double d = 0.75 * std::sqrt(5.0 / (2.0 * PI));
+  const double e = (3.0 / 16.0) * std::sqrt(1.0 / PI);
+  const double f = 0.375 * std::sqrt(5.0 / PI);
+  const double g = (3.0 / 16.0) * std::sqrt(35.0 / PI);
+  grad_r[0] += grad_y[0] * a * y * (3.0 * x2 - y2) +
+               grad_y[1] * b * 6.0 * x * y * z +
+               grad_y[2] * c * y * (7.0 * z2 - 1.0) +
+               grad_y[5] * d * z * (7.0 * z2 - 3.0) +
+               grad_y[6] * 2.0 * f * x * (7.0 * z2 - 1.0) +
+               grad_y[7] * b * z * (3.0 * x2 - 3.0 * y2) +
+               grad_y[8] * g * (4.0 * x * x2 - 12.0 * x * y2);
+  grad_r[1] += grad_y[0] * a * x * (x2 - 3.0 * y2) +
+               grad_y[1] * b * z * (3.0 * x2 - 3.0 * y2) +
+               grad_y[2] * c * x * (7.0 * z2 - 1.0) +
+               grad_y[3] * d * z * (7.0 * z2 - 3.0) -
+               grad_y[6] * 2.0 * f * y * (7.0 * z2 - 1.0) -
+               grad_y[7] * b * 6.0 * x * y * z +
+               grad_y[8] * g * (-12.0 * x2 * y + 4.0 * y * y2);
+  grad_r[2] += grad_y[1] * b * y * (3.0 * x2 - y2) +
+               grad_y[2] * c * 14.0 * x * y * z +
+               grad_y[3] * d * y * (21.0 * z2 - 3.0) +
+               grad_y[4] * e * (140.0 * z2 * z - 60.0 * z) +
+               grad_y[5] * d * x * (21.0 * z2 - 3.0) +
+               grad_y[6] * f * 14.0 * z * (x2 - y2) +
+               grad_y[7] * b * x * (x2 - 3.0 * y2);
+}
+
+void add_spin_nep_lite_chiral_vjp(
+  const NEP::ParaMB& paramb,
+  const NEP::ANN& annmb,
+  const int N,
+  const int* type,
+  const SpinLiteCache& cache,
+  const double* Fp,
+  std::vector<double>& grad_spin,
+  double* force,
+  double* virial)
+{
+  if (!paramb.spin_chiral || cache.edges.empty()) {
+    return;
+  }
+  const int C = paramb.spin_compress;
+  const int B = paramb.spin_basis_size + 1;
+  const int chiC = std::min(2, C);
+  const int base_offset = spin_nep_lite_dim(C, paramb.spin_l_max, false);
+  const int offset0 = paramb.struct_dim;
+  const std::size_t edge_count = cache.edges.size();
+  std::vector<double> grad_weight(edge_count * C, 0.0);
+  std::vector<double> grad_rhat(edge_count * 3, 0.0);
+  std::vector<double> grad_si(edge_count * 3, 0.0);
+  std::vector<double> grad_sj(edge_count * 3, 0.0);
+  std::vector<double> grad_Q(static_cast<std::size_t>(N) * C * 9, 0.0);
+  std::vector<double> grad_O(static_cast<std::size_t>(N) * chiC * 27, 0.0);
+  std::vector<double> grad_H(static_cast<std::size_t>(N) * chiC * 81, 0.0);
+  std::vector<double> grad_chi(static_cast<std::size_t>(N) * chiC, 0.0);
+  std::vector<double> grad_polar(static_cast<std::size_t>(N) * C * 3, 0.0);
+  std::vector<double> grad_pseudodev(static_cast<std::size_t>(N) * C * 9, 0.0);
+
+  auto fp = [&](const int atom, const int dim) {
+    return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
+  };
+  auto blockC = [&](std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+  };
+  auto cblockC = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+  };
+  auto blockChi = [&](std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * chiC + c) * width;
+  };
+  auto cblockChi = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * chiC + c) * width;
+  };
+  auto egw = [&](const std::size_t e, const int c) -> double& {
+    return grad_weight[e * C + c];
+  };
+  auto eg3 = [&](std::vector<double>& v, const std::size_t e, const int d) -> double& {
+    return v[e * 3 + d];
+  };
+  auto add_edge_vec = [&](std::vector<double>& v, const std::size_t e, const std::array<double, 3>& g) {
+    for (int d = 0; d < 3; ++d) {
+      eg3(v, e, d) += g[d];
+    }
+  };
+
+  for (std::size_t e = 0; e < edge_count; ++e) {
+    const SpinLiteEdge& edge = cache.edges[e];
+    const std::array<double, 3> x = cross3(edge.si, edge.sj);
+    std::array<double, 3> gx = {0.0, 0.0, 0.0};
+    std::array<double, 3> gu = {0.0, 0.0, 0.0};
+    for (int c = 0; c < chiC; ++c) {
+      const double alpha = fp(edge.i, base_offset + c);
+      const double chi = cache.chirals[static_cast<std::size_t>(edge.i) * chiC + c];
+      const double xu = dot3(x, edge.rhat);
+      egw(e, c) += alpha * xu * chi;
+      grad_chi[static_cast<std::size_t>(edge.i) * chiC + c] += alpha * edge.weights[c] * xu;
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += alpha * edge.weights[c] * chi * edge.rhat[d];
+        gu[d] += alpha * edge.weights[c] * chi * x[d];
+      }
+    }
+    int chiral_offset = base_offset + chiC;
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(edge.i, chiral_offset + c);
+      const double* p = cblockC(cache.polars, edge.i, c, 3);
+      const std::array<double, 3> polar = {p[0], p[1], p[2]};
+      const std::array<double, 3> axis = cross3(polar, edge.rhat);
+      const double xa = dot3(x, axis);
+      egw(e, c) += alpha * xa;
+      std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += alpha * edge.weights[c] * axis[d];
+        gaxis[d] = alpha * edge.weights[c] * x[d];
+      }
+      const std::array<double, 3> gp = cross3(edge.rhat, gaxis);
+      const std::array<double, 3> gu_part = cross3(gaxis, polar);
+      double* grad_p = blockC(grad_polar, edge.i, c, 3);
+      for (int d = 0; d < 3; ++d) {
+        grad_p[d] += gp[d];
+        gu[d] += gu_part[d];
+      }
+    }
+    chiral_offset += C;
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(edge.i, chiral_offset + c);
+      const double* P = cblockC(cache.pseudodevs, edge.i, c, 9);
+      std::array<double, 3> axis = {0.0, 0.0, 0.0};
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          axis[a] += P[3 * a + b] * edge.rhat[b];
+        }
+      }
+      const double xa = dot3(x, axis);
+      egw(e, c) += alpha * xa;
+      std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += alpha * edge.weights[c] * axis[d];
+        gaxis[d] = alpha * edge.weights[c] * x[d];
+      }
+      double* gP = blockC(grad_pseudodev, edge.i, c, 9);
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          gP[3 * a + b] += gaxis[a] * edge.rhat[b];
+          gu[b] += P[3 * a + b] * gaxis[a];
+        }
+      }
+    }
+    const std::array<double, 3> gsi = cross3(edge.sj, gx);
+    const std::array<double, 3> gsj = cross3(gx, edge.si);
+    add_edge_vec(grad_si, e, gsi);
+    add_edge_vec(grad_sj, e, gsj);
+    add_edge_vec(grad_rhat, e, gu);
+  }
+
+  for (int atom = 0; atom < N; ++atom) {
+    for (int c = 0; c < chiC; ++c) {
+      const double g = grad_chi[static_cast<std::size_t>(atom) * chiC + c];
+      if (g == 0.0) {
+        continue;
+      }
+      const double* Q = cblockC(cache.geom, atom, c, 9);
+      const double* O = cblockChi(cache.octupoles, atom, c, 27);
+      const double* H = cblockChi(cache.hexadecapoles, atom, c, 81);
+      double* gQ = blockC(grad_Q, atom, c, 9);
+      double* gO = blockChi(grad_O, atom, c, 27);
+      double* gH = blockChi(grad_H, atom, c, 81);
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          for (int cc = 0; cc < 3; ++cc) {
+            const int eps = levi_civita(a, b, cc);
+            if (eps == 0) {
+              continue;
+            }
+            const double geps = g * eps;
+            for (int d = 0; d < 3; ++d) {
+              for (int e = 0; e < 3; ++e) {
+                for (int f = 0; f < 3; ++f) {
+                  const int oidx = (b * 3 + e) * 3 + f;
+                  const int hidx = ((cc * 3 + d) * 3 + e) * 3 + f;
+                  gQ[3 * a + d] += geps * O[oidx] * H[hidx];
+                  gO[oidx] += geps * Q[3 * a + d] * H[hidx];
+                  gH[hidx] += geps * Q[3 * a + d] * O[oidx];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (std::size_t e = 0; e < edge_count; ++e) {
+    const SpinLiteEdge& edge = cache.edges[e];
+    for (int c = 0; c < C; ++c) {
+      const double* gp = cblockC(grad_polar, edge.i, c, 3);
+      egw(e, c) += gp[0] * edge.rhat[0] + gp[1] * edge.rhat[1] + gp[2] * edge.rhat[2];
+      for (int d = 0; d < 3; ++d) {
+        eg3(grad_rhat, e, d) += edge.weights[c] * gp[d];
+      }
+
+      const double* gPd = cblockC(grad_pseudodev, edge.i, c, 9);
+      const double* Q = cblockC(cache.geom, edge.i, c, 9);
+      std::array<double, 3> Qu = {0.0, 0.0, 0.0};
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          Qu[a] += Q[3 * a + b] * edge.rhat[b];
+        }
+      }
+      const std::array<double, 3> pseudo_axis = cross3(edge.rhat, Qu);
+      const auto pseudo = stf_outer3(pseudo_axis, edge.rhat);
+      double dot = 0.0;
+      double gpseudo[9] = {0.0};
+      for (int k = 0; k < 9; ++k) {
+        dot += gPd[k] * pseudo[k];
+        gpseudo[k] = gPd[k] * edge.weights[c];
+      }
+      egw(e, c) += dot;
+      std::array<double, 3> g_axis = {0.0, 0.0, 0.0};
+      std::array<double, 3> gu2 = {0.0, 0.0, 0.0};
+      add_stf_outer_vjp(gpseudo, pseudo_axis, edge.rhat, g_axis, gu2);
+      const std::array<double, 3> g_u_cross = cross3(Qu, g_axis);
+      const std::array<double, 3> g_Qu = cross3(g_axis, edge.rhat);
+      double* gQ = blockC(grad_Q, edge.i, c, 9);
+      for (int a = 0; a < 3; ++a) {
+        eg3(grad_rhat, e, a) += gu2[a] + g_u_cross[a];
+        for (int b = 0; b < 3; ++b) {
+          gQ[3 * a + b] += g_Qu[a] * edge.rhat[b];
+          eg3(grad_rhat, e, b) += Q[3 * a + b] * g_Qu[a];
+        }
+      }
+    }
+  }
+
+  for (std::size_t e = 0; e < edge_count; ++e) {
+    const SpinLiteEdge& edge = cache.edges[e];
+    const auto rr = stf_outer3(edge.rhat, edge.rhat);
+    for (int c = 0; c < C; ++c) {
+      const double* gQ = cblockC(grad_Q, edge.i, c, 9);
+      double ge9[9];
+      double dot = 0.0;
+      for (int k = 0; k < 9; ++k) {
+        dot += gQ[k] * rr[k];
+        ge9[k] = edge.weights[c] * gQ[k];
+      }
+      egw(e, c) += dot;
+      std::array<double, 3> gu = {0.0, 0.0, 0.0};
+      add_stf_outer_vjp(ge9, edge.rhat, edge.rhat, gu, gu);
+      add_edge_vec(grad_rhat, e, gu);
+    }
+    for (int c = 0; c < chiC; ++c) {
+      double o_edge[27];
+      double h_edge[81];
+      rank3_stf_edge(edge.rhat, o_edge);
+      rank4_stf_edge(edge.rhat, h_edge);
+      const double* gO = cblockChi(grad_O, edge.i, c, 27);
+      const double* gH = cblockChi(grad_H, edge.i, c, 81);
+      double go[27];
+      double gh[81];
+      double dot_o = 0.0;
+      double dot_h = 0.0;
+      for (int k = 0; k < 27; ++k) {
+        dot_o += gO[k] * o_edge[k];
+        go[k] = edge.weights[c] * gO[k];
+      }
+      for (int k = 0; k < 81; ++k) {
+        dot_h += gH[k] * h_edge[k];
+        gh[k] = edge.weights[c] * gH[k];
+      }
+      egw(e, c) += dot_o + dot_h;
+      std::array<double, 3> gu = {0.0, 0.0, 0.0};
+      add_rank3_stf_vjp(go, edge.rhat, gu);
+      add_rank4_stf_vjp(gh, edge.rhat, gu);
+      add_edge_vec(grad_rhat, e, gu);
+    }
+  }
+
+  for (std::size_t e = 0; e < edge_count; ++e) {
+    const SpinLiteEdge& edge = cache.edges[e];
+    double fc = 0.0;
+    double fcp = 0.0;
+    double fn[MAX_NUM_N];
+    double fnp[MAX_NUM_N];
+    const double rcinv = 1.0 / paramb.spin_cutoff_radial;
+    find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, edge.dist, fc, fcp);
+    find_fn_and_fnp(paramb.spin_basis_size, rcinv, edge.dist, fc, fcp, fn, fnp);
+    double grad_dist = 0.0;
+    for (int c = 0; c < C; ++c) {
+      double dwdx = 0.0;
+      for (int k = 0; k < B; ++k) {
+        const std::size_t idx =
+          ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
+        dwdx += fnp[k] * annmb.c_spin[idx];
+      }
+      grad_dist += grad_weight[e * C + c] * dwdx;
+    }
+    std::array<double, 3> gu = {
+      grad_rhat[e * 3 + 0], grad_rhat[e * 3 + 1], grad_rhat[e * 3 + 2]};
+    double dot_r = dot3(gu, edge.rhat);
+    std::array<double, 3> grad_rij = {0.0, 0.0, 0.0};
+    for (int d = 0; d < 3; ++d) {
+      grad_rij[d] = grad_dist * edge.rhat[d] + (gu[d] - dot_r * edge.rhat[d]) / edge.dist;
+      force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
+      force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
+      grad_spin[static_cast<std::size_t>(d) * N + edge.i] += grad_si[e * 3 + d];
+      grad_spin[static_cast<std::size_t>(d) * N + edge.j] += grad_sj[e * 3 + d];
+    }
+    for (int a = 0; a < 3; ++a) {
+      const double rij_a = edge.rhat[a] * edge.dist;
+      for (int b = 0; b < 3; ++b) {
+        virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+      }
+    }
+  }
+}
+
+void add_spin_nep_lite_vjp(
+  const NEP::ParaMB& paramb,
+  const NEP::ANN& annmb,
+  const int N,
+  const int* type,
+  const double* spins,
+  const SpinLiteCache& cache,
+  const double* Fp,
+  double* force,
+  double* virial,
+  double* mforce)
+{
+  const int C = paramb.spin_compress;
+  const int B = paramb.spin_basis_size + 1;
+  const int l_max = paramb.spin_l_max;
+  const int offset0 = paramb.struct_dim;
+  std::vector<double> grad_spin(static_cast<std::size_t>(N) * 3, 0.0);
+  auto fp = [&](const int atom, const int dim) {
+    return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
+  };
+  auto spin = [&](const int atom, const int d) {
+    return spins[static_cast<std::size_t>(d) * N + atom];
+  };
+  auto active = [&](const std::vector<int>& mask, const int t) {
+    return mask.empty() || mask[static_cast<std::size_t>(t)] != 0;
+  };
+  auto block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+  };
+
+  for (int atom = 0; atom < N; ++atom) {
+    if (!active(paramb.spin_dof_type_active, type[atom])) {
+      continue;
+    }
+    const double sx = spin(atom, 0);
+    const double sy = spin(atom, 1);
+    const double sz = spin(atom, 2);
+    const double s2 = sx * sx + sy * sy + sz * sz;
+    const double scale = 2.0 * fp(atom, 0) + 4.0 * fp(atom, 1) * s2;
+    grad_spin[atom] += scale * sx;
+    grad_spin[static_cast<std::size_t>(N) + atom] += scale * sy;
+    grad_spin[static_cast<std::size_t>(2) * N + atom] += scale * sz;
+  }
+
+#if defined(_OPENMP)
+  const int num_threads = omp_get_max_threads();
+#else
+  const int num_threads = 1;
+#endif
+  const bool use_parallel_edges = num_threads > 1 && cache.edges.size() > 32;
+  std::vector<double> force_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+  std::vector<double> grad_spin_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+  std::vector<double> virial_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(cache.edges.size()); ++edge_index) {
+    const SpinLiteEdge& edge = cache.edges[static_cast<std::size_t>(edge_index)];
+#if defined(_OPENMP)
+    const int tid = omp_get_thread_num();
+#else
+    const int tid = 0;
+#endif
+    double* local_force = use_parallel_edges
+      ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
+      : force;
+    double* local_grad_spin = use_parallel_edges
+      ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
+      : grad_spin.data();
+    double* local_virial = use_parallel_edges
+      ? virial_private.data() + static_cast<std::size_t>(tid) * 9
+      : nullptr;
+    auto add_local_grad_spin = [&](const int atom, const std::array<double, 3>& g) {
+      for (int d = 0; d < 3; ++d) {
+        local_grad_spin[static_cast<std::size_t>(d) * N + atom] += g[d];
+      }
+    };
+    std::array<double, MAX_NUM_N> grad_weight;
+    grad_weight.fill(0.0);
+    std::array<double, 3> grad_rhat = {0.0, 0.0, 0.0};
+    std::array<double, 3> grad_si = {0.0, 0.0, 0.0};
+    std::array<double, 3> grad_sj = {0.0, 0.0, 0.0};
+    double grad_dot = 0.0;
+
+    auto add_scalar = [&](const int offset, const double scalar) {
+      double g = 0.0;
+      for (int c = 0; c < C; ++c) {
+        const double a = fp(edge.i, offset + c);
+        grad_weight[c] += a * scalar;
+        g += a * edge.weights[c];
+      }
+      return g;
+    };
+
+    int offset = 2;
+    grad_dot += add_scalar(offset, edge.dot);
+    offset += C;
+    grad_dot += 2.0 * edge.dot * add_scalar(offset, edge.dot * edge.dot);
+    offset += C;
+    const double g_sj2 = add_scalar(offset, edge.sj2);
+    for (int d = 0; d < 3; ++d) {
+      grad_sj[d] += 2.0 * g_sj2 * edge.sj[d];
+    }
+    offset += C;
+    const double g_axis = add_scalar(offset, edge.bond_axis);
+    for (int d = 0; d < 3; ++d) {
+      grad_si[d] += g_axis * edge.ri_dot_sj * edge.rhat[d];
+      grad_sj[d] += g_axis * edge.ri_dot_si * edge.rhat[d];
+      grad_rhat[d] += g_axis * (edge.ri_dot_sj * edge.si[d] + edge.ri_dot_si * edge.sj[d]);
+    }
+    offset += C;
+
+    auto density_vjp = [&](const int width, const std::vector<double>& density,
+                           const double* value,
+                           const double mod_value,
+                           const bool has_mod,
+                           const int q_offset,
+                           const std::vector<double>* other_density,
+                           double* grad_value,
+                           double& grad_mod) {
+      for (int c = 0; c < C; ++c) {
+        const double* self = block(density, edge.i, c, width);
+        const double* other = other_density ? block(*other_density, edge.i, c, width) : nullptr;
+        const double alpha = fp(edge.i, q_offset + c);
+        const double m = has_mod ? mod_value : 1.0;
+        for (int k = 0; k < width; ++k) {
+          const double gd = other ? alpha * other[k] : 2.0 * alpha * self[k];
+          grad_weight[c] += gd * value[k] * m;
+          grad_value[k] += gd * edge.weights[c] * m;
+          if (has_mod) {
+            grad_mod += gd * edge.weights[c] * value[k];
+          }
+        }
+      }
+    };
+
+    auto apply_sj = [&](const double* ge) {
+      for (int d = 0; d < 3; ++d) {
+        grad_sj[d] += ge[d];
+      }
+    };
+    auto apply_raw1 = [&](const double* ge) {
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          const double g = ge[3 * a + b];
+          grad_rhat[a] += g * edge.sj[b];
+          grad_sj[b] += g * edge.rhat[a];
+        }
+      }
+    };
+    auto apply_rdot = [&](const double* ge) {
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += ge[0] * edge.sj[d];
+        grad_sj[d] += ge[0] * edge.rhat[d];
+      }
+    };
+    auto apply_cross = [&](const double* ge) {
+      grad_rhat[0] += edge.sj[1] * ge[2] - edge.sj[2] * ge[1];
+      grad_rhat[1] += edge.sj[2] * ge[0] - edge.sj[0] * ge[2];
+      grad_rhat[2] += edge.sj[0] * ge[1] - edge.sj[1] * ge[0];
+      grad_sj[0] += ge[1] * edge.rhat[2] - ge[2] * edge.rhat[1];
+      grad_sj[1] += ge[2] * edge.rhat[0] - ge[0] * edge.rhat[2];
+      grad_sj[2] += ge[0] * edge.rhat[1] - ge[1] * edge.rhat[0];
+    };
+    auto apply_angular = [&](const int ell, const double* ge) {
+      double ylm[9];
+      const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+      double grad_ylm[9] = {0.0};
+      for (int m = 0; m < ylm_width; ++m) {
+        for (int d = 0; d < 3; ++d) {
+          const double g = ge[m * 3 + d];
+          grad_sj[d] += g * ylm[m];
+          grad_ylm[m] += g * edge.sj[d];
+        }
+      }
+      add_real_spherical_harmonics_vjp(edge.rhat, ell, grad_ylm, grad_rhat);
+    };
+
+    const double sj_value[3] = {edge.sj[0], edge.sj[1], edge.sj[2]};
+    double ge3[3] = {0.0, 0.0, 0.0};
+    density_vjp(3, cache.rho0, sj_value, 1.0, false, offset, nullptr, ge3, grad_dot);
+    apply_sj(ge3);
+    offset += C;
+    if (l_max >= 1) {
+      double ge1[1] = {0.0};
+      const double rdot = edge.ri_dot_sj;
+      density_vjp(1, cache.l1_rdot, &rdot, 1.0, false, offset, nullptr, ge1, grad_dot);
+      apply_rdot(ge1);
+      offset += C;
+
+      ge3[0] = ge3[1] = ge3[2] = 0.0;
+      const double cross_value[3] = {
+        edge.rhat[1] * edge.sj[2] - edge.rhat[2] * edge.sj[1],
+        edge.rhat[2] * edge.sj[0] - edge.rhat[0] * edge.sj[2],
+        edge.rhat[0] * edge.sj[1] - edge.rhat[1] * edge.sj[0]};
+      density_vjp(
+        3, cache.l1_cross,
+        cross_value, 1.0, false, offset, nullptr, ge3, grad_dot);
+      apply_cross(ge3);
+      offset += C;
+
+      double ge9[9] = {0.0};
+      const auto stf = stf_outer3(edge.rhat, edge.sj);
+      density_vjp(9, cache.l1_stf, stf.data(), 1.0, false, offset, nullptr, ge9, grad_dot);
+      add_stf_outer_vjp(ge9, edge.rhat, edge.sj, grad_rhat, grad_sj);
+      offset += C;
+    }
+    for (int ell = 2; ell <= l_max; ++ell) {
+      const std::vector<double>& angular = ell == 2 ? cache.angular2 : ell == 3 ? cache.angular3 : cache.angular4;
+      double ylm[9];
+      const int ylm_width = real_spherical_harmonics_lite(edge.rhat, ell, ylm);
+      double value[27];
+      int width = 0;
+      for (int m = 0; m < ylm_width; ++m) {
+        const double y = ylm[m];
+        value[width++] = y * edge.sj[0];
+        value[width++] = y * edge.sj[1];
+        value[width++] = y * edge.sj[2];
+      }
+      double ge[27] = {0.0};
+      density_vjp(width, angular, value, 1.0, false, offset, nullptr, ge, grad_dot);
+      apply_angular(ell, ge);
+      offset += C;
+    }
+
+    const auto rr = stf_outer3(edge.rhat, edge.rhat);
+    double ge9[9] = {0.0};
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(edge.i, offset + c);
+      const double* g = block(cache.geom, edge.i, c, 9);
+      for (int a = 0; a < 3; ++a) {
+        double gs = 0.0;
+        for (int b = 0; b < 3; ++b) {
+          gs += g[3 * a + b] * edge.si[b];
+          const double gd = alpha * edge.si[a] * edge.si[b];
+          grad_weight[c] += gd * rr[3 * a + b];
+          ge9[3 * a + b] += gd * edge.weights[c];
+        }
+        grad_si[a] += 2.0 * alpha * gs;
+      }
+    }
+    add_stf_outer_vjp(ge9, edge.rhat, edge.rhat, grad_rhat, grad_rhat);
+    offset += C;
+
+    ge3[0] = ge3[1] = ge3[2] = 0.0;
+    density_vjp(3, cache.rho0, sj_value, 1.0, false, offset, &cache.rho0_dot, ge3, grad_dot);
+    apply_sj(ge3);
+    ge3[0] = ge3[1] = ge3[2] = 0.0;
+    density_vjp(3, cache.rho0_dot, sj_value, edge.dot, true, offset, &cache.rho0, ge3, grad_dot);
+    apply_sj(ge3);
+    offset += C;
+
+    if (l_max >= 1) {
+      double raw1_value[9];
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          raw1_value[3 * a + b] = edge.rhat[a] * edge.sj[b];
+        }
+      }
+      for (double& v : ge9) {
+        v = 0.0;
+      }
+      density_vjp(9, cache.raw1, raw1_value, 1.0, false, offset, &cache.raw1_dot, ge9, grad_dot);
+      apply_raw1(ge9);
+      for (double& v : ge9) {
+        v = 0.0;
+      }
+      density_vjp(9, cache.raw1_dot, raw1_value, edge.dot, true, offset, &cache.raw1, ge9, grad_dot);
+      apply_raw1(ge9);
+      offset += C;
+    }
+
+    for (int d = 0; d < 3; ++d) {
+      grad_si[d] += grad_dot * edge.sj[d];
+      grad_sj[d] += grad_dot * edge.si[d];
+    }
+
+    double fc = 0.0;
+    double fcp = 0.0;
+    double fn[MAX_NUM_N];
+    double fnp[MAX_NUM_N];
+    const double rcinv = 1.0 / paramb.spin_cutoff_radial;
+    find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, edge.dist, fc, fcp);
+    find_fn_and_fnp(paramb.spin_basis_size, rcinv, edge.dist, fc, fcp, fn, fnp);
+    double grad_dist = 0.0;
+    for (int c = 0; c < C; ++c) {
+      double dwdx = 0.0;
+      for (int k = 0; k < B; ++k) {
+        const std::size_t idx =
+          ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
+        dwdx += fnp[k] * annmb.c_spin[idx];
+      }
+      grad_dist += grad_weight[c] * dwdx;
+    }
+
+    std::array<double, 3> grad_rij;
+    double dot_r = 0.0;
+    for (int d = 0; d < 3; ++d) {
+      dot_r += grad_rhat[d] * edge.rhat[d];
+    }
+    for (int d = 0; d < 3; ++d) {
+      grad_rij[d] = grad_dist * edge.rhat[d] + (grad_rhat[d] - dot_r * edge.rhat[d]) / edge.dist;
+      local_force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
+      local_force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
+    }
+    for (int a = 0; a < 3; ++a) {
+      const double rij_a = edge.rhat[a] * edge.dist;
+      for (int b = 0; b < 3; ++b) {
+        if (use_parallel_edges) {
+          local_virial[a * 3 + b] -= rij_a * grad_rij[b];
+        } else {
+          virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+        }
+      }
+    }
+    add_local_grad_spin(edge.i, grad_si);
+    add_local_grad_spin(edge.j, grad_sj);
+  }
+
+  if (use_parallel_edges) {
+    for (int tid = 0; tid < num_threads; ++tid) {
+      const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
+      const double* local_grad_spin =
+        grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N;
+      const double* local_virial = virial_private.data() + static_cast<std::size_t>(tid) * 9;
+      for (int atom = 0; atom < N; ++atom) {
+        for (int d = 0; d < 3; ++d) {
+          const std::size_t idx = static_cast<std::size_t>(d) * N + atom;
+          force[idx] += local_force[idx];
+          grad_spin[idx] += local_grad_spin[idx];
+        }
+      }
+      for (int d = 0; d < 9; ++d) {
+        virial[static_cast<std::size_t>(d) * N] += local_virial[d];
+      }
+    }
+  }
+
+  add_spin_nep_lite_chiral_vjp(
+    paramb, annmb, N, type, cache, Fp, grad_spin, force, virial);
+
+  for (int atom = 0; atom < N; ++atom) {
+    for (int d = 0; d < 3; ++d) {
+      mforce[static_cast<std::size_t>(d) * N + atom] -= grad_spin[static_cast<std::size_t>(d) * N + atom];
+    }
+  }
+}
+
 } // namespace
 
 NEP::NEP() {}
@@ -3803,6 +5152,14 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   } else if (tokens[0] == "nep4") {
     paramb.model_type = 0;
     paramb.version = 4;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep4_spin" || tokens[0] == "nep4_spin1") {
+    paramb.model_type = 0;
+    paramb.version = 4;
+    paramb.spin_mode = 1;
+    if (tokens[0] == "nep4_spin1") {
+      paramb.spin_descriptor_kind = "spin_nep_lite";
+    }
     zbl.enabled = false;
   } else if (tokens[0] == "nep4_zbl") {
     paramb.model_type = 0;
@@ -3881,9 +5238,119 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     dftd3.atomic_number[n] = atomic_number;
   }
 
+  tokens = get_tokens(input);
+  energy_baseline.clear();
+  if (!tokens.empty() && tokens[0] == "energy_baseline") {
+    if (tokens.size() != 1 + paramb.num_types) {
+      throw std::runtime_error("energy_baseline must have one value per type");
+    }
+    for (std::size_t t = 0; t < paramb.num_types; ++t) {
+      energy_baseline.push_back(get_double_from_token(tokens[1 + t], __FILE__, __LINE__));
+    }
+    tokens = get_tokens(input);
+  } else {
+    energy_baseline.assign(paramb.num_types, 0.0);
+  }
+  bool spin_descriptor_explicit = false;
+  auto parse_spin_line = [&](const std::vector<std::string>& spin_tokens) {
+    if (spin_tokens.empty()) {
+      return;
+    }
+    if (spin_tokens[0] == "spin_descriptor") {
+      paramb.spin_descriptor_kind = spin_tokens[1];
+      spin_descriptor_explicit = true;
+    } else if (spin_tokens[0] == "spin_chiral") {
+      paramb.spin_chiral = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+      if (paramb.spin_chiral != 0 && paramb.spin_chiral != 1) {
+        throw std::runtime_error("spin_chiral must be 0 or 1");
+      }
+      if (!spin_descriptor_explicit) {
+        paramb.spin_descriptor_kind =
+          paramb.spin_chiral ? "spin_nep_lite_chiral" : "spin_nep_lite";
+      }
+    } else if (spin_tokens[0] == "spin_compress") {
+      paramb.spin_compress = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+    } else if (spin_tokens[0] == "spin_basis_size") {
+      paramb.spin_basis_size = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+    } else if (spin_tokens[0] == "spin_l_max") {
+      paramb.spin_l_max = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+    } else if (spin_tokens[0] == "spin_cutoff") {
+      paramb.spin_cutoff_radial = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
+    } else if (spin_tokens[0] == "spin_scaler") {
+      const int spin_scaler = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+      if (spin_scaler != 1) {
+        throw std::runtime_error("only spin_scaler 1 is supported by cpu_opt");
+      }
+    } else if (spin_tokens[0] == "spin_dof_type" || spin_tokens[0] == "spin_type") {
+      paramb.spin_dof_type_active.assign(paramb.num_types, 0);
+      for (std::size_t i = 1; i < spin_tokens.size(); ++i) {
+        auto found = std::find(element_list.begin(), element_list.end(), spin_tokens[i]);
+        if (found == element_list.end()) {
+          throw std::runtime_error("unknown spin_dof_type in nep.txt");
+        }
+        paramb.spin_dof_type_active[static_cast<std::size_t>(found - element_list.begin())] = 1;
+      }
+    } else if (spin_tokens[0] == "spin_env_type") {
+      paramb.spin_env_type_active.assign(paramb.num_types, 0);
+      for (std::size_t i = 1; i < spin_tokens.size(); ++i) {
+        auto found = std::find(element_list.begin(), element_list.end(), spin_tokens[i]);
+        if (found == element_list.end()) {
+          throw std::runtime_error("unknown spin_env_type in nep.txt");
+        }
+        paramb.spin_env_type_active[static_cast<std::size_t>(found - element_list.begin())] = 1;
+      }
+    }
+  };
+  if (tokens[0] == "spin_mode") {
+    paramb.spin_mode = get_int_from_token(tokens[1], __FILE__, __LINE__);
+    if (tokens.size() >= 3) {
+      const int spin_header_lines = get_int_from_token(tokens[2], __FILE__, __LINE__);
+      for (int line = 0; line < spin_header_lines; ++line) {
+        parse_spin_line(get_tokens(input));
+      }
+      tokens = get_tokens(input);
+    } else {
+      tokens = get_tokens(input);
+      while (!tokens.empty() && tokens[0].rfind("spin_", 0) == 0) {
+        parse_spin_line(tokens);
+        tokens = get_tokens(input);
+      }
+    }
+  } else {
+    while (!tokens.empty() && tokens[0].rfind("spin_", 0) == 0) {
+      paramb.spin_mode = 1;
+      parse_spin_line(tokens);
+      tokens = get_tokens(input);
+    }
+  }
+  if (paramb.spin_mode) {
+    if (paramb.spin_descriptor_kind.empty()) {
+      paramb.spin_descriptor_kind = "spin_nep_lite";
+    }
+    if (paramb.spin_descriptor_kind != "spin_nep_lite" &&
+        paramb.spin_descriptor_kind != "spin_nep_lite_chiral") {
+      throw std::runtime_error("only spin_nep_lite spin descriptors are supported by cpu_opt");
+    }
+    paramb.spin_chiral = paramb.spin_descriptor_kind == "spin_nep_lite_chiral" ? 1 : 0;
+    if (paramb.spin_compress <= 0 || paramb.spin_l_max < 0 || paramb.spin_l_max > 4) {
+      throw std::runtime_error("invalid spin_nep_lite settings");
+    }
+    if (paramb.spin_basis_size + 1 < paramb.spin_compress) {
+      throw std::runtime_error("spin_basis_size must cover spin_compress");
+    }
+    if (paramb.spin_basis_size + 1 > MAX_NUM_N || paramb.spin_compress > MAX_NUM_N) {
+      throw std::runtime_error("spin_nep_lite spin basis is too large for cpu_opt");
+    }
+    if (paramb.spin_dof_type_active.empty()) {
+      paramb.spin_dof_type_active.assign(paramb.num_types, 1);
+    }
+    if (paramb.spin_env_type_active.empty()) {
+      paramb.spin_env_type_active = paramb.spin_dof_type_active;
+    }
+  }
+
   // zbl
   if (zbl.enabled) {
-    tokens = get_tokens(input);
     if (tokens.size() != 3 && tokens.size() != 4) {
       print_tokens(tokens);
       std::cout << "This line should be zbl rc_inner rc_outer [zbl_factor]." << std::endl;
@@ -3899,10 +5366,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         paramb.use_typewise_cutoff_zbl = true;
       }
     }
+    tokens = get_tokens(input);
   }
 
   // cutoff
-  tokens = get_tokens(input);
   if (tokens.size() != 5 && tokens.size() != paramb.num_types * 2 + 3) {
     print_tokens(tokens);
     std::cout << "cutoff should have 4 or num_types * 2 + 2 parameters.\n";
@@ -3928,6 +5395,12 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     if (paramb.rc_angular[n] > paramb.rc_angular_max) {
       paramb.rc_angular_max = paramb.rc_angular[n];
     }
+  }
+  if (paramb.spin_mode) {
+    if (paramb.spin_cutoff_radial <= 0.0) {
+      paramb.spin_cutoff_radial = paramb.rc_radial_max;
+    }
+    paramb.rc_radial_max = std::max(paramb.rc_radial_max, paramb.spin_cutoff_radial);
   }
 
   int MN_radial = get_int_from_token(tokens[tokens.size() - 2], __FILE__, __LINE__);
@@ -4003,7 +5476,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     exit(1);
   }
   annmb.num_neurons1 = get_int_from_token(tokens[1], __FILE__, __LINE__);
-  annmb.dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
+  paramb.struct_dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
+  paramb.spin_dim =
+    paramb.spin_mode ? spin_nep_lite_dim(paramb.spin_compress, paramb.spin_l_max, paramb.spin_chiral != 0) : 0;
+  annmb.dim = paramb.struct_dim + paramb.spin_dim;
 
   // calculated parameters:
   paramb.num_types_sq = paramb.num_types * paramb.num_types;
@@ -4023,6 +5499,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   int num_para_descriptor =
     paramb.num_types_sq * ((paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1) +
                            (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1));
+  if (paramb.spin_mode) {
+    num_para_descriptor += static_cast<int>(
+      paramb.num_types_sq * paramb.spin_compress * (paramb.spin_basis_size + 1));
+  }
   annmb.num_para = annmb.num_para_ann + num_para_descriptor;
 
   paramb.num_c_radial =
@@ -4040,7 +5520,6 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     tokens = get_tokens(input);
     paramb.q_scaler[d] = get_double_from_token(tokens[0], __FILE__, __LINE__);
   }
-
   // flexible zbl potential parameters if (zbl.flexibled)
   if (zbl.flexibled) {
     int num_type_zbl = (paramb.num_types * (paramb.num_types + 1)) / 2;
@@ -4196,6 +5675,11 @@ void NEP::update_potential(double* parameters, ANN& ann)
   }
 
   ann.c = pointer;
+  const std::size_t ordinary_descriptor_count =
+    paramb.num_types_sq * ((paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1) +
+                           (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1));
+  pointer += ordinary_descriptor_count;
+  ann.c_spin = paramb.spin_mode ? pointer : nullptr;
 }
 
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
@@ -4453,6 +5937,141 @@ void NEP::compute(
     totals.angular += phase_angular;
     totals.zbl += phase_zbl;
   }
+}
+
+void NEP::find_descriptor(
+  const std::vector<int>& type,
+  const std::vector<double>& box,
+  const std::vector<double>& position,
+  const std::vector<double>& spins,
+  std::vector<double>& descriptor)
+{
+  const std::size_t N = type.size();
+  const std::size_t size_x12 = N * MN;
+  if (!paramb.spin_mode ||
+      (paramb.spin_descriptor_kind != "spin_nep_lite" &&
+       paramb.spin_descriptor_kind != "spin_nep_lite_chiral")) {
+    throw std::runtime_error("spin_nep_lite descriptor requested for a non-spin-lite model");
+  }
+  if (N * 3 != position.size() || N * 3 != spins.size() ||
+      N * annmb.dim != descriptor.size()) {
+    throw std::runtime_error("spin_nep_lite input sizes are inconsistent");
+  }
+
+  allocate_memory(N);
+  find_neighbor_list_small_box(
+    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    NN_radial, NL_radial, NN_angular, NL_angular, r12);
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+  prepare_table_small_box(
+    N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
+#endif
+  find_descriptor_small_box(
+    false, true, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
+    NN_angular.data(), NL_angular.data(), type.data(), r12.data(), r12.data() + size_x12,
+    r12.data() + size_x12 * 2, r12.data() + size_x12 * 3, r12.data() + size_x12 * 4,
+    r12.data() + size_x12 * 5,
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_radial.data(), gnp_radial.data(), gn_angular.data(), gnp_angular.data(),
+#endif
+    Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
+    ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+  fill_spin_nep_lite_descriptor(
+    paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
+    r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
+    descriptor.data());
+}
+
+void NEP::compute(
+  const std::vector<int>& type,
+  const std::vector<double>& box,
+  const std::vector<double>& position,
+  const std::vector<double>& spins,
+  std::vector<double>& potential,
+  std::vector<double>& force,
+  std::vector<double>& virial,
+  std::vector<double>& descriptor,
+  std::vector<double>& mforce)
+{
+  const std::size_t N = type.size();
+  if (N != potential.size() || N * 3 != force.size() || N * 9 != virial.size() ||
+      N * annmb.dim != descriptor.size() || N * 3 != mforce.size()) {
+    throw std::runtime_error("spin_nep_lite output sizes are inconsistent");
+  }
+
+  const std::size_t size_x12 = N * MN;
+  allocate_memory(N);
+  std::fill(force.begin(), force.end(), 0.0);
+  std::fill(virial.begin(), virial.end(), 0.0);
+  std::fill(mforce.begin(), mforce.end(), 0.0);
+  std::fill(potential.begin(), potential.end(), 0.0);
+
+  find_neighbor_list_small_box(
+    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    NN_radial, NL_radial, NN_angular, NL_angular, r12);
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+  prepare_table_small_box(
+    N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
+#endif
+
+  find_descriptor_small_box(
+    false, true, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
+    NN_angular.data(), NL_angular.data(), type.data(), r12.data(), r12.data() + size_x12,
+    r12.data() + size_x12 * 2, r12.data() + size_x12 * 3, r12.data() + size_x12 * 4,
+    r12.data() + size_x12 * 5,
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_radial.data(), gnp_radial.data(), gn_angular.data(), gnp_angular.data(),
+#endif
+    Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
+    ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+
+  SpinLiteCache spin_cache;
+  fill_spin_nep_lite_descriptor(
+    paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
+    r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
+    descriptor.data(), &spin_cache);
+
+  for (std::size_t atom = 0; atom < N; ++atom) {
+    double q[MAX_DIM] = {0.0};
+    double F = 0.0;
+    double Fp_local[MAX_DIM] = {0.0};
+    double latent[MAX_NEURON] = {0.0};
+    for (int d = 0; d < annmb.dim; ++d) {
+      q[d] = descriptor[static_cast<std::size_t>(d) * N + atom];
+    }
+    apply_ann_one_layer(
+      annmb.dim, annmb.num_neurons1, annmb.w0[type[atom]], annmb.b0[type[atom]],
+      annmb.w1[type[atom]], annmb.b1, q, F, Fp_local, latent, false, nullptr);
+    potential[atom] = F + (energy_baseline.empty() ? 0.0 : energy_baseline[static_cast<std::size_t>(type[atom])]);
+    for (int d = 0; d < annmb.dim; ++d) {
+      Fp[atom * annmb.dim + d] = Fp_local[d] * paramb.q_scaler[d];
+    }
+  }
+
+  find_force_radial_small_box(
+    false, paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
+    r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, Fp.data(),
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_radial.data(), gnp_radial.data(),
+#endif
+    force.data(), force.data() + N, force.data() + N * 2, virial.data());
+  find_force_angular_small_box(
+    false, paramb, annmb, static_cast<int>(N), NN_angular.data(), NL_angular.data(), type.data(),
+    r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
+    Fp.data(), sum_fxyz.data(),
+#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    gn_angular.data(), gnp_angular.data(),
+#endif
+    force.data(), force.data() + N, force.data() + N * 2, virial.data());
+  if (zbl.enabled) {
+    find_force_ZBL_small_box(
+      static_cast<int>(N), paramb, zbl, NN_angular.data(), NL_angular.data(), type.data(),
+      r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
+      force.data(), force.data() + N, force.data() + N * 2, virial.data(), potential.data());
+  }
+  add_spin_nep_lite_vjp(
+    paramb, annmb, static_cast<int>(N), type.data(), spins.data(), spin_cache, Fp.data(),
+    force.data(), virial.data(), mforce.data());
 }
 
 void NEP::compute(
@@ -5220,6 +6839,101 @@ void NEP::compute_for_lammps(
     totals.angular += phase_angular;
     totals.reduce += phase_reduce;
     totals.zbl += phase_zbl;
+  }
+}
+
+void NEP::compute_for_lammps(
+  int nlocal,
+  int N,
+  int*,
+  int*,
+  int**,
+  int* type,
+  int* type_map,
+  double** pos,
+  double** spins,
+  double& total_potential,
+  double total_virial[6],
+  double* potential,
+  double** force,
+  double** mforce,
+  double** virial)
+{
+  if (!spins) {
+    throw std::runtime_error("spin_nep_lite LAMMPS path requires spins");
+  }
+  std::vector<int> mapped_type(static_cast<std::size_t>(N));
+  std::vector<double> box(9, 0.0);
+  std::vector<double> position(static_cast<std::size_t>(N) * 3, 0.0);
+  std::vector<double> spin_soa(static_cast<std::size_t>(N) * 3, 0.0);
+  double min_pos[3] = {0.0, 0.0, 0.0};
+  double max_pos[3] = {0.0, 0.0, 0.0};
+  if (N > 0) {
+    for (int d = 0; d < 3; ++d) {
+      min_pos[d] = pos[0][d];
+      max_pos[d] = pos[0][d];
+    }
+    for (int atom = 1; atom < N; ++atom) {
+      for (int d = 0; d < 3; ++d) {
+        min_pos[d] = std::min(min_pos[d], pos[atom][d]);
+        max_pos[d] = std::max(max_pos[d], pos[atom][d]);
+      }
+    }
+  }
+  const double padding = paramb.rc_radial_max + 1.0;
+  for (int i = 0; i < 3; ++i) {
+    const double span = max_pos[i] - min_pos[i];
+    box[i * 3 + i] = std::max(span + 2.0 * padding, 2.6 * paramb.rc_radial_max);
+  }
+  for (int atom = 0; atom < N; ++atom) {
+    mapped_type[atom] = type_map[type[atom]];
+    for (int d = 0; d < 3; ++d) {
+      position[static_cast<std::size_t>(d) * N + atom] = pos[atom][d] - min_pos[d] + padding;
+      spin_soa[static_cast<std::size_t>(d) * N + atom] = spins[atom][d];
+    }
+  }
+  std::vector<double> pe(static_cast<std::size_t>(N), 0.0);
+  std::vector<double> force_soa(static_cast<std::size_t>(N) * 3, 0.0);
+  std::vector<double> virial_soa(static_cast<std::size_t>(N) * 9, 0.0);
+  std::vector<double> descriptor(static_cast<std::size_t>(N) * annmb.dim, 0.0);
+  std::vector<double> mforce_soa(static_cast<std::size_t>(N) * 3, 0.0);
+  compute(mapped_type, box, position, spin_soa, pe, force_soa, virial_soa, descriptor, mforce_soa);
+
+  total_potential = 0.0;
+  std::fill(total_virial, total_virial + 6, 0.0);
+  for (int atom = 0; atom < nlocal; ++atom) {
+    total_potential += pe[atom];
+    if (potential) {
+      potential[atom] = pe[atom];
+    }
+    for (int d = 0; d < 3; ++d) {
+      force[atom][d] += force_soa[static_cast<std::size_t>(d) * N + atom];
+      if (mforce) {
+        mforce[atom][d] += mforce_soa[static_cast<std::size_t>(d) * N + atom];
+      }
+    }
+  }
+  auto raw = [&](const int comp, const int atom) {
+    return virial_soa[static_cast<std::size_t>(comp) * N + atom];
+  };
+  for (int atom = 0; atom < nlocal; ++atom) {
+    total_virial[0] += raw(0, atom);
+    total_virial[1] += raw(4, atom);
+    total_virial[2] += raw(8, atom);
+    total_virial[3] += raw(1, atom);
+    total_virial[4] += raw(2, atom);
+    total_virial[5] += raw(5, atom);
+    if (virial) {
+      virial[atom][0] += raw(0, atom);
+      virial[atom][1] += raw(4, atom);
+      virial[atom][2] += raw(8, atom);
+      virial[atom][3] += raw(1, atom);
+      virial[atom][4] += raw(2, atom);
+      virial[atom][5] += raw(5, atom);
+      virial[atom][6] += raw(3, atom);
+      virial[atom][7] += raw(6, atom);
+      virial[atom][8] += raw(7, atom);
+    }
   }
 }
 

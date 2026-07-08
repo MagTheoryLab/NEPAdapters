@@ -43,6 +43,7 @@ class PairNEPAdaptersCommon : public Pair {
   NepaModel* model_ = nullptr;
   std::string model_filename_;
   double cutoff_ = 0.0;
+  bool spin_model_ = false;
 
   std::vector<int> sanitized_numneigh_;
   std::vector<int*> sanitized_firstneigh_;
