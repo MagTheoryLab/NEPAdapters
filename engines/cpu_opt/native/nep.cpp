@@ -6191,6 +6191,9 @@ void add_spin_gradient(
         double gw1 = grad_weight[1];
         double gw2 = grad_weight[2];
         double gw3 = grad_weight[3];
+#if defined(_OPENMP)
+#pragma omp simd reduction(+:gw0, gw1, gw2, gw3)
+#endif
         for (int k = 0; k < width; ++k) {
           const double v = value[k];
           const double gd0 = alpha0 * self0[k];
