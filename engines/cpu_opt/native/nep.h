@@ -95,6 +95,28 @@ public:
     std::vector<double> c_angular_pair;
   };
 
+  struct SpinGradientScratch {
+    std::vector<double> grad_weight;
+    std::vector<double> grad_rhat;
+    std::vector<double> grad_si;
+    std::vector<double> grad_sj;
+    std::vector<double> grad_Q;
+    std::vector<double> grad_O;
+    std::vector<double> grad_H;
+    std::vector<double> grad_chi;
+    std::vector<double> grad_polar;
+    std::vector<double> grad_pseudodev;
+    std::vector<double> grad_chi_private;
+    std::vector<double> grad_polar_private;
+    std::vector<double> grad_pseudodev_private;
+    std::vector<double> grad_Q_private;
+    std::vector<double> grad_Q_terms;
+    std::vector<double> grad_O_terms;
+    std::vector<double> grad_O_derivatives;
+    std::vector<double> grad_H_terms;
+    std::vector<double> grad_H_derivatives;
+  };
+
   struct ZBL {
     bool enabled = false;
     bool flexibled = false;
@@ -309,6 +331,7 @@ public:
   std::vector<int> lammps_spin_types;
   std::vector<double> lammps_spin_spins_soa;
   std::vector<double> lammps_spin_descriptor;
+  SpinGradientScratch lammps_spin_gradient_scratch;
   std::vector<int> lammps_touched_rows;
   std::vector<int> lammps_touched_marks;
   int lammps_touched_stamp = 0;

@@ -4391,6 +4391,12 @@ void add_density(
   }
 }
 
+void resize_and_zero(std::vector<double>& values, const std::size_t size)
+{
+  values.resize(size);
+  std::fill(values.begin(), values.end(), 0.0);
+}
+
 void add_lammps_spin_virial(
   const std::array<double, 3>& rhat,
   const double dist,
@@ -5067,7 +5073,8 @@ void add_spin_chiral_gradient(
   std::vector<double>& grad_spin,
   double* force,
   double* virial,
-  LammpsThreadLocalScratchView* lammps_scratch = nullptr)
+  LammpsThreadLocalScratchView* lammps_scratch = nullptr,
+  NEP::SpinGradientScratch* scratch = nullptr)
 {
   if (!paramb.spin_chiral || cache.edges.empty()) {
     return;
@@ -5077,16 +5084,36 @@ void add_spin_chiral_gradient(
   const int base_offset = spin_descriptor_dim(C, paramb.spin_l_max, false);
   const int offset0 = paramb.struct_dim;
   const std::size_t edge_count = cache.edges.size();
-  std::vector<double> grad_weight(edge_count * C, 0.0);
-  std::vector<double> grad_rhat(edge_count * 3, 0.0);
-  std::vector<double> grad_si(edge_count * 3, 0.0);
-  std::vector<double> grad_sj(edge_count * 3, 0.0);
-  std::vector<double> grad_Q(static_cast<std::size_t>(N) * C * 9, 0.0);
-  std::vector<double> grad_O(static_cast<std::size_t>(N) * chiC * 27, 0.0);
-  std::vector<double> grad_H(static_cast<std::size_t>(N) * chiC * 81, 0.0);
-  std::vector<double> grad_chi(static_cast<std::size_t>(N) * chiC, 0.0);
-  std::vector<double> grad_polar(static_cast<std::size_t>(N) * C * 3, 0.0);
-  std::vector<double> grad_pseudodev(static_cast<std::size_t>(N) * C * 9, 0.0);
+  std::vector<double> local_grad_weight;
+  std::vector<double> local_grad_rhat;
+  std::vector<double> local_grad_si;
+  std::vector<double> local_grad_sj;
+  std::vector<double> local_grad_Q;
+  std::vector<double> local_grad_O;
+  std::vector<double> local_grad_H;
+  std::vector<double> local_grad_chi;
+  std::vector<double> local_grad_polar;
+  std::vector<double> local_grad_pseudodev;
+  std::vector<double>& grad_weight = scratch ? scratch->grad_weight : local_grad_weight;
+  std::vector<double>& grad_rhat = scratch ? scratch->grad_rhat : local_grad_rhat;
+  std::vector<double>& grad_si = scratch ? scratch->grad_si : local_grad_si;
+  std::vector<double>& grad_sj = scratch ? scratch->grad_sj : local_grad_sj;
+  std::vector<double>& grad_Q = scratch ? scratch->grad_Q : local_grad_Q;
+  std::vector<double>& grad_O = scratch ? scratch->grad_O : local_grad_O;
+  std::vector<double>& grad_H = scratch ? scratch->grad_H : local_grad_H;
+  std::vector<double>& grad_chi = scratch ? scratch->grad_chi : local_grad_chi;
+  std::vector<double>& grad_polar = scratch ? scratch->grad_polar : local_grad_polar;
+  std::vector<double>& grad_pseudodev = scratch ? scratch->grad_pseudodev : local_grad_pseudodev;
+  resize_and_zero(grad_weight, edge_count * C);
+  resize_and_zero(grad_rhat, edge_count * 3);
+  resize_and_zero(grad_si, edge_count * 3);
+  resize_and_zero(grad_sj, edge_count * 3);
+  resize_and_zero(grad_Q, static_cast<std::size_t>(N) * C * 9);
+  resize_and_zero(grad_O, static_cast<std::size_t>(N) * chiC * 27);
+  resize_and_zero(grad_H, static_cast<std::size_t>(N) * chiC * 81);
+  resize_and_zero(grad_chi, static_cast<std::size_t>(N) * chiC);
+  resize_and_zero(grad_polar, static_cast<std::size_t>(N) * C * 3);
+  resize_and_zero(grad_pseudodev, static_cast<std::size_t>(N) * C * 9);
 
 #if defined(_OPENMP)
   const int num_threads = spin_openmp_threads(N);
@@ -5139,12 +5166,24 @@ void add_spin_chiral_gradient(
     }
   };
 
-  std::vector<double> grad_chi_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_chi.size() : 0, 0.0);
-  std::vector<double> grad_polar_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_polar.size() : 0, 0.0);
-  std::vector<double> grad_pseudodev_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size() : 0, 0.0);
+  std::vector<double> local_grad_chi_private;
+  std::vector<double> local_grad_polar_private;
+  std::vector<double> local_grad_pseudodev_private;
+  std::vector<double>& grad_chi_private =
+    scratch ? scratch->grad_chi_private : local_grad_chi_private;
+  std::vector<double>& grad_polar_private =
+    scratch ? scratch->grad_polar_private : local_grad_polar_private;
+  std::vector<double>& grad_pseudodev_private =
+    scratch ? scratch->grad_pseudodev_private : local_grad_pseudodev_private;
+  resize_and_zero(
+    grad_chi_private,
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_chi.size() : 0);
+  resize_and_zero(
+    grad_polar_private,
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_polar.size() : 0);
+  resize_and_zero(
+    grad_pseudodev_private,
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size() : 0);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
@@ -5277,8 +5316,12 @@ void add_spin_chiral_gradient(
     }
   }
 
-  std::vector<double> grad_Q_private(
-    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_Q.size() : 0, 0.0);
+  std::vector<double> local_grad_Q_private;
+  std::vector<double>& grad_Q_private =
+    scratch ? scratch->grad_Q_private : local_grad_Q_private;
+  resize_and_zero(
+    grad_Q_private,
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_Q.size() : 0);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
@@ -5335,13 +5378,25 @@ void add_spin_chiral_gradient(
   }
   reduce_private(grad_Q, grad_Q_private);
 
-  std::vector<double> grad_Q_terms(static_cast<std::size_t>(N) * C * kSpinDeg2Count, 0.0);
-  std::vector<double> grad_O_terms(static_cast<std::size_t>(N) * chiC * kSpinDeg3Count, 0.0);
-  std::vector<double> grad_O_derivatives(
-    static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg2Count, 0.0);
-  std::vector<double> grad_H_terms(static_cast<std::size_t>(N) * chiC * kSpinDeg4Count, 0.0);
-  std::vector<double> grad_H_derivatives(
-    static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count, 0.0);
+  std::vector<double> local_grad_Q_terms;
+  std::vector<double> local_grad_O_terms;
+  std::vector<double> local_grad_O_derivatives;
+  std::vector<double> local_grad_H_terms;
+  std::vector<double> local_grad_H_derivatives;
+  std::vector<double>& grad_Q_terms = scratch ? scratch->grad_Q_terms : local_grad_Q_terms;
+  std::vector<double>& grad_O_terms = scratch ? scratch->grad_O_terms : local_grad_O_terms;
+  std::vector<double>& grad_O_derivatives =
+    scratch ? scratch->grad_O_derivatives : local_grad_O_derivatives;
+  std::vector<double>& grad_H_terms = scratch ? scratch->grad_H_terms : local_grad_H_terms;
+  std::vector<double>& grad_H_derivatives =
+    scratch ? scratch->grad_H_derivatives : local_grad_H_derivatives;
+  resize_and_zero(grad_Q_terms, static_cast<std::size_t>(N) * C * kSpinDeg2Count);
+  resize_and_zero(grad_O_terms, static_cast<std::size_t>(N) * chiC * kSpinDeg3Count);
+  resize_and_zero(
+    grad_O_derivatives, static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg2Count);
+  resize_and_zero(grad_H_terms, static_cast<std::size_t>(N) * chiC * kSpinDeg4Count);
+  resize_and_zero(
+    grad_H_derivatives, static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
@@ -5527,7 +5582,8 @@ void add_spin_gradient(
   double* lammps_total_virial = nullptr,
   double** lammps_virial = nullptr,
   int lammps_nlocal = 0,
-  LammpsThreadLocalScratchView* lammps_scratch = nullptr)
+  LammpsThreadLocalScratchView* lammps_scratch = nullptr,
+  NEP::SpinGradientScratch* scratch = nullptr)
 {
   auto phase_mark = NepPhaseClock::now();
   const int C = paramb.spin_compress;
@@ -5956,7 +6012,8 @@ void add_spin_gradient(
   }
   add_spin_chiral_gradient(
     paramb, annmb, N, type, cache, Fp, grad_spin, force, virial,
-    use_lammps_scratch ? lammps_scratch : nullptr);
+    use_lammps_scratch ? lammps_scratch : nullptr,
+    scratch);
   if (phase) {
     phase->gradient_chiral += nep_phase_elapsed(phase_mark);
   }
@@ -8033,7 +8090,7 @@ void NEP::compute_for_lammps(
   add_spin_gradient(
     paramb, annmb, atom_capacity, lammps_spin_types.data(), lammps_spin_spins_soa.data(),
     spin_cache, Fp.data(), nullptr, nullptr, nullptr, phase_timing ? &spin_phase : nullptr,
-    force, mforce, total_virial, virial, nlocal, &lammps_scratch);
+    force, mforce, total_virial, virial, nlocal, &lammps_scratch, &lammps_spin_gradient_scratch);
 
 #if defined(_OPENMP)
   if (lammps_spin_scratch_active(&lammps_scratch)) {
