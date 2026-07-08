@@ -5988,6 +5988,16 @@ void add_spin_gradient(
     return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
   };
 
+#if defined(_OPENMP)
+  const int num_threads = spin_openmp_threads(N);
+#else
+  const int num_threads = 1;
+#endif
+  const bool use_parallel_atoms = num_threads > 1 && N > 256;
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_atoms)
+#endif
   for (int atom = 0; atom < N; ++atom) {
     if (!active(paramb.spin_dof_type_active, type[atom])) {
       continue;
@@ -6016,6 +6026,9 @@ void add_spin_gradient(
   }
   const int rho0_dot_offset = geom_offset + C;
   const int raw1_dot_offset = rho0_dot_offset + C;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_atoms)
+#endif
   for (int atom = 0; atom < N; ++atom) {
     if (!active(paramb.spin_dof_type_active, type[atom])) {
       continue;
@@ -6044,6 +6057,9 @@ void add_spin_gradient(
     return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
   };
 
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_atoms)
+#endif
   for (int atom = 0; atom < N; ++atom) {
     for (int c = 0; c < C; ++c) {
       const double alpha0 = fp(atom, rho0_offset + c);
@@ -6068,6 +6084,9 @@ void add_spin_gradient(
   }
 
   if (l_max >= 1) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_atoms)
+#endif
     for (int atom = 0; atom < N; ++atom) {
       for (int c = 0; c < C; ++c) {
         double* mat = mutable_block(l1_pull, atom, c, 9);
@@ -6102,11 +6121,6 @@ void add_spin_gradient(
     }
   }
 
-#if defined(_OPENMP)
-  const int num_threads = spin_openmp_threads(N);
-#else
-  const int num_threads = 1;
-#endif
   const bool use_parallel_edges = num_threads > 1 && cache.edges.size() > 32;
   const bool use_private_edges = use_parallel_edges || use_lammps_scratch;
   const int force_stride = use_lammps_scratch ? lammps_scratch->force_rows : N;
