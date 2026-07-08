@@ -5711,13 +5711,11 @@ void add_spin_chiral_gradient(
   std::vector<double>& grad_H_terms = scratch ? scratch->grad_H_terms : local_grad_H_terms;
   std::vector<double>& grad_H_derivatives =
     scratch ? scratch->grad_H_derivatives : local_grad_H_derivatives;
-  resize_and_zero(grad_Q_terms, static_cast<std::size_t>(N) * C * kSpinDeg2Count);
-  resize_and_zero(grad_O_terms, static_cast<std::size_t>(N) * chiC * kSpinDeg3Count);
-  resize_and_zero(
-    grad_O_derivatives, static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg2Count);
-  resize_and_zero(grad_H_terms, static_cast<std::size_t>(N) * chiC * kSpinDeg4Count);
-  resize_and_zero(
-    grad_H_derivatives, static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count);
+  grad_Q_terms.resize(static_cast<std::size_t>(N) * C * kSpinDeg2Count);
+  grad_O_terms.resize(static_cast<std::size_t>(N) * chiC * kSpinDeg3Count);
+  grad_O_derivatives.resize(static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg2Count);
+  grad_H_terms.resize(static_cast<std::size_t>(N) * chiC * kSpinDeg4Count);
+  grad_H_derivatives.resize(static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count);
 
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
