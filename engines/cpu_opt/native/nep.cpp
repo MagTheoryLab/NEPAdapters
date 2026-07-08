@@ -4120,7 +4120,7 @@ void fill_spin_term_derivatives(
   }
 }
 
-void project_rank3_spin_gradient(const double* grad, double* terms, double* derivatives)
+void project_rank3_spin_gradient_slow(const double* grad, double* terms, double* derivatives)
 {
   double sym[27];
   for (int a = 0; a < 3; ++a) {
@@ -4162,7 +4162,7 @@ void project_rank3_spin_gradient(const double* grad, double* terms, double* deri
   fill_spin_term_derivatives(3, kSpinDeg3Count, terms, derivatives);
 }
 
-void project_rank4_spin_gradient(const double* grad, double* terms, double* derivatives)
+void project_rank4_spin_gradient_slow(const double* grad, double* terms, double* derivatives)
 {
   double sym[81];
   for (int a = 0; a < 3; ++a) {
@@ -4216,6 +4216,77 @@ void project_rank4_spin_gradient(const double* grad, double* terms, double* deri
       ((a == d && b == c) ? double_trace : 0.0);
     const double projected = sym[spin_tensor4_index(a, b, c, d)] - six / 7.0 + three / 35.0;
     terms[k] = spin_monomial_multiplicity(4, kSpinDeg4Exp[k][0], kSpinDeg4Exp[k][1], kSpinDeg4Exp[k][2]) * projected;
+  }
+  fill_spin_term_derivatives(4, kSpinDeg4Count, terms, derivatives);
+}
+
+using SpinRank3GradientTable = std::array<std::array<double, 27>, kSpinDeg3Count>;
+using SpinRank4GradientTable = std::array<std::array<double, 81>, kSpinDeg4Count>;
+
+const SpinRank3GradientTable& spin_rank3_gradient_table()
+{
+  static const SpinRank3GradientTable table = [] {
+    SpinRank3GradientTable out{};
+    double basis[27] = {0.0};
+    double terms[kSpinDeg3Count] = {0.0};
+    double derivatives[3 * kSpinDeg2Count] = {0.0};
+    for (int input = 0; input < 27; ++input) {
+      std::fill(basis, basis + 27, 0.0);
+      basis[input] = 1.0;
+      project_rank3_spin_gradient_slow(basis, terms, derivatives);
+      for (int k = 0; k < kSpinDeg3Count; ++k) {
+        out[static_cast<std::size_t>(k)][static_cast<std::size_t>(input)] = terms[k];
+      }
+    }
+    return out;
+  }();
+  return table;
+}
+
+const SpinRank4GradientTable& spin_rank4_gradient_table()
+{
+  static const SpinRank4GradientTable table = [] {
+    SpinRank4GradientTable out{};
+    double basis[81] = {0.0};
+    double terms[kSpinDeg4Count] = {0.0};
+    double derivatives[3 * kSpinDeg3Count] = {0.0};
+    for (int input = 0; input < 81; ++input) {
+      std::fill(basis, basis + 81, 0.0);
+      basis[input] = 1.0;
+      project_rank4_spin_gradient_slow(basis, terms, derivatives);
+      for (int k = 0; k < kSpinDeg4Count; ++k) {
+        out[static_cast<std::size_t>(k)][static_cast<std::size_t>(input)] = terms[k];
+      }
+    }
+    return out;
+  }();
+  return table;
+}
+
+void project_rank3_spin_gradient(const double* grad, double* terms, double* derivatives)
+{
+  const SpinRank3GradientTable& table = spin_rank3_gradient_table();
+  for (int k = 0; k < kSpinDeg3Count; ++k) {
+    const auto& row = table[static_cast<std::size_t>(k)];
+    double sum = 0.0;
+    for (int input = 0; input < 27; ++input) {
+      sum += row[static_cast<std::size_t>(input)] * grad[input];
+    }
+    terms[k] = sum;
+  }
+  fill_spin_term_derivatives(3, kSpinDeg3Count, terms, derivatives);
+}
+
+void project_rank4_spin_gradient(const double* grad, double* terms, double* derivatives)
+{
+  const SpinRank4GradientTable& table = spin_rank4_gradient_table();
+  for (int k = 0; k < kSpinDeg4Count; ++k) {
+    const auto& row = table[static_cast<std::size_t>(k)];
+    double sum = 0.0;
+    for (int input = 0; input < 81; ++input) {
+      sum += row[static_cast<std::size_t>(input)] * grad[input];
+    }
+    terms[k] = sum;
   }
   fill_spin_term_derivatives(4, kSpinDeg4Count, terms, derivatives);
 }
