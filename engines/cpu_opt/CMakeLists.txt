@@ -50,12 +50,17 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
   target_compile_options(nep_adapters_cpu_opt PRIVATE -Mnovect)
 endif()
 
+include(CheckCXXCompilerFlag)
 if(NEP_ADAPTERS_CPU_OPT_ENABLE_NATIVE_ARCH)
-  include(CheckCXXCompilerFlag)
   check_cxx_compiler_flag("-march=native" NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
   if(NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
     target_compile_options(nep_adapters_cpu_opt PRIVATE -march=native)
   endif()
+endif()
+
+check_cxx_compiler_flag("-fno-math-errno" NEP_ADAPTERS_CPU_OPT_HAS_NO_MATH_ERRNO)
+if(NEP_ADAPTERS_CPU_OPT_HAS_NO_MATH_ERRNO)
+  target_compile_options(nep_adapters_cpu_opt PRIVATE -fno-math-errno)
 endif()
 
 target_compile_definitions(
