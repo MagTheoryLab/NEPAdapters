@@ -5486,9 +5486,7 @@ void add_spin_gradient(
       }
     };
 
-    auto apply_angular = [&](const int ell, const double* ge) {
-      double ylm[9];
-      const int ylm_width = real_spherical_harmonics_spin(edge.rhat, ell, ylm);
+    auto apply_angular = [&](const int ell, const double* ylm, const int ylm_width, const double* ge) {
       double grad_ylm[9] = {0.0};
       for (int m = 0; m < ylm_width; ++m) {
         for (int d = 0; d < 3; ++d) {
@@ -5575,7 +5573,7 @@ void add_spin_gradient(
       }
       double ge[27] = {0.0};
       add_density_gradient(width, angular, value, 1.0, false, offset, nullptr, ge, grad_dot);
-      apply_angular(ell, ge);
+      apply_angular(ell, ylm, ylm_width, ge);
       offset += C;
     }
 
