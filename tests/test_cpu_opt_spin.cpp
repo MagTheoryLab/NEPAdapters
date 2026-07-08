@@ -538,6 +538,83 @@ bool run_batch(
   return true;
 }
 
+bool run_multi_structure_batch_matches_single(NepaModel* model) {
+  constexpr int structure_count = 3;
+  std::vector<std::int32_t> atom_counts(structure_count, kAtomCount);
+  std::vector<std::int32_t> atom_offsets(structure_count, 0);
+  std::vector<std::int32_t> types(static_cast<std::size_t>(structure_count) * kAtomCount, 0);
+  std::vector<double> boxes(static_cast<std::size_t>(structure_count) * 9, 0.0);
+  std::vector<std::int32_t> pbc(static_cast<std::size_t>(structure_count) * 3, 0);
+  std::vector<double> positions(static_cast<std::size_t>(structure_count) * kAtomCount * 3);
+  std::vector<double> spins(positions.size());
+  for (int structure = 0; structure < structure_count; ++structure) {
+    atom_offsets[structure] = structure * kAtomCount;
+    boxes[static_cast<std::size_t>(structure) * 9 + 0] = 8.0;
+    boxes[static_cast<std::size_t>(structure) * 9 + 4] = 8.0;
+    boxes[static_cast<std::size_t>(structure) * 9 + 8] = 8.0;
+    const std::vector<double> one_positions = {
+        0.1 * structure, 0.0, 0.0,
+        1.2, 0.4 + 0.1 * structure, 0.3};
+    const std::vector<double> one_spins = {
+        0.2 + 0.1 * structure, -0.4, 0.5,
+        -0.3, 0.1, 0.6 - 0.05 * structure};
+    std::copy(
+        one_positions.begin(),
+        one_positions.end(),
+        positions.begin() + static_cast<std::ptrdiff_t>(structure * kAtomCount * 3));
+    std::copy(
+        one_spins.begin(),
+        one_spins.end(),
+        spins.begin() + static_cast<std::ptrdiff_t>(structure * kAtomCount * 3));
+  }
+
+  NepaStructureBatch batch{};
+  batch.num_structures = structure_count;
+  batch.total_atoms = structure_count * kAtomCount;
+  batch.atom_counts = atom_counts.data();
+  batch.atom_offsets = atom_offsets.data();
+  batch.types = types.data();
+  batch.positions_aos3 = positions.data();
+  batch.spins_aos3 = spins.data();
+  batch.boxes_row_major9 = boxes.data();
+  batch.pbc_flags3 = pbc.data();
+
+  std::vector<double> energy(structure_count, 0.0);
+  std::vector<double> forces(positions.size(), 0.0);
+  std::vector<double> mforces(spins.size(), 0.0);
+  NepaFindForceResult result{};
+  result.energy_per_structure = energy.data();
+  result.forces_aos3 = forces.data();
+  result.mforces_aos3 = mforces.data();
+  if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  for (int structure = 0; structure < structure_count; ++structure) {
+    const auto begin =
+        static_cast<std::size_t>(structure) * kAtomCount * 3;
+    const std::vector<double> one_positions(
+        positions.begin() + static_cast<std::ptrdiff_t>(begin),
+        positions.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const std::vector<double> one_spins(
+        spins.begin() + static_cast<std::ptrdiff_t>(begin),
+        spins.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const BatchPrediction single = predict_batch(model, one_positions, one_spins);
+    const std::vector<double> batch_forces(
+        forces.begin() + static_cast<std::ptrdiff_t>(begin),
+        forces.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const std::vector<double> batch_mforces(
+        mforces.begin() + static_cast<std::ptrdiff_t>(begin),
+        mforces.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    if (std::abs(energy[structure] - single.energy) > 1.0e-12 ||
+        max_abs_diff(batch_forces, single.forces) > 1.0e-12 ||
+        max_abs_diff(batch_mforces, single.mforces) > 1.0e-12) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool run_lammps(
     NepaModel* model,
     const std::vector<double>& positions,
@@ -685,6 +762,7 @@ int main() {
 
   const bool ok = flip_diff < 1.0e-10 && rotate_diff < 1.0e-10 &&
                   run_batch(model, positions, spins) &&
+                  run_multi_structure_batch_matches_single(model) &&
                   run_lammps(model, positions, spins);
   nepa_free_model(model);
 
