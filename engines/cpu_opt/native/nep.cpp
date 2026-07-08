@@ -5346,17 +5346,6 @@ void add_spin_chiral_gradient(
   std::vector<double>& grad_chi = scratch ? scratch->grad_chi : local_grad_chi;
   std::vector<double>& grad_polar = scratch ? scratch->grad_polar : local_grad_polar;
   std::vector<double>& grad_pseudodev = scratch ? scratch->grad_pseudodev : local_grad_pseudodev;
-  resize_and_zero(grad_weight, edge_count * C);
-  resize_and_zero(grad_rhat, edge_count * 3);
-  resize_and_zero(grad_si, edge_count * 3);
-  resize_and_zero(grad_sj, edge_count * 3);
-  resize_and_zero(grad_Q, static_cast<std::size_t>(N) * C * 9);
-  resize_and_zero(grad_O, static_cast<std::size_t>(N) * chiC * 27);
-  resize_and_zero(grad_H, static_cast<std::size_t>(N) * chiC * 81);
-  resize_and_zero(grad_chi, static_cast<std::size_t>(N) * chiC);
-  resize_and_zero(grad_polar, static_cast<std::size_t>(N) * C * 3);
-  resize_and_zero(grad_pseudodev, static_cast<std::size_t>(N) * C * 9);
-
 #if defined(_OPENMP)
   const int num_threads = spin_openmp_threads(N);
 #else
@@ -5364,7 +5353,18 @@ void add_spin_chiral_gradient(
 #endif
   const bool use_parallel_edges = num_threads > 1 && edge_count > 32;
   const bool use_lammps_scratch = lammps_spin_scratch_active(lammps_scratch);
+  const bool direct_lammps_spin_pull = use_lammps_scratch;
   const bool use_center_edges = cache.edge_offsets.size() > 1;
+  resize_and_zero(grad_weight, edge_count * C);
+  resize_and_zero(grad_rhat, edge_count * 3);
+  resize_and_zero(grad_si, direct_lammps_spin_pull ? 0 : edge_count * 3);
+  resize_and_zero(grad_sj, direct_lammps_spin_pull ? 0 : edge_count * 3);
+  resize_and_zero(grad_Q, static_cast<std::size_t>(N) * C * 9);
+  resize_and_zero(grad_O, static_cast<std::size_t>(N) * chiC * 27);
+  resize_and_zero(grad_H, static_cast<std::size_t>(N) * chiC * 81);
+  resize_and_zero(grad_chi, static_cast<std::size_t>(N) * chiC);
+  resize_and_zero(grad_polar, static_cast<std::size_t>(N) * C * 3);
+  resize_and_zero(grad_pseudodev, static_cast<std::size_t>(N) * C * 9);
 
   auto fp = [&](const int atom, const int dim) {
     return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
@@ -5393,6 +5393,12 @@ void add_spin_chiral_gradient(
   auto add_edge_vec = [&](std::vector<double>& v, const std::size_t e, const std::array<double, 3>& g) {
     for (int d = 0; d < 3; ++d) {
       eg3(v, e, d) += g[d];
+    }
+  };
+  auto add_lammps_spin_pull = [&](double* local_grad_spin, const int row, const std::array<double, 3>& g) {
+    const int stride = lammps_scratch->force_rows;
+    for (int d = 0; d < 3; ++d) {
+      local_grad_spin[lammps_vector_index(row, d, stride)] += g[d];
     }
   };
   auto reduce_private = [&](std::vector<double>& target, const std::vector<double>& source) {
@@ -5440,7 +5446,8 @@ void add_spin_chiral_gradient(
   auto add_chiral_edge_pull = [&](const std::size_t e,
                                   double* local_grad_chi,
                                   double* local_grad_polar,
-                                  double* local_grad_pseudodev) {
+                                  double* local_grad_pseudodev,
+                                  double* local_grad_spin) {
     const SpinEdge& edge = cache.edges[e];
     const std::array<double, 3> si = {spin(edge.i, 0), spin(edge.i, 1), spin(edge.i, 2)};
     const std::array<double, 3> sj = {spin(edge.j, 0), spin(edge.j, 1), spin(edge.j, 2)};
@@ -5510,8 +5517,13 @@ void add_spin_chiral_gradient(
     }
     const std::array<double, 3> gsi = cross3(sj, gx);
     const std::array<double, 3> gsj = cross3(gx, si);
-    add_edge_vec(grad_si, e, gsi);
-    add_edge_vec(grad_sj, e, gsj);
+    if (direct_lammps_spin_pull) {
+      add_lammps_spin_pull(local_grad_spin, edge.i, gsi);
+      add_lammps_spin_pull(local_grad_spin, edge.j, gsj);
+    } else {
+      add_edge_vec(grad_si, e, gsi);
+      add_edge_vec(grad_sj, e, gsj);
+    }
     add_edge_vec(grad_rhat, e, gu);
   };
 
@@ -5523,10 +5535,19 @@ void add_spin_chiral_gradient(
          center_index < static_cast<std::ptrdiff_t>(cache.edge_offsets.size() - 1);
          ++center_index) {
       const std::size_t idx = static_cast<std::size_t>(center_index);
+#if defined(_OPENMP)
+      const int tid = omp_get_thread_num();
+#else
+      const int tid = 0;
+#endif
+      double* local_grad_spin = direct_lammps_spin_pull
+        ? lammps_scratch->mforce_private +
+            static_cast<std::size_t>(tid) * 3 * lammps_scratch->force_rows
+        : nullptr;
       for (int e = cache.edge_offsets[idx]; e < cache.edge_offsets[idx + 1]; ++e) {
         add_chiral_edge_pull(
           static_cast<std::size_t>(e), grad_chi.data(), grad_polar.data(),
-          grad_pseudodev.data());
+          grad_pseudodev.data(), local_grad_spin);
       }
     }
   } else {
@@ -5551,7 +5572,11 @@ void add_spin_chiral_gradient(
       double* local_grad_pseudodev = use_parallel_edges
         ? grad_pseudodev_private.data() + static_cast<std::size_t>(tid) * grad_pseudodev.size()
         : grad_pseudodev.data();
-      add_chiral_edge_pull(e, local_grad_chi, local_grad_polar, local_grad_pseudodev);
+      double* local_grad_spin = direct_lammps_spin_pull
+        ? lammps_scratch->mforce_private +
+            static_cast<std::size_t>(tid) * 3 * lammps_scratch->force_rows
+        : nullptr;
+      add_chiral_edge_pull(e, local_grad_chi, local_grad_polar, local_grad_pseudodev, local_grad_spin);
     }
     reduce_private(grad_chi, grad_chi_private);
     reduce_private(grad_polar, grad_polar_private);
@@ -5844,8 +5869,10 @@ void add_spin_chiral_gradient(
       if (use_lammps_scratch) {
         local_force[lammps_vector_index(edge.i, d, force_stride)] += grad_rij[d];
         local_force[lammps_vector_index(edge.j, d, force_stride)] -= grad_rij[d];
-        local_grad_spin[lammps_vector_index(edge.i, d, force_stride)] += grad_si[e * 3 + d];
-        local_grad_spin[lammps_vector_index(edge.j, d, force_stride)] += grad_sj[e * 3 + d];
+        if (!direct_lammps_spin_pull) {
+          local_grad_spin[lammps_vector_index(edge.i, d, force_stride)] += grad_si[e * 3 + d];
+          local_grad_spin[lammps_vector_index(edge.j, d, force_stride)] += grad_sj[e * 3 + d];
+        }
       } else {
         local_force[static_cast<std::size_t>(d) * force_stride + edge.i] += grad_rij[d];
         local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
