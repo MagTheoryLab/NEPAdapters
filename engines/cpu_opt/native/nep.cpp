@@ -5819,7 +5819,10 @@ void add_spin_gradient(
     force = lammps_force_work.data();
     virial = lammps_virial_work.data();
   }
-  std::vector<double> grad_spin(static_cast<std::size_t>(N) * 3, 0.0);
+  std::vector<double> grad_spin;
+  if (!use_lammps_scratch) {
+    grad_spin.assign(static_cast<std::size_t>(N) * 3, 0.0);
+  }
   auto add_spin_pull = [&](const int atom, const int d, const double value) {
     if (use_lammps_scratch) {
       lammps_mforce[atom][d] -= value;
