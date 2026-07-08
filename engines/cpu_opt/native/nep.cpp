@@ -3832,57 +3832,314 @@ std::array<double, 9> stf_outer3(const std::array<double, 3>& a, const std::arra
   return out;
 }
 
-void add_rank3_stf_vjp(
-  const double* grad,
-  const std::array<double, 3>& u,
-  std::array<double, 3>& grad_u)
+constexpr int kSpinDeg2Count = 6;
+constexpr int kSpinDeg3Count = 10;
+constexpr int kSpinDeg4Count = 15;
+
+constexpr int kSpinDeg2Exp[kSpinDeg2Count][3] = {
+  {2, 0, 0}, {0, 2, 0}, {0, 0, 2}, {1, 1, 0}, {1, 0, 1}, {0, 1, 1}};
+constexpr int kSpinDeg3Exp[kSpinDeg3Count][3] = {
+  {3, 0, 0}, {0, 3, 0}, {0, 0, 3}, {2, 1, 0}, {2, 0, 1},
+  {1, 2, 0}, {0, 2, 1}, {1, 0, 2}, {0, 1, 2}, {1, 1, 1}};
+constexpr int kSpinDeg4Exp[kSpinDeg4Count][3] = {
+  {4, 0, 0}, {0, 4, 0}, {0, 0, 4}, {3, 1, 0}, {3, 0, 1},
+  {1, 3, 0}, {0, 3, 1}, {1, 0, 3}, {0, 1, 3}, {2, 2, 0},
+  {2, 0, 2}, {0, 2, 2}, {2, 1, 1}, {1, 2, 1}, {1, 1, 2}};
+
+constexpr int kSpinPerm3[6][3] = {
+  {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+constexpr int kSpinPerm4[24][4] = {
+  {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1},
+  {0, 3, 1, 2}, {0, 3, 2, 1}, {1, 0, 2, 3}, {1, 0, 3, 2},
+  {1, 2, 0, 3}, {1, 2, 3, 0}, {1, 3, 0, 2}, {1, 3, 2, 0},
+  {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3}, {2, 1, 3, 0},
+  {2, 3, 0, 1}, {2, 3, 1, 0}, {3, 0, 1, 2}, {3, 0, 2, 1},
+  {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0}};
+
+int spin_tensor3_index(const int a, const int b, const int c)
 {
+  return (a * 3 + b) * 3 + c;
+}
+
+int spin_tensor4_index(const int a, const int b, const int c, const int d)
+{
+  return ((a * 3 + b) * 3 + c) * 3 + d;
+}
+
+int spin_monomial_index(const int degree, const int nx, const int ny, const int nz)
+{
+  const int (*exps)[3] = nullptr;
+  int count = 0;
+  if (degree == 2) {
+    exps = kSpinDeg2Exp;
+    count = kSpinDeg2Count;
+  } else if (degree == 3) {
+    exps = kSpinDeg3Exp;
+    count = kSpinDeg3Count;
+  } else {
+    exps = kSpinDeg4Exp;
+    count = kSpinDeg4Count;
+  }
+  for (int k = 0; k < count; ++k) {
+    if (exps[k][0] == nx && exps[k][1] == ny && exps[k][2] == nz) {
+      return k;
+    }
+  }
+  return 0;
+}
+
+int spin_factorial(const int n)
+{
+  return n <= 1 ? 1 : (n == 2 ? 2 : (n == 3 ? 6 : 24));
+}
+
+int spin_monomial_multiplicity(const int degree, const int nx, const int ny, const int nz)
+{
+  return spin_factorial(degree) / (spin_factorial(nx) * spin_factorial(ny) * spin_factorial(nz));
+}
+
+void fill_spin_monomials(const std::array<double, 3>& u, double* m2, double* m3, double* m4)
+{
+  const double x = u[0];
+  const double y = u[1];
+  const double z = u[2];
+  const double x2 = x * x;
+  const double y2 = y * y;
+  const double z2 = z * z;
+  const double powx[5] = {1.0, x, x2, x2 * x, x2 * x2};
+  const double powy[5] = {1.0, y, y2, y2 * y, y2 * y2};
+  const double powz[5] = {1.0, z, z2, z2 * z, z2 * z2};
+  for (int k = 0; k < kSpinDeg2Count; ++k) {
+    m2[k] = powx[kSpinDeg2Exp[k][0]] * powy[kSpinDeg2Exp[k][1]] * powz[kSpinDeg2Exp[k][2]];
+  }
+  for (int k = 0; k < kSpinDeg3Count; ++k) {
+    m3[k] = powx[kSpinDeg3Exp[k][0]] * powy[kSpinDeg3Exp[k][1]] * powz[kSpinDeg3Exp[k][2]];
+  }
+  for (int k = 0; k < kSpinDeg4Count; ++k) {
+    m4[k] = powx[kSpinDeg4Exp[k][0]] * powy[kSpinDeg4Exp[k][1]] * powz[kSpinDeg4Exp[k][2]];
+  }
+}
+
+double dot_spin_terms(const double* a, const double* b, const int count)
+{
+  double sum = 0.0;
+  for (int k = 0; k < count; ++k) {
+    sum += a[k] * b[k];
+  }
+  return sum;
+}
+
+double spin_packed_value(const double* packed, const int degree, const int* counts)
+{
+  return packed[spin_monomial_index(degree, counts[0], counts[1], counts[2])];
+}
+
+void unpack_rank3_spin_stf(const double* raw, double* out)
+{
+  double trace[3] = {0.0, 0.0, 0.0};
+  for (int c = 0; c < 3; ++c) {
+    for (int e = 0; e < 3; ++e) {
+      int counts[3] = {0, 0, 0};
+      counts[e] += 2;
+      ++counts[c];
+      trace[c] += spin_packed_value(raw, 3, counts);
+    }
+  }
   for (int a = 0; a < 3; ++a) {
     for (int b = 0; b < 3; ++b) {
       for (int c = 0; c < 3; ++c) {
-        const double g = grad[(a * 3 + b) * 3 + c];
-        for (int p = 0; p < 3; ++p) {
-          grad_u[p] += g * (
-            (a == p ? u[b] * u[c] : 0.0) +
-            (b == p ? u[a] * u[c] : 0.0) +
-            (c == p ? u[a] * u[b] : 0.0) -
-            (((a == b && c == p) ? 1.0 : 0.0) +
-             ((a == c && b == p) ? 1.0 : 0.0) +
-             ((b == c && a == p) ? 1.0 : 0.0)) / 5.0);
+        int counts[3] = {0, 0, 0};
+        ++counts[a];
+        ++counts[b];
+        ++counts[c];
+        const double traced =
+          ((a == b) ? trace[c] : 0.0) +
+          ((a == c) ? trace[b] : 0.0) +
+          ((b == c) ? trace[a] : 0.0);
+        out[spin_tensor3_index(a, b, c)] = spin_packed_value(raw, 3, counts) - traced / 5.0;
+      }
+    }
+  }
+}
+
+void unpack_rank4_spin_stf(const double* raw, double* out)
+{
+  double trace[9] = {0.0};
+  for (int c = 0; c < 3; ++c) {
+    for (int d = 0; d < 3; ++d) {
+      for (int e = 0; e < 3; ++e) {
+        int counts[3] = {0, 0, 0};
+        counts[e] += 2;
+        ++counts[c];
+        ++counts[d];
+        trace[3 * c + d] += spin_packed_value(raw, 4, counts);
+      }
+    }
+  }
+  double double_trace = 0.0;
+  for (int e = 0; e < 3; ++e) {
+    double_trace += trace[3 * e + e];
+  }
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        for (int d = 0; d < 3; ++d) {
+          int counts[3] = {0, 0, 0};
+          ++counts[a];
+          ++counts[b];
+          ++counts[c];
+          ++counts[d];
+          const double six =
+            ((a == b) ? trace[3 * c + d] : 0.0) +
+            ((a == c) ? trace[3 * b + d] : 0.0) +
+            ((a == d) ? trace[3 * b + c] : 0.0) +
+            ((b == c) ? trace[3 * a + d] : 0.0) +
+            ((b == d) ? trace[3 * a + c] : 0.0) +
+            ((c == d) ? trace[3 * a + b] : 0.0);
+          const double three =
+            ((a == b && c == d) ? double_trace : 0.0) +
+            ((a == c && b == d) ? double_trace : 0.0) +
+            ((a == d && b == c) ? double_trace : 0.0);
+          out[spin_tensor4_index(a, b, c, d)] =
+            spin_packed_value(raw, 4, counts) - six / 7.0 + three / 35.0;
         }
       }
     }
   }
 }
 
-void add_rank4_stf_vjp(
-  const double* grad,
-  const std::array<double, 3>& u,
-  std::array<double, 3>& grad_u)
+void project_rank2_spin_gradient(const double* grad, double* terms)
 {
+  const double trace = (grad[0] + grad[4] + grad[8]) / 3.0;
+  terms[0] = grad[0] - trace;
+  terms[1] = grad[4] - trace;
+  terms[2] = grad[8] - trace;
+  terms[3] = grad[1] + grad[3];
+  terms[4] = grad[2] + grad[6];
+  terms[5] = grad[5] + grad[7];
+}
+
+void fill_spin_term_derivatives(
+  const int degree,
+  const int count,
+  const double* terms,
+  double* derivatives)
+{
+  const int lower_count = degree == 3 ? kSpinDeg2Count : kSpinDeg3Count;
+  std::fill(derivatives, derivatives + 3 * lower_count, 0.0);
+  const int (*exps)[3] = degree == 3 ? kSpinDeg3Exp : kSpinDeg4Exp;
+  for (int k = 0; k < count; ++k) {
+    for (int axis = 0; axis < 3; ++axis) {
+      const int power = exps[k][axis];
+      if (power == 0) {
+        continue;
+      }
+      int lower[3] = {exps[k][0], exps[k][1], exps[k][2]};
+      --lower[axis];
+      const int lower_index = spin_monomial_index(degree - 1, lower[0], lower[1], lower[2]);
+      derivatives[axis * lower_count + lower_index] += power * terms[k];
+    }
+  }
+}
+
+void project_rank3_spin_gradient(const double* grad, double* terms, double* derivatives)
+{
+  double sym[27];
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      for (int c = 0; c < 3; ++c) {
+        const int ids[3] = {a, b, c};
+        double sum = 0.0;
+        for (const auto& p : kSpinPerm3) {
+          sum += grad[spin_tensor3_index(ids[p[0]], ids[p[1]], ids[p[2]])];
+        }
+        sym[spin_tensor3_index(a, b, c)] = sum / 6.0;
+      }
+    }
+  }
+  double trace[3] = {0.0, 0.0, 0.0};
+  for (int c = 0; c < 3; ++c) {
+    for (int e = 0; e < 3; ++e) {
+      trace[c] += sym[spin_tensor3_index(e, e, c)];
+    }
+  }
+  for (int k = 0; k < kSpinDeg3Count; ++k) {
+    int ids[3];
+    int n = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+      for (int repeat = 0; repeat < kSpinDeg3Exp[k][axis]; ++repeat) {
+        ids[n++] = axis;
+      }
+    }
+    const int a = ids[0];
+    const int b = ids[1];
+    const int c = ids[2];
+    const double traced =
+      ((a == b) ? trace[c] : 0.0) +
+      ((a == c) ? trace[b] : 0.0) +
+      ((b == c) ? trace[a] : 0.0);
+    const double projected = sym[spin_tensor3_index(a, b, c)] - traced / 5.0;
+    terms[k] = spin_monomial_multiplicity(3, kSpinDeg3Exp[k][0], kSpinDeg3Exp[k][1], kSpinDeg3Exp[k][2]) * projected;
+  }
+  fill_spin_term_derivatives(3, kSpinDeg3Count, terms, derivatives);
+}
+
+void project_rank4_spin_gradient(const double* grad, double* terms, double* derivatives)
+{
+  double sym[81];
   for (int a = 0; a < 3; ++a) {
     for (int b = 0; b < 3; ++b) {
       for (int c = 0; c < 3; ++c) {
         for (int d = 0; d < 3; ++d) {
-          const double g = grad[((a * 3 + b) * 3 + c) * 3 + d];
-          for (int p = 0; p < 3; ++p) {
-            double v =
-              (a == p ? u[b] * u[c] * u[d] : 0.0) +
-              (b == p ? u[a] * u[c] * u[d] : 0.0) +
-              (c == p ? u[a] * u[b] * u[d] : 0.0) +
-              (d == p ? u[a] * u[b] * u[c] : 0.0);
-            v -= (((a == b) ? ((c == p ? u[d] : 0.0) + (d == p ? u[c] : 0.0)) : 0.0) +
-                  ((a == c) ? ((b == p ? u[d] : 0.0) + (d == p ? u[b] : 0.0)) : 0.0) +
-                  ((a == d) ? ((b == p ? u[c] : 0.0) + (c == p ? u[b] : 0.0)) : 0.0) +
-                  ((b == c) ? ((a == p ? u[d] : 0.0) + (d == p ? u[a] : 0.0)) : 0.0) +
-                  ((b == d) ? ((a == p ? u[c] : 0.0) + (c == p ? u[a] : 0.0)) : 0.0) +
-                  ((c == d) ? ((a == p ? u[b] : 0.0) + (b == p ? u[a] : 0.0)) : 0.0)) / 7.0;
-            grad_u[p] += g * v;
+          const int ids[4] = {a, b, c, d};
+          double sum = 0.0;
+          for (const auto& p : kSpinPerm4) {
+            sum += grad[spin_tensor4_index(ids[p[0]], ids[p[1]], ids[p[2]], ids[p[3]])];
           }
+          sym[spin_tensor4_index(a, b, c, d)] = sum / 24.0;
         }
       }
     }
   }
+  double trace[9] = {0.0};
+  for (int c = 0; c < 3; ++c) {
+    for (int d = 0; d < 3; ++d) {
+      for (int e = 0; e < 3; ++e) {
+        trace[3 * c + d] += sym[spin_tensor4_index(e, e, c, d)];
+      }
+    }
+  }
+  double double_trace = 0.0;
+  for (int e = 0; e < 3; ++e) {
+    double_trace += trace[3 * e + e];
+  }
+  for (int k = 0; k < kSpinDeg4Count; ++k) {
+    int ids[4];
+    int n = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+      for (int repeat = 0; repeat < kSpinDeg4Exp[k][axis]; ++repeat) {
+        ids[n++] = axis;
+      }
+    }
+    const int a = ids[0];
+    const int b = ids[1];
+    const int c = ids[2];
+    const int d = ids[3];
+    const double six =
+      ((a == b) ? trace[3 * c + d] : 0.0) +
+      ((a == c) ? trace[3 * b + d] : 0.0) +
+      ((a == d) ? trace[3 * b + c] : 0.0) +
+      ((b == c) ? trace[3 * a + d] : 0.0) +
+      ((b == d) ? trace[3 * a + c] : 0.0) +
+      ((c == d) ? trace[3 * a + b] : 0.0);
+    const double three =
+      ((a == b && c == d) ? double_trace : 0.0) +
+      ((a == c && b == d) ? double_trace : 0.0) +
+      ((a == d && b == c) ? double_trace : 0.0);
+    const double projected = sym[spin_tensor4_index(a, b, c, d)] - six / 7.0 + three / 35.0;
+    terms[k] = spin_monomial_multiplicity(4, kSpinDeg4Exp[k][0], kSpinDeg4Exp[k][1], kSpinDeg4Exp[k][2]) * projected;
+  }
+  fill_spin_term_derivatives(4, kSpinDeg4Count, terms, derivatives);
 }
 
 void rank3_stf_edge(const std::array<double, 3>& u, double* out)
@@ -3994,6 +4251,7 @@ struct SpinEdge {
   std::array<double, 3> si;
   std::array<double, 3> sj;
   std::array<double, MAX_NUM_N> weights;
+  std::array<double, MAX_NUM_N> weight_derivatives;
   double dot;
   double sj2;
   double ri_dot_si;
@@ -4092,10 +4350,14 @@ void fill_spin_descriptor(
   std::vector<double>& rho0_dot = cache.rho0_dot;
   std::vector<double>& raw1_dot = cache.raw1_dot;
   const int chiC = std::min(2, C);
+  std::vector<double> octupoles_raw;
+  std::vector<double> hexadecapoles_raw;
   if (paramb.spin_chiral) {
     polars.assign(static_cast<std::size_t>(N) * C * 3, 0.0);
     octupoles.assign(static_cast<std::size_t>(N) * chiC * 27, 0.0);
     hexadecapoles.assign(static_cast<std::size_t>(N) * chiC * 81, 0.0);
+    octupoles_raw.assign(static_cast<std::size_t>(N) * chiC * kSpinDeg3Count, 0.0);
+    hexadecapoles_raw.assign(static_cast<std::size_t>(N) * chiC * kSpinDeg4Count, 0.0);
     chirals.assign(static_cast<std::size_t>(N) * chiC, 0.0);
     pseudodevs.assign(static_cast<std::size_t>(N) * C * 9, 0.0);
   }
@@ -4137,9 +4399,17 @@ void fill_spin_descriptor(
         continue;
       }
       double fc = 0.0;
+      double fcp = 0.0;
       double fn[MAX_NUM_N];
-      find_fc(paramb.spin_cutoff_radial, 1.0 / paramb.spin_cutoff_radial, d, fc);
-      find_fn(paramb.spin_basis_size, 1.0 / paramb.spin_cutoff_radial, d, fc, fn);
+      double fnp[MAX_NUM_N];
+      const double rcinv = 1.0 / paramb.spin_cutoff_radial;
+      if (cache_out) {
+        find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, d, fc, fcp);
+        find_fn_and_fnp(paramb.spin_basis_size, rcinv, d, fc, fcp, fn, fnp);
+      } else {
+        find_fc(paramb.spin_cutoff_radial, rcinv, d, fc);
+        find_fn(paramb.spin_basis_size, rcinv, d, fc, fn);
+      }
       SpinEdge edge;
       edge.i = i;
       edge.j = j;
@@ -4149,14 +4419,20 @@ void fill_spin_descriptor(
       edge.si = {spin(i, 0), spin(i, 1), spin(i, 2)};
       edge.sj = {spin(j, 0), spin(j, 1), spin(j, 2)};
       edge.weights.fill(0.0);
+      edge.weight_derivatives.fill(0.0);
       for (int c = 0; c < C; ++c) {
         double w = 0.0;
+        double dw = 0.0;
         for (int k = 0; k < B; ++k) {
           const std::size_t idx =
             ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
           w += fn[k] * annmb.c_spin[idx];
+          if (cache_out) {
+            dw += fnp[k] * annmb.c_spin[idx];
+          }
         }
         edge.weights[c] = w;
+        edge.weight_derivatives[c] = dw;
       }
       edge.dot = edge.si[0] * edge.sj[0] + edge.si[1] * edge.sj[1] + edge.si[2] * edge.sj[2];
       edge.sj2 = edge.sj[0] * edge.sj[0] + edge.sj[1] * edge.sj[1] + edge.sj[2] * edge.sj[2];
@@ -4216,12 +4492,12 @@ void fill_spin_descriptor(
       add_density(geom, C, edge.i, rr.data(), 9, edge.weights.data());
       if (paramb.spin_chiral) {
         add_density(polars, C, edge.i, edge.rhat.data(), 3, edge.weights.data());
-        double o_edge[27];
-        double h_edge[81];
-        rank3_stf_edge(edge.rhat, o_edge);
-        rank4_stf_edge(edge.rhat, h_edge);
-        add_density(octupoles, chiC, edge.i, o_edge, 27, edge.weights.data());
-        add_density(hexadecapoles, chiC, edge.i, h_edge, 81, edge.weights.data());
+        double m2[kSpinDeg2Count];
+        double m3[kSpinDeg3Count];
+        double m4[kSpinDeg4Count];
+        fill_spin_monomials(edge.rhat, m2, m3, m4);
+        add_density(octupoles_raw, chiC, edge.i, m3, kSpinDeg3Count, edge.weights.data());
+        add_density(hexadecapoles_raw, chiC, edge.i, m4, kSpinDeg4Count, edge.weights.data());
       }
       add_density(rho0_dot, C, edge.i, sj_value, 3, edge.weights.data(), edge.dot);
       add_density(raw1_dot, C, edge.i, raw1_value, 9, edge.weights.data(), edge.dot);
@@ -4231,6 +4507,23 @@ void fill_spin_descriptor(
         } else {
           cache.edges.push_back(std::move(edge));
         }
+      }
+    }
+  }
+
+  if (paramb.spin_chiral) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+    for (int atom = 0; atom < N; ++atom) {
+      for (int c = 0; c < chiC; ++c) {
+        const std::size_t raw_base = static_cast<std::size_t>(atom) * chiC + c;
+        unpack_rank3_spin_stf(
+          octupoles_raw.data() + raw_base * kSpinDeg3Count,
+          octupoles.data() + raw_base * 27);
+        unpack_rank4_spin_stf(
+          hexadecapoles_raw.data() + raw_base * kSpinDeg4Count,
+          hexadecapoles.data() + raw_base * 81);
       }
     }
   }
@@ -4379,7 +4672,7 @@ void fill_spin_descriptor(
   }
 }
 
-void add_stf_outer_vjp(
+void add_stf_outer_gradient(
   const double* grad,
   const std::array<double, 3>& a,
   const std::array<double, 3>& b,
@@ -4399,7 +4692,7 @@ void add_stf_outer_vjp(
   }
 }
 
-void add_real_spherical_harmonics_vjp(
+void add_real_spherical_harmonics_gradient(
   const std::array<double, 3>& r,
   const int ell,
   const double* grad_y,
@@ -4473,7 +4766,7 @@ void add_real_spherical_harmonics_vjp(
                grad_y[7] * b * x * (x2 - 3.0 * y2);
 }
 
-void add_spin_chiral_vjp(
+void add_spin_chiral_gradient(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
   const int N,
@@ -4488,7 +4781,6 @@ void add_spin_chiral_vjp(
     return;
   }
   const int C = paramb.spin_compress;
-  const int B = paramb.spin_basis_size + 1;
   const int chiC = std::min(2, C);
   const int base_offset = spin_descriptor_dim(C, paramb.spin_l_max, false);
   const int offset0 = paramb.struct_dim;
@@ -4503,6 +4795,13 @@ void add_spin_chiral_vjp(
   std::vector<double> grad_chi(static_cast<std::size_t>(N) * chiC, 0.0);
   std::vector<double> grad_polar(static_cast<std::size_t>(N) * C * 3, 0.0);
   std::vector<double> grad_pseudodev(static_cast<std::size_t>(N) * C * 9, 0.0);
+
+#if defined(_OPENMP)
+  const int num_threads = omp_get_max_threads();
+#else
+  const int num_threads = 1;
+#endif
+  const bool use_parallel_edges = num_threads > 1 && edge_count > 32;
 
   auto fp = [&](const int atom, const int dim) {
     return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
@@ -4530,9 +4829,50 @@ void add_spin_chiral_vjp(
       eg3(v, e, d) += g[d];
     }
   };
+  auto reduce_private = [&](std::vector<double>& target, const std::vector<double>& source) {
+    if (source.empty()) {
+      return;
+    }
+    const std::size_t stride = target.size();
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (stride > 1024)
+#endif
+    for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(stride); ++k) {
+      double sum = target[static_cast<std::size_t>(k)];
+      for (int tid = 0; tid < num_threads; ++tid) {
+        sum += source[static_cast<std::size_t>(tid) * stride + static_cast<std::size_t>(k)];
+      }
+      target[static_cast<std::size_t>(k)] = sum;
+    }
+  };
 
-  for (std::size_t e = 0; e < edge_count; ++e) {
+  std::vector<double> grad_chi_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_chi.size() : 0, 0.0);
+  std::vector<double> grad_polar_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_polar.size() : 0, 0.0);
+  std::vector<double> grad_pseudodev_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_pseudodev.size() : 0, 0.0);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
+    const std::size_t e = static_cast<std::size_t>(edge_index);
     const SpinEdge& edge = cache.edges[e];
+#if defined(_OPENMP)
+    const int tid = omp_get_thread_num();
+#else
+    const int tid = 0;
+#endif
+    double* local_grad_chi = use_parallel_edges
+      ? grad_chi_private.data() + static_cast<std::size_t>(tid) * grad_chi.size()
+      : grad_chi.data();
+    double* local_grad_polar = use_parallel_edges
+      ? grad_polar_private.data() + static_cast<std::size_t>(tid) * grad_polar.size()
+      : grad_polar.data();
+    double* local_grad_pseudodev = use_parallel_edges
+      ? grad_pseudodev_private.data() + static_cast<std::size_t>(tid) * grad_pseudodev.size()
+      : grad_pseudodev.data();
     const std::array<double, 3> x = cross3(edge.si, edge.sj);
     std::array<double, 3> gx = {0.0, 0.0, 0.0};
     std::array<double, 3> gu = {0.0, 0.0, 0.0};
@@ -4541,7 +4881,8 @@ void add_spin_chiral_vjp(
       const double chi = cache.chirals[static_cast<std::size_t>(edge.i) * chiC + c];
       const double xu = dot3(x, edge.rhat);
       egw(e, c) += alpha * xu * chi;
-      grad_chi[static_cast<std::size_t>(edge.i) * chiC + c] += alpha * edge.weights[c] * xu;
+      local_grad_chi[static_cast<std::size_t>(edge.i) * chiC + c] +=
+        alpha * edge.weights[c] * xu;
       for (int d = 0; d < 3; ++d) {
         gx[d] += alpha * edge.weights[c] * chi * edge.rhat[d];
         gu[d] += alpha * edge.weights[c] * chi * x[d];
@@ -4562,7 +4903,7 @@ void add_spin_chiral_vjp(
       }
       const std::array<double, 3> gp = cross3(edge.rhat, gaxis);
       const std::array<double, 3> gu_part = cross3(gaxis, polar);
-      double* grad_p = blockC(grad_polar, edge.i, c, 3);
+      double* grad_p = local_grad_polar + (static_cast<std::size_t>(edge.i) * C + c) * 3;
       for (int d = 0; d < 3; ++d) {
         grad_p[d] += gp[d];
         gu[d] += gu_part[d];
@@ -4585,7 +4926,7 @@ void add_spin_chiral_vjp(
         gx[d] += alpha * edge.weights[c] * axis[d];
         gaxis[d] = alpha * edge.weights[c] * x[d];
       }
-      double* gP = blockC(grad_pseudodev, edge.i, c, 9);
+      double* gP = local_grad_pseudodev + (static_cast<std::size_t>(edge.i) * C + c) * 9;
       for (int a = 0; a < 3; ++a) {
         for (int b = 0; b < 3; ++b) {
           gP[3 * a + b] += gaxis[a] * edge.rhat[b];
@@ -4599,7 +4940,13 @@ void add_spin_chiral_vjp(
     add_edge_vec(grad_sj, e, gsj);
     add_edge_vec(grad_rhat, e, gu);
   }
+  reduce_private(grad_chi, grad_chi_private);
+  reduce_private(grad_polar, grad_polar_private);
+  reduce_private(grad_pseudodev, grad_pseudodev_private);
 
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
   for (int atom = 0; atom < N; ++atom) {
     for (int c = 0; c < chiC; ++c) {
       const double g = grad_chi[static_cast<std::size_t>(atom) * chiC + c];
@@ -4637,8 +4984,23 @@ void add_spin_chiral_vjp(
     }
   }
 
-  for (std::size_t e = 0; e < edge_count; ++e) {
+  std::vector<double> grad_Q_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * grad_Q.size() : 0, 0.0);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
+    const std::size_t e = static_cast<std::size_t>(edge_index);
     const SpinEdge& edge = cache.edges[e];
+#if defined(_OPENMP)
+    const int tid = omp_get_thread_num();
+#else
+    const int tid = 0;
+#endif
+    double* local_grad_Q = use_parallel_edges
+      ? grad_Q_private.data() + static_cast<std::size_t>(tid) * grad_Q.size()
+      : grad_Q.data();
     for (int c = 0; c < C; ++c) {
       const double* gp = cblockC(grad_polar, edge.i, c, 3);
       egw(e, c) += gp[0] * edge.rhat[0] + gp[1] * edge.rhat[1] + gp[2] * edge.rhat[2];
@@ -4665,10 +5027,10 @@ void add_spin_chiral_vjp(
       egw(e, c) += dot;
       std::array<double, 3> g_axis = {0.0, 0.0, 0.0};
       std::array<double, 3> gu2 = {0.0, 0.0, 0.0};
-      add_stf_outer_vjp(gpseudo, pseudo_axis, edge.rhat, g_axis, gu2);
+      add_stf_outer_gradient(gpseudo, pseudo_axis, edge.rhat, g_axis, gu2);
       const std::array<double, 3> g_u_cross = cross3(Qu, g_axis);
       const std::array<double, 3> g_Qu = cross3(g_axis, edge.rhat);
-      double* gQ = blockC(grad_Q, edge.i, c, 9);
+      double* gQ = local_grad_Q + (static_cast<std::size_t>(edge.i) * C + c) * 9;
       for (int a = 0; a < 3; ++a) {
         eg3(grad_rhat, e, a) += gu2[a] + g_u_cross[a];
         for (int b = 0; b < 3; ++b) {
@@ -4678,68 +5040,108 @@ void add_spin_chiral_vjp(
       }
     }
   }
+  reduce_private(grad_Q, grad_Q_private);
 
-  for (std::size_t e = 0; e < edge_count; ++e) {
-    const SpinEdge& edge = cache.edges[e];
-    const auto rr = stf_outer3(edge.rhat, edge.rhat);
+  std::vector<double> grad_Q_terms(static_cast<std::size_t>(N) * C * kSpinDeg2Count, 0.0);
+  std::vector<double> grad_O_terms(static_cast<std::size_t>(N) * chiC * kSpinDeg3Count, 0.0);
+  std::vector<double> grad_O_derivatives(
+    static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg2Count, 0.0);
+  std::vector<double> grad_H_terms(static_cast<std::size_t>(N) * chiC * kSpinDeg4Count, 0.0);
+  std::vector<double> grad_H_derivatives(
+    static_cast<std::size_t>(N) * chiC * 3 * kSpinDeg3Count, 0.0);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (int atom = 0; atom < N; ++atom) {
     for (int c = 0; c < C; ++c) {
-      const double* gQ = cblockC(grad_Q, edge.i, c, 9);
-      double ge9[9];
-      double dot = 0.0;
-      for (int k = 0; k < 9; ++k) {
-        dot += gQ[k] * rr[k];
-        ge9[k] = edge.weights[c] * gQ[k];
-      }
+      project_rank2_spin_gradient(
+        cblockC(grad_Q, atom, c, 9),
+        blockC(grad_Q_terms, atom, c, kSpinDeg2Count));
+    }
+    for (int c = 0; c < chiC; ++c) {
+      project_rank3_spin_gradient(
+        cblockChi(grad_O, atom, c, 27),
+        blockChi(grad_O_terms, atom, c, kSpinDeg3Count),
+        blockChi(grad_O_derivatives, atom, c, 3 * kSpinDeg2Count));
+      project_rank4_spin_gradient(
+        cblockChi(grad_H, atom, c, 81),
+        blockChi(grad_H_terms, atom, c, kSpinDeg4Count),
+        blockChi(grad_H_derivatives, atom, c, 3 * kSpinDeg3Count));
+    }
+  }
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
+    const std::size_t e = static_cast<std::size_t>(edge_index);
+    const SpinEdge& edge = cache.edges[e];
+    double m2[kSpinDeg2Count];
+    double m3[kSpinDeg3Count];
+    double m4[kSpinDeg4Count];
+    fill_spin_monomials(edge.rhat, m2, m3, m4);
+    for (int c = 0; c < C; ++c) {
+      const double* q_terms = cblockC(grad_Q_terms, edge.i, c, kSpinDeg2Count);
+      const double dot = dot_spin_terms(q_terms, m2, kSpinDeg2Count);
+      const double w = edge.weights[c];
       egw(e, c) += dot;
-      std::array<double, 3> gu = {0.0, 0.0, 0.0};
-      add_stf_outer_vjp(ge9, edge.rhat, edge.rhat, gu, gu);
+      std::array<double, 3> gu = {
+        w * (2.0 * q_terms[0] * edge.rhat[0] + q_terms[3] * edge.rhat[1] + q_terms[4] * edge.rhat[2]),
+        w * (2.0 * q_terms[1] * edge.rhat[1] + q_terms[3] * edge.rhat[0] + q_terms[5] * edge.rhat[2]),
+        w * (2.0 * q_terms[2] * edge.rhat[2] + q_terms[4] * edge.rhat[0] + q_terms[5] * edge.rhat[1])};
       add_edge_vec(grad_rhat, e, gu);
     }
     for (int c = 0; c < chiC; ++c) {
-      double o_edge[27];
-      double h_edge[81];
-      rank3_stf_edge(edge.rhat, o_edge);
-      rank4_stf_edge(edge.rhat, h_edge);
-      const double* gO = cblockChi(grad_O, edge.i, c, 27);
-      const double* gH = cblockChi(grad_H, edge.i, c, 81);
-      double go[27];
-      double gh[81];
-      double dot_o = 0.0;
-      double dot_h = 0.0;
-      for (int k = 0; k < 27; ++k) {
-        dot_o += gO[k] * o_edge[k];
-        go[k] = edge.weights[c] * gO[k];
-      }
-      for (int k = 0; k < 81; ++k) {
-        dot_h += gH[k] * h_edge[k];
-        gh[k] = edge.weights[c] * gH[k];
+      const double* o_terms = cblockChi(grad_O_terms, edge.i, c, kSpinDeg3Count);
+      const double* o_derivatives =
+        cblockChi(grad_O_derivatives, edge.i, c, 3 * kSpinDeg2Count);
+      const double* h_terms = cblockChi(grad_H_terms, edge.i, c, kSpinDeg4Count);
+      const double* h_derivatives =
+        cblockChi(grad_H_derivatives, edge.i, c, 3 * kSpinDeg3Count);
+      std::array<double, 3> gu = {0.0, 0.0, 0.0};
+      const double dot_o = dot_spin_terms(o_terms, m3, kSpinDeg3Count);
+      const double dot_h = dot_spin_terms(h_terms, m4, kSpinDeg4Count);
+      for (int d = 0; d < 3; ++d) {
+        gu[d] += edge.weights[c] * (
+          dot_spin_terms(o_derivatives + d * kSpinDeg2Count, m2, kSpinDeg2Count) +
+          dot_spin_terms(h_derivatives + d * kSpinDeg3Count, m3, kSpinDeg3Count));
       }
       egw(e, c) += dot_o + dot_h;
-      std::array<double, 3> gu = {0.0, 0.0, 0.0};
-      add_rank3_stf_vjp(go, edge.rhat, gu);
-      add_rank4_stf_vjp(gh, edge.rhat, gu);
       add_edge_vec(grad_rhat, e, gu);
     }
   }
 
-  for (std::size_t e = 0; e < edge_count; ++e) {
+  std::vector<double> force_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+  std::vector<double> grad_spin_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 3 * N : 0, 0.0);
+  std::vector<double> virial_private(
+    use_parallel_edges ? static_cast<std::size_t>(num_threads) * 9 : 0, 0.0);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (use_parallel_edges)
+#endif
+  for (std::ptrdiff_t edge_index = 0; edge_index < static_cast<std::ptrdiff_t>(edge_count); ++edge_index) {
+    const std::size_t e = static_cast<std::size_t>(edge_index);
     const SpinEdge& edge = cache.edges[e];
-    double fc = 0.0;
-    double fcp = 0.0;
-    double fn[MAX_NUM_N];
-    double fnp[MAX_NUM_N];
-    const double rcinv = 1.0 / paramb.spin_cutoff_radial;
-    find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, edge.dist, fc, fcp);
-    find_fn_and_fnp(paramb.spin_basis_size, rcinv, edge.dist, fc, fcp, fn, fnp);
+#if defined(_OPENMP)
+    const int tid = omp_get_thread_num();
+#else
+    const int tid = 0;
+#endif
+    double* local_force = use_parallel_edges
+      ? force_private.data() + static_cast<std::size_t>(tid) * 3 * N
+      : force;
+    double* local_grad_spin = use_parallel_edges
+      ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
+      : grad_spin.data();
+    double* local_virial = use_parallel_edges
+      ? virial_private.data() + static_cast<std::size_t>(tid) * 9
+      : nullptr;
     double grad_dist = 0.0;
     for (int c = 0; c < C; ++c) {
-      double dwdx = 0.0;
-      for (int k = 0; k < B; ++k) {
-        const std::size_t idx =
-          ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
-        dwdx += fnp[k] * annmb.c_spin[idx];
-      }
-      grad_dist += grad_weight[e * C + c] * dwdx;
+      grad_dist += grad_weight[e * C + c] * edge.weight_derivatives[c];
     }
     std::array<double, 3> gu = {
       grad_rhat[e * 3 + 0], grad_rhat[e * 3 + 1], grad_rhat[e * 3 + 2]};
@@ -4747,21 +5149,44 @@ void add_spin_chiral_vjp(
     std::array<double, 3> grad_rij = {0.0, 0.0, 0.0};
     for (int d = 0; d < 3; ++d) {
       grad_rij[d] = grad_dist * edge.rhat[d] + (gu[d] - dot_r * edge.rhat[d]) / edge.dist;
-      force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
-      force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
-      grad_spin[static_cast<std::size_t>(d) * N + edge.i] += grad_si[e * 3 + d];
-      grad_spin[static_cast<std::size_t>(d) * N + edge.j] += grad_sj[e * 3 + d];
+      local_force[static_cast<std::size_t>(d) * N + edge.i] += grad_rij[d];
+      local_force[static_cast<std::size_t>(d) * N + edge.j] -= grad_rij[d];
+      local_grad_spin[static_cast<std::size_t>(d) * N + edge.i] += grad_si[e * 3 + d];
+      local_grad_spin[static_cast<std::size_t>(d) * N + edge.j] += grad_sj[e * 3 + d];
     }
     for (int a = 0; a < 3; ++a) {
       const double rij_a = edge.rhat[a] * edge.dist;
       for (int b = 0; b < 3; ++b) {
-        virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+        if (use_parallel_edges) {
+          local_virial[a * 3 + b] -= rij_a * grad_rij[b];
+        } else {
+          virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+        }
+      }
+    }
+  }
+
+  if (use_parallel_edges) {
+    for (int tid = 0; tid < num_threads; ++tid) {
+      const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
+      const double* local_grad_spin =
+        grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N;
+      const double* local_virial = virial_private.data() + static_cast<std::size_t>(tid) * 9;
+      for (int atom = 0; atom < N; ++atom) {
+        for (int d = 0; d < 3; ++d) {
+          const std::size_t idx = static_cast<std::size_t>(d) * N + atom;
+          force[idx] += local_force[idx];
+          grad_spin[idx] += local_grad_spin[idx];
+        }
+      }
+      for (int d = 0; d < 9; ++d) {
+        virial[static_cast<std::size_t>(d) * N] += local_virial[d];
       }
     }
   }
 }
 
-void add_spin_vjp(
+void add_spin_gradient(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
   const int N,
@@ -4774,7 +5199,6 @@ void add_spin_vjp(
   double* mforce)
 {
   const int C = paramb.spin_compress;
-  const int B = paramb.spin_basis_size + 1;
   const int l_max = paramb.spin_l_max;
   const int offset0 = paramb.struct_dim;
   std::vector<double> grad_spin(static_cast<std::size_t>(N) * 3, 0.0);
@@ -4805,13 +5229,20 @@ void add_spin_vjp(
     grad_spin[static_cast<std::size_t>(2) * N + atom] += scale * sz;
   }
 
-  int geom_offset = 2 + 4 * C + C;
+  const int rho0_offset = 2 + 4 * C;
+  const int l1_rdot_offset = rho0_offset + C;
+  const int l1_cross_offset = l1_rdot_offset + C;
+  const int l1_stf_offset = l1_cross_offset + C;
+  int angular_offset = rho0_offset + C;
   if (l_max >= 1) {
-    geom_offset += 3 * C;
+    angular_offset += 3 * C;
   }
+  int geom_offset = angular_offset;
   for (int ell = 2; ell <= l_max; ++ell) {
     geom_offset += C;
   }
+  const int rho0_dot_offset = geom_offset + C;
+  const int raw1_dot_offset = rho0_dot_offset + C;
   for (int atom = 0; atom < N; ++atom) {
     if (!active(paramb.spin_dof_type_active, type[atom])) {
       continue;
@@ -4826,6 +5257,74 @@ void add_spin_vjp(
           gs += (g[3 * a + b] + g[3 * b + a]) * s[b];
         }
         grad_spin[static_cast<std::size_t>(a) * N + atom] += alpha * gs;
+      }
+    }
+  }
+
+  std::vector<double> rho0_pull(static_cast<std::size_t>(N) * C * 3, 0.0);
+  std::vector<double> rho0_dot_pull(static_cast<std::size_t>(N) * C * 3, 0.0);
+  std::vector<double> l1_pull(l_max >= 1 ? static_cast<std::size_t>(N) * C * 9 : 0, 0.0);
+  std::vector<double> l1_dot_pull(l_max >= 1 ? static_cast<std::size_t>(N) * C * 9 : 0, 0.0);
+  std::vector<double> geom_pull(static_cast<std::size_t>(N) * C * 9, 0.0);
+
+  auto mutable_block = [&](std::vector<double>& v, const int atom, const int c, const int width) {
+    return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
+  };
+
+  for (int atom = 0; atom < N; ++atom) {
+    for (int c = 0; c < C; ++c) {
+      const double alpha0 = fp(atom, rho0_offset + c);
+      const double alpha0_dot = fp(atom, rho0_dot_offset + c);
+      const double* rho = block(cache.rho0, atom, c, 3);
+      const double* rho_dot = block(cache.rho0_dot, atom, c, 3);
+      double* rho_out = mutable_block(rho0_pull, atom, c, 3);
+      double* rho_dot_out = mutable_block(rho0_dot_pull, atom, c, 3);
+      for (int d = 0; d < 3; ++d) {
+        rho_out[d] = 2.0 * alpha0 * rho[d] + alpha0_dot * rho_dot[d];
+        rho_dot_out[d] = alpha0_dot * rho[d];
+      }
+
+      const double alpha_geom = fp(atom, geom_offset + c);
+      const std::array<double, 3> s = {spin(atom, 0), spin(atom, 1), spin(atom, 2)};
+      const auto ss = stf_outer3(s, s);
+      double* geom_out = mutable_block(geom_pull, atom, c, 9);
+      for (int k = 0; k < 9; ++k) {
+        geom_out[k] = alpha_geom * ss[k];
+      }
+    }
+  }
+
+  if (l_max >= 1) {
+    for (int atom = 0; atom < N; ++atom) {
+      for (int c = 0; c < C; ++c) {
+        double* mat = mutable_block(l1_pull, atom, c, 9);
+        double* mat_dot = mutable_block(l1_dot_pull, atom, c, 9);
+        const double alpha_rdot = fp(atom, l1_rdot_offset + c);
+        const double alpha_cross = fp(atom, l1_cross_offset + c);
+        const double alpha_stf = fp(atom, l1_stf_offset + c);
+        const double alpha_raw1 = fp(atom, raw1_dot_offset + c);
+        const double rdot = *block(cache.l1_rdot, atom, c, 1);
+        const double* cross = block(cache.l1_cross, atom, c, 3);
+        const double* stf = block(cache.l1_stf, atom, c, 9);
+        const double* raw = block(cache.raw1, atom, c, 9);
+        const double* raw_dot = block(cache.raw1_dot, atom, c, 9);
+        const double g_cross[3] = {
+          2.0 * alpha_cross * cross[0],
+          2.0 * alpha_cross * cross[1],
+          2.0 * alpha_cross * cross[2]};
+        mat[0] += 2.0 * alpha_rdot * rdot;
+        mat[4] += 2.0 * alpha_rdot * rdot;
+        mat[8] += 2.0 * alpha_rdot * rdot;
+        mat[1] += g_cross[2];
+        mat[2] -= g_cross[1];
+        mat[3] -= g_cross[2];
+        mat[5] += g_cross[0];
+        mat[6] += g_cross[1];
+        mat[7] -= g_cross[0];
+        for (int k = 0; k < 9; ++k) {
+          mat[k] += 2.0 * alpha_stf * stf[k] + alpha_raw1 * raw_dot[k];
+          mat_dot[k] = alpha_raw1 * raw[k];
+        }
       }
     }
   }
@@ -4902,7 +5401,7 @@ void add_spin_vjp(
     }
     offset += C;
 
-    auto density_vjp = [&](const int width, const std::vector<double>& density,
+    auto add_density_gradient = [&](const int width, const std::vector<double>& density,
                            const double* value,
                            const double mod_value,
                            const bool has_mod,
@@ -4926,34 +5425,6 @@ void add_spin_vjp(
       }
     };
 
-    auto apply_sj = [&](const double* ge) {
-      for (int d = 0; d < 3; ++d) {
-        grad_sj[d] += ge[d];
-      }
-    };
-    auto apply_raw1 = [&](const double* ge) {
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          const double g = ge[3 * a + b];
-          grad_rhat[a] += g * edge.sj[b];
-          grad_sj[b] += g * edge.rhat[a];
-        }
-      }
-    };
-    auto apply_rdot = [&](const double* ge) {
-      for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += ge[0] * edge.sj[d];
-        grad_sj[d] += ge[0] * edge.rhat[d];
-      }
-    };
-    auto apply_cross = [&](const double* ge) {
-      grad_rhat[0] += edge.sj[1] * ge[2] - edge.sj[2] * ge[1];
-      grad_rhat[1] += edge.sj[2] * ge[0] - edge.sj[0] * ge[2];
-      grad_rhat[2] += edge.sj[0] * ge[1] - edge.sj[1] * ge[0];
-      grad_sj[0] += ge[1] * edge.rhat[2] - ge[2] * edge.rhat[1];
-      grad_sj[1] += ge[2] * edge.rhat[0] - ge[0] * edge.rhat[2];
-      grad_sj[2] += ge[0] * edge.rhat[1] - ge[1] * edge.rhat[0];
-    };
     auto apply_angular = [&](const int ell, const double* ge) {
       double ylm[9];
       const int ylm_width = real_spherical_harmonics_spin(edge.rhat, ell, ylm);
@@ -4965,37 +5436,69 @@ void add_spin_vjp(
           grad_ylm[m] += g * edge.sj[d];
         }
       }
-      add_real_spherical_harmonics_vjp(edge.rhat, ell, grad_ylm, grad_rhat);
+      add_real_spherical_harmonics_gradient(edge.rhat, ell, grad_ylm, grad_rhat);
     };
 
-    const double sj_value[3] = {edge.sj[0], edge.sj[1], edge.sj[2]};
-    double ge3[3] = {0.0, 0.0, 0.0};
-    density_vjp(3, cache.rho0, sj_value, 1.0, false, offset, nullptr, ge3, grad_dot);
-    apply_sj(ge3);
+    for (int c = 0; c < C; ++c) {
+      const double* b = block(rho0_pull, edge.i, c, 3);
+      const double* b_dot = block(rho0_dot_pull, edge.i, c, 3);
+      const double u0 = b[0] + edge.dot * b_dot[0];
+      const double u1 = b[1] + edge.dot * b_dot[1];
+      const double u2 = b[2] + edge.dot * b_dot[2];
+      const double w = edge.weights[c];
+      grad_weight[c] += edge.sj[0] * u0 + edge.sj[1] * u1 + edge.sj[2] * u2;
+      grad_sj[0] += w * u0;
+      grad_sj[1] += w * u1;
+      grad_sj[2] += w * u2;
+      grad_dot += w * (edge.sj[0] * b_dot[0] + edge.sj[1] * b_dot[1] + edge.sj[2] * b_dot[2]);
+    }
     offset += C;
+
+    for (int c = 0; c < C; ++c) {
+      const double* K = block(geom_pull, edge.i, c, 9);
+      const double kr0 = K[0] * edge.rhat[0] + K[1] * edge.rhat[1] + K[2] * edge.rhat[2];
+      const double kr1 = K[3] * edge.rhat[0] + K[4] * edge.rhat[1] + K[5] * edge.rhat[2];
+      const double kr2 = K[6] * edge.rhat[0] + K[7] * edge.rhat[1] + K[8] * edge.rhat[2];
+      double u0 = 0.0;
+      double u1 = 0.0;
+      double u2 = 0.0;
+      double mt0 = 0.0;
+      double mt1 = 0.0;
+      double mt2 = 0.0;
+      double dot_v2 = 0.0;
+      if (l_max >= 1) {
+        const double* M = block(l1_pull, edge.i, c, 9);
+        const double* Md = block(l1_dot_pull, edge.i, c, 9);
+        const double v10 = M[0] * edge.sj[0] + M[1] * edge.sj[1] + M[2] * edge.sj[2];
+        const double v11 = M[3] * edge.sj[0] + M[4] * edge.sj[1] + M[5] * edge.sj[2];
+        const double v12 = M[6] * edge.sj[0] + M[7] * edge.sj[1] + M[8] * edge.sj[2];
+        const double v20 = Md[0] * edge.sj[0] + Md[1] * edge.sj[1] + Md[2] * edge.sj[2];
+        const double v21 = Md[3] * edge.sj[0] + Md[4] * edge.sj[1] + Md[5] * edge.sj[2];
+        const double v22 = Md[6] * edge.sj[0] + Md[7] * edge.sj[1] + Md[8] * edge.sj[2];
+        u0 = v10 + edge.dot * v20;
+        u1 = v11 + edge.dot * v21;
+        u2 = v12 + edge.dot * v22;
+        mt0 = M[0] * edge.rhat[0] + M[3] * edge.rhat[1] + M[6] * edge.rhat[2] +
+              edge.dot * (Md[0] * edge.rhat[0] + Md[3] * edge.rhat[1] + Md[6] * edge.rhat[2]);
+        mt1 = M[1] * edge.rhat[0] + M[4] * edge.rhat[1] + M[7] * edge.rhat[2] +
+              edge.dot * (Md[1] * edge.rhat[0] + Md[4] * edge.rhat[1] + Md[7] * edge.rhat[2]);
+        mt2 = M[2] * edge.rhat[0] + M[5] * edge.rhat[1] + M[8] * edge.rhat[2] +
+              edge.dot * (Md[2] * edge.rhat[0] + Md[5] * edge.rhat[1] + Md[8] * edge.rhat[2]);
+        dot_v2 = edge.rhat[0] * v20 + edge.rhat[1] * v21 + edge.rhat[2] * v22;
+      }
+      const double w = edge.weights[c];
+      grad_weight[c] += edge.rhat[0] * (u0 + kr0) + edge.rhat[1] * (u1 + kr1) +
+                        edge.rhat[2] * (u2 + kr2);
+      grad_rhat[0] += w * (u0 + 2.0 * kr0);
+      grad_rhat[1] += w * (u1 + 2.0 * kr1);
+      grad_rhat[2] += w * (u2 + 2.0 * kr2);
+      grad_sj[0] += w * mt0;
+      grad_sj[1] += w * mt1;
+      grad_sj[2] += w * mt2;
+      grad_dot += w * dot_v2;
+    }
     if (l_max >= 1) {
-      double ge1[1] = {0.0};
-      const double rdot = edge.ri_dot_sj;
-      density_vjp(1, cache.l1_rdot, &rdot, 1.0, false, offset, nullptr, ge1, grad_dot);
-      apply_rdot(ge1);
-      offset += C;
-
-      ge3[0] = ge3[1] = ge3[2] = 0.0;
-      const double cross_value[3] = {
-        edge.rhat[1] * edge.sj[2] - edge.rhat[2] * edge.sj[1],
-        edge.rhat[2] * edge.sj[0] - edge.rhat[0] * edge.sj[2],
-        edge.rhat[0] * edge.sj[1] - edge.rhat[1] * edge.sj[0]};
-      density_vjp(
-        3, cache.l1_cross,
-        cross_value, 1.0, false, offset, nullptr, ge3, grad_dot);
-      apply_cross(ge3);
-      offset += C;
-
-      double ge9[9] = {0.0};
-      const auto stf = stf_outer3(edge.rhat, edge.sj);
-      density_vjp(9, cache.l1_stf, stf.data(), 1.0, false, offset, nullptr, ge9, grad_dot);
-      add_stf_outer_vjp(ge9, edge.rhat, edge.sj, grad_rhat, grad_sj);
-      offset += C;
+      offset += 3 * C;
     }
     for (int ell = 2; ell <= l_max; ++ell) {
       const std::vector<double>& angular = ell == 2 ? cache.angular2 : ell == 3 ? cache.angular3 : cache.angular4;
@@ -5010,52 +5513,14 @@ void add_spin_vjp(
         value[width++] = y * edge.sj[2];
       }
       double ge[27] = {0.0};
-      density_vjp(width, angular, value, 1.0, false, offset, nullptr, ge, grad_dot);
+      add_density_gradient(width, angular, value, 1.0, false, offset, nullptr, ge, grad_dot);
       apply_angular(ell, ge);
       offset += C;
     }
 
-    const auto rr = stf_outer3(edge.rhat, edge.rhat);
-    double ge9[9] = {0.0};
-    for (int c = 0; c < C; ++c) {
-      const double alpha = fp(edge.i, offset + c);
-      const double* g = block(cache.geom, edge.i, c, 9);
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          const double gd = alpha * edge.si[a] * edge.si[b];
-          grad_weight[c] += gd * rr[3 * a + b];
-          ge9[3 * a + b] += gd * edge.weights[c];
-        }
-      }
-    }
-    add_stf_outer_vjp(ge9, edge.rhat, edge.rhat, grad_rhat, grad_rhat);
     offset += C;
-
-    ge3[0] = ge3[1] = ge3[2] = 0.0;
-    density_vjp(3, cache.rho0, sj_value, 1.0, false, offset, &cache.rho0_dot, ge3, grad_dot);
-    apply_sj(ge3);
-    ge3[0] = ge3[1] = ge3[2] = 0.0;
-    density_vjp(3, cache.rho0_dot, sj_value, edge.dot, true, offset, &cache.rho0, ge3, grad_dot);
-    apply_sj(ge3);
     offset += C;
-
     if (l_max >= 1) {
-      double raw1_value[9];
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          raw1_value[3 * a + b] = edge.rhat[a] * edge.sj[b];
-        }
-      }
-      for (double& v : ge9) {
-        v = 0.0;
-      }
-      density_vjp(9, cache.raw1, raw1_value, 1.0, false, offset, &cache.raw1_dot, ge9, grad_dot);
-      apply_raw1(ge9);
-      for (double& v : ge9) {
-        v = 0.0;
-      }
-      density_vjp(9, cache.raw1_dot, raw1_value, edge.dot, true, offset, &cache.raw1, ge9, grad_dot);
-      apply_raw1(ge9);
       offset += C;
     }
 
@@ -5064,22 +5529,9 @@ void add_spin_vjp(
       grad_sj[d] += grad_dot * edge.si[d];
     }
 
-    double fc = 0.0;
-    double fcp = 0.0;
-    double fn[MAX_NUM_N];
-    double fnp[MAX_NUM_N];
-    const double rcinv = 1.0 / paramb.spin_cutoff_radial;
-    find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, edge.dist, fc, fcp);
-    find_fn_and_fnp(paramb.spin_basis_size, rcinv, edge.dist, fc, fcp, fn, fnp);
     double grad_dist = 0.0;
     for (int c = 0; c < C; ++c) {
-      double dwdx = 0.0;
-      for (int k = 0; k < B; ++k) {
-        const std::size_t idx =
-          ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
-        dwdx += fnp[k] * annmb.c_spin[idx];
-      }
-      grad_dist += grad_weight[c] * dwdx;
+      grad_dist += grad_weight[c] * edge.weight_derivatives[c];
     }
 
     std::array<double, 3> grad_rij;
@@ -5125,7 +5577,7 @@ void add_spin_vjp(
     }
   }
 
-  add_spin_chiral_vjp(
+  add_spin_chiral_gradient(
     paramb, annmb, N, type, cache, Fp, grad_spin, force, virial);
 
   for (int atom = 0; atom < N; ++atom) {
@@ -6067,7 +6519,7 @@ void NEP::compute(
       r12.data() + size_x12 * 3, r12.data() + size_x12 * 4, r12.data() + size_x12 * 5,
       force.data(), force.data() + N, force.data() + N * 2, virial.data(), potential.data());
   }
-  add_spin_vjp(
+  add_spin_gradient(
     paramb, annmb, static_cast<int>(N), type.data(), spins.data(), spin_cache, Fp.data(),
     force.data(), virial.data(), mforce.data());
 }
