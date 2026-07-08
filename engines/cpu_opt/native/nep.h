@@ -14,6 +14,7 @@
 */
 
 #pragma once
+#include <array>
 #include <string>
 #include <vector>
 #include "ewald_nep.h"
@@ -115,6 +116,44 @@ public:
     std::vector<double> grad_O_derivatives;
     std::vector<double> grad_H_terms;
     std::vector<double> grad_H_derivatives;
+  };
+
+  struct SpinEdge {
+    int i;
+    int j;
+    int t12;
+    double dist;
+    std::array<double, 3> rhat;
+    std::array<double, 3> si;
+    std::array<double, 3> sj;
+    std::array<double, 4> weights;
+    std::array<double, 4> weight_derivatives;
+    double dot;
+    double sj2;
+    double ri_dot_si;
+    double ri_dot_sj;
+    double bond_axis;
+  };
+
+  struct SpinCache {
+    std::vector<SpinEdge> edges;
+    std::vector<int> edge_offsets;
+    std::vector<double> rho0;
+    std::vector<double> raw1;
+    std::vector<double> l1_rdot;
+    std::vector<double> l1_cross;
+    std::vector<double> l1_stf;
+    std::vector<double> angular2;
+    std::vector<double> angular3;
+    std::vector<double> angular4;
+    std::vector<double> geom;
+    std::vector<double> polars;
+    std::vector<double> octupoles;
+    std::vector<double> hexadecapoles;
+    std::vector<double> chirals;
+    std::vector<double> pseudodevs;
+    std::vector<double> rho0_dot;
+    std::vector<double> raw1_dot;
   };
 
   struct ZBL {
@@ -331,6 +370,7 @@ public:
   std::vector<int> lammps_spin_types;
   std::vector<double> lammps_spin_spins_soa;
   std::vector<double> lammps_spin_descriptor;
+  SpinCache lammps_spin_cache;
   SpinGradientScratch lammps_spin_gradient_scratch;
   std::vector<int> lammps_touched_rows;
   std::vector<int> lammps_touched_marks;

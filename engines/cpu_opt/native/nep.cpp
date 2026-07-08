@@ -4457,43 +4457,8 @@ void add_lammps_spin_total_virial(
 
 constexpr int MAX_SPIN_COMPRESS = 4;
 
-struct SpinEdge {
-  int i;
-  int j;
-  int t12;
-  double dist;
-  std::array<double, 3> rhat;
-  std::array<double, 3> si;
-  std::array<double, 3> sj;
-  std::array<double, MAX_SPIN_COMPRESS> weights;
-  std::array<double, MAX_SPIN_COMPRESS> weight_derivatives;
-  double dot;
-  double sj2;
-  double ri_dot_si;
-  double ri_dot_sj;
-  double bond_axis;
-};
-
-struct SpinCache {
-  std::vector<SpinEdge> edges;
-  std::vector<int> edge_offsets;
-  std::vector<double> rho0;
-  std::vector<double> raw1;
-  std::vector<double> l1_rdot;
-  std::vector<double> l1_cross;
-  std::vector<double> l1_stf;
-  std::vector<double> angular2;
-  std::vector<double> angular3;
-  std::vector<double> angular4;
-  std::vector<double> geom;
-  std::vector<double> polars;
-  std::vector<double> octupoles;
-  std::vector<double> hexadecapoles;
-  std::vector<double> chirals;
-  std::vector<double> pseudodevs;
-  std::vector<double> rho0_dot;
-  std::vector<double> raw1_dot;
-};
+using SpinEdge = NEP::SpinEdge;
+using SpinCache = NEP::SpinCache;
 
 struct SpinPhaseBreakdown {
   double setup = 0.0;
@@ -4506,6 +4471,28 @@ struct SpinPhaseBreakdown {
   double gradient_nonchiral = 0.0;
   double gradient_chiral = 0.0;
 };
+
+void clear_spin_cache(SpinCache& cache)
+{
+  cache.edges.clear();
+  cache.edge_offsets.clear();
+  cache.rho0.clear();
+  cache.raw1.clear();
+  cache.l1_rdot.clear();
+  cache.l1_cross.clear();
+  cache.l1_stf.clear();
+  cache.angular2.clear();
+  cache.angular3.clear();
+  cache.angular4.clear();
+  cache.geom.clear();
+  cache.polars.clear();
+  cache.octupoles.clear();
+  cache.hexadecapoles.clear();
+  cache.chirals.clear();
+  cache.pseudodevs.clear();
+  cache.rho0_dot.clear();
+  cache.raw1_dot.clear();
+}
 
 void fill_spin_descriptor(
   const NEP::ParaMB& paramb,
@@ -4539,7 +4526,7 @@ void fill_spin_descriptor(
   std::vector<double> q(static_cast<std::size_t>(N) * paramb.spin_dim, 0.0);
   SpinCache local_cache;
   SpinCache& cache = cache_out ? *cache_out : local_cache;
-  cache = SpinCache{};
+  clear_spin_cache(cache);
 
   auto qref = [&](const int atom, const int dim) -> double& {
     return q[static_cast<std::size_t>(atom) * paramb.spin_dim + dim];
@@ -8076,10 +8063,9 @@ void NEP::compute_for_lammps(
     &lammps_angular_cache, ann_q_group, ann_hidden, ann_coeff, ann_fp_group,
     lammps_spin_descriptor.data(), true);
 
-  SpinCache spin_cache;
   fill_spin_descriptor(
     paramb, annmb, atom_capacity, NN, nullptr, lammps_spin_types.data(), nullptr, nullptr,
-    nullptr, lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(), &spin_cache,
+    nullptr, lammps_spin_spins_soa.data(), lammps_spin_descriptor.data(), &lammps_spin_cache,
     phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos);
 
   for (int ii = 0; ii < inum; ++ii) {
@@ -8179,7 +8165,7 @@ void NEP::compute_for_lammps(
 
   add_spin_gradient(
     paramb, annmb, atom_capacity, lammps_spin_types.data(), lammps_spin_spins_soa.data(),
-    spin_cache, Fp.data(), nullptr, nullptr, nullptr, phase_timing ? &spin_phase : nullptr,
+    lammps_spin_cache, Fp.data(), nullptr, nullptr, nullptr, phase_timing ? &spin_phase : nullptr,
     force, mforce, total_virial, virial, nlocal, &lammps_scratch, &lammps_spin_gradient_scratch);
 
 #if defined(_OPENMP)
