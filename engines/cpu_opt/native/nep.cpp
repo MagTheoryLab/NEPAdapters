@@ -4657,7 +4657,8 @@ void fill_spin_descriptor(
   const int* centers = nullptr,
   int** lammps_NL = nullptr,
   double** lammps_pos = nullptr,
-  double* center_descriptor_aos = nullptr)
+  double* center_descriptor_aos = nullptr,
+  const LammpsRadialEdgeCacheView* lammps_radial_cache = nullptr)
 {
   auto phase_mark = NepPhaseClock::now();
   auto add_phase = [&](double SpinPhaseBreakdown::*slot) {
@@ -4687,6 +4688,44 @@ void fill_spin_descriptor(
   const int loop_count = use_lammps_edges ? center_count : N;
   auto center_atom = [&](const int idx) {
     return use_lammps_edges ? centers[idx] : idx;
+  };
+  bool radial_cache_covers_spin = true;
+  for (double rc : paramb.rc_radial_pair) {
+    radial_cache_covers_spin = radial_cache_covers_spin &&
+      rc + 1.0e-12 >= paramb.spin_cutoff_radial;
+  }
+  const bool use_lammps_radial_geometry_cache =
+    use_lammps_edges && radial_cache_covers_spin &&
+    lammps_radial_edge_cache_active(lammps_radial_cache) &&
+    lammps_radial_cache->num_centers == loop_count;
+  auto load_edge_geometry = [&](
+    const int center_idx,
+    const int i,
+    const int n,
+    int& j,
+    double& dx,
+    double& dy,
+    double& dz,
+    double& d) {
+    if (use_lammps_radial_geometry_cache) {
+      const int edge_index = lammps_radial_cache->offsets[center_idx] + n;
+      j = lammps_radial_cache->neighbors[edge_index];
+      if (j < 0) {
+        return false;
+      }
+      dx = lammps_radial_cache->x12[edge_index];
+      dy = lammps_radial_cache->y12[edge_index];
+      dz = lammps_radial_cache->z12[edge_index];
+      d = lammps_radial_cache->d12[edge_index];
+      return true;
+    }
+    const int index = n * N + i;
+    j = use_lammps_edges ? lammps_NL[i][n] : NL[index];
+    dx = use_lammps_edges ? lammps_pos[j][0] - lammps_pos[i][0] : x12[index];
+    dy = use_lammps_edges ? lammps_pos[j][1] - lammps_pos[i][1] : y12[index];
+    dz = use_lammps_edges ? lammps_pos[j][2] - lammps_pos[i][2] : z12[index];
+    d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return true;
   };
 
   for (int atom = 0; atom < N; ++atom) {
@@ -4766,11 +4805,14 @@ void fill_spin_descriptor(
         const int i = center_atom(idx);
         int count = 0;
         for (int n = 0; n < NN[i]; ++n) {
-          const int j = lammps_NL[i][n];
-          const double dx = lammps_pos[j][0] - lammps_pos[i][0];
-          const double dy = lammps_pos[j][1] - lammps_pos[i][1];
-          const double dz = lammps_pos[j][2] - lammps_pos[i][2];
-          const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+          int j = 0;
+          double dx = 0.0;
+          double dy = 0.0;
+          double dz = 0.0;
+          double d = 0.0;
+          if (!load_edge_geometry(idx, i, n, j, dx, dy, dz, d)) {
+            continue;
+          }
           if (d > 1.0e-12 && d < paramb.spin_cutoff_radial &&
               active(paramb.spin_dof_type_active, type[i]) &&
               active(paramb.spin_env_type_active, type[j])) {
@@ -4810,12 +4852,14 @@ void fill_spin_descriptor(
     const int tid = 0;
 #endif
     for (int n = 0; n < NN[i]; ++n) {
-      const int index = n * N + i;
-      const int j = use_lammps_edges ? lammps_NL[i][n] : NL[index];
-      const double dx = use_lammps_edges ? lammps_pos[j][0] - lammps_pos[i][0] : x12[index];
-      const double dy = use_lammps_edges ? lammps_pos[j][1] - lammps_pos[i][1] : y12[index];
-      const double dz = use_lammps_edges ? lammps_pos[j][2] - lammps_pos[i][2] : z12[index];
-      const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+      int j = 0;
+      double dx = 0.0;
+      double dy = 0.0;
+      double dz = 0.0;
+      double d = 0.0;
+      if (!load_edge_geometry(idx, i, n, j, dx, dy, dz, d)) {
+        continue;
+      }
       if (d <= 1.0e-12 || d >= paramb.spin_cutoff_radial) {
         continue;
       }
@@ -8331,7 +8375,7 @@ void NEP::compute_for_lammps(
     paramb, annmb, atom_capacity, NN, nullptr, lammps_spin_types.data(), nullptr, nullptr,
     nullptr, lammps_spin_spins_soa.data(), nullptr, &lammps_spin_cache,
     phase_timing ? &spin_phase : nullptr, inum, ilist, NL, pos,
-    lammps_spin_descriptor.data());
+    lammps_spin_descriptor.data(), &lammps_radial_cache);
 
   for (int ii = 0; ii < inum; ++ii) {
     const int atom = ilist[ii];
