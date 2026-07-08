@@ -4382,6 +4382,24 @@ void add_density(
   const double* weights,
   const double weight_scale = 1.0)
 {
+  if (C == 4) {
+    double* out0 = density.data() + static_cast<std::size_t>(atom) * 4 * width;
+    double* out1 = out0 + width;
+    double* out2 = out1 + width;
+    double* out3 = out2 + width;
+    const double w0 = weight_scale * weights[0];
+    const double w1 = weight_scale * weights[1];
+    const double w2 = weight_scale * weights[2];
+    const double w3 = weight_scale * weights[3];
+    for (int k = 0; k < width; ++k) {
+      const double v = values[k];
+      out0[k] += w0 * v;
+      out1[k] += w1 * v;
+      out2[k] += w2 * v;
+      out3[k] += w3 * v;
+    }
+    return;
+  }
   for (int c = 0; c < C; ++c) {
     double* out = density.data() + (static_cast<std::size_t>(atom) * C + c) * width;
     const double weight = weight_scale * weights[c];
