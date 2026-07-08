@@ -4045,6 +4045,33 @@ double dot_spin_terms(const double* a, const double* b, const int count)
   return sum;
 }
 
+void find_spin_basis3_and_derivatives(
+  const double rcinv,
+  const double d12,
+  const double fc12,
+  const double fcp12,
+  double* fn,
+  double* fnp)
+{
+  const double a = d12 * rcinv - 1.0;
+  const double x = 2.0 * a * a - 1.0;
+  const double dx_half = 2.0 * a * rcinv;
+  const double t2 = 2.0 * x * x - 1.0;
+  const double t3 = 2.0 * x * t2 - x;
+  const double base0 = 1.0;
+  const double base1 = 0.5 * (x + 1.0);
+  const double base2 = 0.5 * (t2 + 1.0);
+  const double base3 = 0.5 * (t3 + 1.0);
+  fn[0] = base0 * fc12;
+  fn[1] = base1 * fc12;
+  fn[2] = base2 * fc12;
+  fn[3] = base3 * fc12;
+  fnp[0] = fcp12;
+  fnp[1] = dx_half * fc12 + base1 * fcp12;
+  fnp[2] = (4.0 * x * dx_half) * fc12 + base2 * fcp12;
+  fnp[3] = (3.0 * (4.0 * x * x - 1.0) * dx_half) * fc12 + base3 * fcp12;
+}
+
 double spin_packed_value(const double* packed, const int degree, const int* counts)
 {
   return packed[spin_monomial_index(degree, counts[0], counts[1], counts[2])];
@@ -4776,7 +4803,11 @@ void fill_spin_descriptor(
       const double rcinv = 1.0 / paramb.spin_cutoff_radial;
       if (cache_out) {
         find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, d, fc, fcp);
-        find_fn_and_fnp(paramb.spin_basis_size, rcinv, d, fc, fcp, fn, fnp);
+        if (paramb.spin_basis_size == 3) {
+          find_spin_basis3_and_derivatives(rcinv, d, fc, fcp, fn, fnp);
+        } else {
+          find_fn_and_fnp(paramb.spin_basis_size, rcinv, d, fc, fcp, fn, fnp);
+        }
       } else {
         find_fc(paramb.spin_cutoff_radial, rcinv, d, fc);
         find_fn(paramb.spin_basis_size, rcinv, d, fc, fn);
