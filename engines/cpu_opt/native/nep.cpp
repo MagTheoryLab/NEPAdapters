@@ -1024,6 +1024,8 @@ struct LammpsThreadLocalScratchView {
   double* virial_private = nullptr;
 };
 
+constexpr int kLammpsTotalVirialStride = 8;
+
 struct LammpsAngularEdgeCacheView {
   int num_centers = 0;
   int n_max_angular_plus_1 = 0;
@@ -1201,7 +1203,8 @@ void zero_lammps_thread_local_scratch(
   const std::vector<int>& touched_rows = *scratch.touched_rows;
 
   std::fill(
-    scratch.total_virial_private, scratch.total_virial_private + static_cast<std::size_t>(num_threads) * 6,
+    scratch.total_virial_private,
+    scratch.total_virial_private + static_cast<std::size_t>(num_threads) * kLammpsTotalVirialStride,
     0.0);
 
   const bool parallel_rows = use_parallel_lammps_scratch_reduce(scratch);
@@ -1295,7 +1298,8 @@ void reduce_lammps_thread_local_force_virial(
   for (int d = 0; d < 6; ++d) {
     double sum = 0.0;
     for (int tid = 0; tid < num_threads; ++tid) {
-      sum += scratch.total_virial_private[static_cast<std::size_t>(tid) * 6 + d];
+      sum += scratch.total_virial_private[
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride + d];
     }
     g_total_virial[d] += sum;
   }
@@ -3035,7 +3039,8 @@ void find_force_radial_for_lammps(
       double* local_force =
         scratch->force_private + static_cast<std::size_t>(tid) * 3 * force_rows;
       double* local_total_virial =
-        scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+        scratch->total_virial_private +
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride;
       double* local_virial = scratch->virial_private
         ? scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_rows
         : nullptr;
@@ -3329,7 +3334,8 @@ void find_force_angular_for_lammps(
       double* local_force =
         scratch->force_private + static_cast<std::size_t>(tid) * 3 * force_rows;
       double* local_total_virial =
-        scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+        scratch->total_virial_private +
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride;
       double* local_virial = scratch->virial_private
         ? scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_rows
         : nullptr;
@@ -3635,7 +3641,8 @@ void find_force_ZBL_for_lammps(
       double* local_force =
         scratch->force_private + static_cast<std::size_t>(tid) * 3 * force_rows;
       double* local_total_virial =
-        scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+        scratch->total_virial_private +
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride;
       double* local_virial = scratch->virial_private
         ? scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_rows
         : nullptr;
@@ -5637,7 +5644,8 @@ void add_spin_chiral_gradient(
       local_grad_spin =
         lammps_scratch->mforce_private + static_cast<std::size_t>(tid) * 3 * force_stride;
       local_total_virial =
-        lammps_scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+        lammps_scratch->total_virial_private +
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride;
       local_virial = lammps_scratch->virial_private
         ? lammps_scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_stride
         : nullptr;
@@ -5916,7 +5924,8 @@ void add_spin_gradient(
       local_grad_spin =
         lammps_scratch->mforce_private + static_cast<std::size_t>(tid) * 3 * force_stride;
       local_total_virial =
-        lammps_scratch->total_virial_private + static_cast<std::size_t>(tid) * 6;
+        lammps_scratch->total_virial_private +
+        static_cast<std::size_t>(tid) * kLammpsTotalVirialStride;
       local_virial = lammps_scratch->virial_private
         ? lammps_scratch->virial_private + static_cast<std::size_t>(tid) * 9 * force_stride
         : nullptr;
@@ -7933,7 +7942,8 @@ void NEP::compute_for_lammps(
       infer_lammps_touched_rows(N, ilist, NN, NL, lammps_touched_rows, lammps_touched_marks, lammps_touched_stamp);
     if (force_rows > 0) {
       const std::size_t force_size = static_cast<std::size_t>(num_threads) * 3 * force_rows;
-      const std::size_t total_virial_size = static_cast<std::size_t>(num_threads) * 6;
+      const std::size_t total_virial_size =
+        static_cast<std::size_t>(num_threads) * kLammpsTotalVirialStride;
       const std::size_t virial_size = static_cast<std::size_t>(num_threads) * 9 * force_rows;
       if (lammps_force_private.size() < force_size) {
         lammps_force_private.resize(force_size);
@@ -8204,7 +8214,8 @@ void NEP::compute_for_lammps(
         lammps_touched_stamp);
     if (force_rows > 0) {
       const std::size_t force_size = static_cast<std::size_t>(num_threads) * 3 * force_rows;
-      const std::size_t total_virial_size = static_cast<std::size_t>(num_threads) * 6;
+      const std::size_t total_virial_size =
+        static_cast<std::size_t>(num_threads) * kLammpsTotalVirialStride;
       const std::size_t virial_size = static_cast<std::size_t>(num_threads) * 9 * force_rows;
       if (lammps_force_private.size() < force_size) {
         lammps_force_private.resize(force_size);
