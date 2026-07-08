@@ -5475,14 +5475,16 @@ void add_spin_gradient(
         const double* other = other_density ? block(*other_density, edge.i, c, width) : nullptr;
         const double alpha = fp(edge.i, q_offset + c);
         const double m = has_mod ? mod_value : 1.0;
+        double grad_weight_c = grad_weight[c];
         for (int k = 0; k < width; ++k) {
           const double gd = other ? alpha * other[k] : 2.0 * alpha * self[k];
-          grad_weight[c] += gd * value[k] * m;
+          grad_weight_c += gd * value[k] * m;
           grad_value[k] += gd * edge.weights[c] * m;
           if (has_mod) {
             grad_mod += gd * edge.weights[c] * value[k];
           }
         }
+        grad_weight[c] = grad_weight_c;
       }
     };
 
