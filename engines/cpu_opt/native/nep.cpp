@@ -4432,6 +4432,23 @@ void add_lammps_spin_virial(
   virial[8 * stride + row] += v21;
 }
 
+void add_lammps_spin_total_virial(
+  const std::array<double, 3>& rhat,
+  const double dist,
+  const std::array<double, 3>& grad_rij,
+  double* total_virial)
+{
+  const double rx = rhat[0] * dist;
+  const double ry = rhat[1] * dist;
+  const double rz = rhat[2] * dist;
+  total_virial[0] -= rx * grad_rij[0];
+  total_virial[1] -= ry * grad_rij[1];
+  total_virial[2] -= rz * grad_rij[2];
+  total_virial[3] -= rx * grad_rij[1];
+  total_virial[4] -= rx * grad_rij[2];
+  total_virial[5] -= ry * grad_rij[2];
+}
+
 constexpr int MAX_SPIN_COMPRESS = 4;
 
 struct SpinEdge {
@@ -5452,9 +5469,13 @@ void add_spin_chiral_gradient(
       local_grad_spin[static_cast<std::size_t>(d) * force_stride + edge.j] += grad_sj[e * 3 + d];
     }
     if (use_lammps_scratch) {
-      add_lammps_spin_virial(
-        edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
-        force_stride, edge.j);
+      if (local_virial) {
+        add_lammps_spin_virial(
+          edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
+          force_stride, edge.j);
+      } else {
+        add_lammps_spin_total_virial(edge.rhat, edge.dist, grad_rij, local_total_virial);
+      }
     } else {
       for (int a = 0; a < 3; ++a) {
         const double rij_a = edge.rhat[a] * edge.dist;
@@ -5894,9 +5915,13 @@ void add_spin_gradient(
       local_force[static_cast<std::size_t>(d) * force_stride + edge.j] -= grad_rij[d];
     }
     if (use_lammps_scratch) {
-      add_lammps_spin_virial(
-        edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
-        force_stride, edge.j);
+      if (local_virial) {
+        add_lammps_spin_virial(
+          edge.rhat, edge.dist, grad_rij, local_total_virial, local_virial,
+          force_stride, edge.j);
+      } else {
+        add_lammps_spin_total_virial(edge.rhat, edge.dist, grad_rij, local_total_virial);
+      }
     } else {
       for (int a = 0; a < 3; ++a) {
         const double rij_a = edge.rhat[a] * edge.dist;
