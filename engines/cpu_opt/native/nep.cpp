@@ -4540,6 +4540,16 @@ void add_density_fixed(
 void resize_and_zero(std::vector<double>& values, const std::size_t size)
 {
   values.resize(size);
+#if defined(_OPENMP)
+  if (size >= 262144 && omp_get_max_threads() > 1) {
+    double* data = values.data();
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(size); ++i) {
+      data[static_cast<std::size_t>(i)] = 0.0;
+    }
+    return;
+  }
+#endif
   std::fill(values.begin(), values.end(), 0.0);
 }
 
