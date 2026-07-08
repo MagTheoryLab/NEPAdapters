@@ -1251,6 +1251,29 @@ void zero_lammps_thread_local_scratch(
   }
 }
 
+void zero_lammps_mforce_scratch(const LammpsThreadLocalScratchView& scratch)
+{
+  const int force_rows = scratch.force_rows;
+  const int num_threads = scratch.num_threads;
+  const std::vector<int>& touched_rows = *scratch.touched_rows;
+  const bool parallel_rows = use_parallel_lammps_scratch_reduce(scratch);
+
+#pragma omp parallel for schedule(static) if (parallel_rows)
+  for (int tid = 0; tid < num_threads; ++tid) {
+    double* local_mforce =
+      scratch.mforce_private + static_cast<std::size_t>(tid) * 3 * force_rows;
+    if (scratch.dense_rows) {
+      std::fill(local_mforce, local_mforce + static_cast<std::size_t>(3) * force_rows, 0.0);
+    } else {
+      for (int row : touched_rows) {
+        local_mforce[0 * force_rows + row] = 0.0;
+        local_mforce[1 * force_rows + row] = 0.0;
+        local_mforce[2 * force_rows + row] = 0.0;
+      }
+    }
+  }
+}
+
 void reduce_lammps_thread_local_force_virial(
   const LammpsThreadLocalScratchView& scratch,
   double** g_force,
@@ -8361,11 +8384,6 @@ void NEP::compute_for_lammps(
       paramb, zbl, inum, ilist, NN, NL, type, type_map, pos, force, total_virial, virial,
       total_potential, potential, &lammps_scratch);
   }
-#if defined(_OPENMP)
-  if (lammps_thread_scratch_active(&lammps_scratch)) {
-    reduce_lammps_thread_local_force_virial(lammps_scratch, force, total_virial, virial);
-  }
-#endif
 
 #if defined(_OPENMP)
   if (lammps_thread_scratch_active(&lammps_scratch)) {
@@ -8375,7 +8393,7 @@ void NEP::compute_for_lammps(
       lammps_mforce_private.resize(mforce_size);
     }
     lammps_scratch.mforce_private = lammps_mforce_private.data();
-    zero_lammps_thread_local_scratch(lammps_scratch, virial != nullptr);
+    zero_lammps_mforce_scratch(lammps_scratch);
   }
 #endif
 
