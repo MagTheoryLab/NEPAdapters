@@ -158,7 +158,7 @@ bool nep_phase_timer_enabled()
 int spin_openmp_threads(const int N)
 {
 #if defined(_OPENMP)
-  const int cap = N <= 1024 ? 8 : 16;
+  const int cap = 16;
   return std::max(1, std::min(omp_get_max_threads(), cap));
 #else
   (void)N;
