@@ -4871,12 +4871,16 @@ void fill_spin_descriptor(
   add_phase(&SpinPhaseBreakdown::contract);
 
   if (paramb.spin_chiral) {
+    const bool use_center_edges = !edge_offsets.empty();
     auto block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
       return v.data() + (static_cast<std::size_t>(atom) * C + c) * width;
     };
     auto chi_block = [&](const std::vector<double>& v, const int atom, const int c, const int width) {
       return v.data() + (static_cast<std::size_t>(atom) * chiC + c) * width;
     };
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
     for (int atom = 0; atom < N; ++atom) {
       for (int c = 0; c < chiC; ++c) {
         const double* Q = block(geom, atom, c, 9);
@@ -4904,7 +4908,7 @@ void fill_spin_descriptor(
         chirals[static_cast<std::size_t>(atom) * chiC + c] = value;
       }
     }
-    for (const SpinEdge& edge : cache.edges) {
+    auto add_pseudodev = [&](const SpinEdge& edge) {
       for (int c = 0; c < C; ++c) {
         const double* Q = block(geom, edge.i, c, 9);
         std::array<double, 3> Qu = {0.0, 0.0, 0.0};
@@ -4920,8 +4924,25 @@ void fill_spin_descriptor(
           out[k] += edge.weights[c] * pseudo[k];
         }
       }
+    };
+    if (use_center_edges) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+      for (std::ptrdiff_t center_index = 0;
+           center_index < static_cast<std::ptrdiff_t>(edge_offsets.size() - 1);
+           ++center_index) {
+        const std::size_t idx = static_cast<std::size_t>(center_index);
+        for (int e = edge_offsets[idx]; e < edge_offsets[idx + 1]; ++e) {
+          add_pseudodev(cache.edges[static_cast<std::size_t>(e)]);
+        }
+      }
+    } else {
+      for (const SpinEdge& edge : cache.edges) {
+        add_pseudodev(edge);
+      }
     }
-    for (const SpinEdge& edge : cache.edges) {
+    auto add_chiral_q = [&](const SpinEdge& edge) {
       const std::array<double, 3> spin_cross = cross3(edge.si, edge.sj);
       for (int c = 0; c < chiC; ++c) {
         qref(edge.i, offset + c) += edge.weights[c] * dot3(spin_cross, edge.rhat) *
@@ -4944,6 +4965,23 @@ void fill_spin_descriptor(
           }
         }
         qref(edge.i, chiral_offset + c) += edge.weights[c] * dot3(spin_cross, axis);
+      }
+    };
+    if (use_center_edges) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(num_threads) if (use_parallel_edges)
+#endif
+      for (std::ptrdiff_t center_index = 0;
+           center_index < static_cast<std::ptrdiff_t>(edge_offsets.size() - 1);
+           ++center_index) {
+        const std::size_t idx = static_cast<std::size_t>(center_index);
+        for (int e = edge_offsets[idx]; e < edge_offsets[idx + 1]; ++e) {
+          add_chiral_q(cache.edges[static_cast<std::size_t>(e)]);
+        }
+      }
+    } else {
+      for (const SpinEdge& edge : cache.edges) {
+        add_chiral_q(edge);
       }
     }
   }
