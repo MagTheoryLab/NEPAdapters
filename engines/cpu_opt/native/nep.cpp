@@ -4447,6 +4447,42 @@ void add_density(
   }
 }
 
+template<int Width>
+void add_density_fixed(
+  std::vector<double>& density,
+  const int C,
+  const int atom,
+  const double* values,
+  const double* weights,
+  const double weight_scale = 1.0)
+{
+  if (C == 4) {
+    double* out0 = density.data() + static_cast<std::size_t>(atom) * 4 * Width;
+    double* out1 = out0 + Width;
+    double* out2 = out1 + Width;
+    double* out3 = out2 + Width;
+    const double w0 = weight_scale * weights[0];
+    const double w1 = weight_scale * weights[1];
+    const double w2 = weight_scale * weights[2];
+    const double w3 = weight_scale * weights[3];
+    for (int k = 0; k < Width; ++k) {
+      const double v = values[k];
+      out0[k] += w0 * v;
+      out1[k] += w1 * v;
+      out2[k] += w2 * v;
+      out3[k] += w3 * v;
+    }
+    return;
+  }
+  for (int c = 0; c < C; ++c) {
+    double* out = density.data() + (static_cast<std::size_t>(atom) * C + c) * Width;
+    const double weight = weight_scale * weights[c];
+    for (int k = 0; k < Width; ++k) {
+      out[k] += weight * values[k];
+    }
+  }
+}
+
 void resize_and_zero(std::vector<double>& values, const std::size_t size)
 {
   values.resize(size);
@@ -4788,24 +4824,24 @@ void fill_spin_descriptor(
       }
 
       const double sj_value[3] = {sj[0], sj[1], sj[2]};
-      add_density(rho0, C, edge.i, sj_value, 3, edge.weights.data());
+      add_density_fixed<3>(rho0, C, edge.i, sj_value, edge.weights.data());
       double raw1_value[9];
       for (int a = 0; a < 3; ++a) {
         for (int b = 0; b < 3; ++b) {
           raw1_value[3 * a + b] = edge.rhat[a] * sj[b];
         }
       }
-      add_density(raw1, C, edge.i, raw1_value, 9, edge.weights.data());
+      add_density_fixed<9>(raw1, C, edge.i, raw1_value, edge.weights.data());
       if (l_max >= 1) {
         const double rdot = edge.rhat[0] * sj[0] + edge.rhat[1] * sj[1] + edge.rhat[2] * sj[2];
-        add_density(l1_rdot, C, edge.i, &rdot, 1, edge.weights.data());
+        add_density_fixed<1>(l1_rdot, C, edge.i, &rdot, edge.weights.data());
         const double cross_value[3] = {
           edge.rhat[1] * sj[2] - edge.rhat[2] * sj[1],
           edge.rhat[2] * sj[0] - edge.rhat[0] * sj[2],
           edge.rhat[0] * sj[1] - edge.rhat[1] * sj[0]};
-        add_density(l1_cross, C, edge.i, cross_value, 3, edge.weights.data());
+        add_density_fixed<3>(l1_cross, C, edge.i, cross_value, edge.weights.data());
         const auto stf = stf_outer3(edge.rhat, sj);
-        add_density(l1_stf, C, edge.i, stf.data(), 9, edge.weights.data());
+        add_density_fixed<9>(l1_stf, C, edge.i, stf.data(), edge.weights.data());
       }
       for (int ell = 2; ell <= l_max; ++ell) {
         double ylm[9];
@@ -4818,23 +4854,27 @@ void fill_spin_descriptor(
           value[width++] = y * sj[1];
           value[width++] = y * sj[2];
         }
-        add_density(
-          ell == 2 ? angular2 : ell == 3 ? angular3 : angular4,
-          C, edge.i, value, width, edge.weights.data());
+        if (ell == 2) {
+          add_density_fixed<15>(angular2, C, edge.i, value, edge.weights.data());
+        } else if (ell == 3) {
+          add_density_fixed<21>(angular3, C, edge.i, value, edge.weights.data());
+        } else {
+          add_density_fixed<27>(angular4, C, edge.i, value, edge.weights.data());
+        }
       }
       const auto rr = stf_outer3(edge.rhat, edge.rhat);
-      add_density(geom, C, edge.i, rr.data(), 9, edge.weights.data());
+      add_density_fixed<9>(geom, C, edge.i, rr.data(), edge.weights.data());
       if (paramb.spin_chiral) {
-        add_density(polars, C, edge.i, edge.rhat.data(), 3, edge.weights.data());
+        add_density_fixed<3>(polars, C, edge.i, edge.rhat.data(), edge.weights.data());
         double m2[kSpinDeg2Count];
         double m3[kSpinDeg3Count];
         double m4[kSpinDeg4Count];
         fill_spin_monomials(edge.rhat, m2, m3, m4);
-        add_density(octupoles_raw, chiC, edge.i, m3, kSpinDeg3Count, edge.weights.data());
-        add_density(hexadecapoles_raw, chiC, edge.i, m4, kSpinDeg4Count, edge.weights.data());
+        add_density_fixed<kSpinDeg3Count>(octupoles_raw, chiC, edge.i, m3, edge.weights.data());
+        add_density_fixed<kSpinDeg4Count>(hexadecapoles_raw, chiC, edge.i, m4, edge.weights.data());
       }
-      add_density(rho0_dot, C, edge.i, sj_value, 3, edge.weights.data(), edge.dot);
-      add_density(raw1_dot, C, edge.i, raw1_value, 9, edge.weights.data(), edge.dot);
+      add_density_fixed<3>(rho0_dot, C, edge.i, sj_value, edge.weights.data(), edge.dot);
+      add_density_fixed<9>(raw1_dot, C, edge.i, raw1_value, edge.weights.data(), edge.dot);
       if (keep_edges) {
         if (direct_edge_cache) {
           cache.edges[static_cast<std::size_t>(direct_edge_offset++)] = std::move(edge);
