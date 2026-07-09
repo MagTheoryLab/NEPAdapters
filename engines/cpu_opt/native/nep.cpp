@@ -4806,6 +4806,7 @@ void fill_spin_descriptor(
 #endif
   const bool use_parallel_edges = num_threads > 1 && N > 8;
   const bool keep_edges = cache_out || paramb.spin_chiral;
+  const double spin_rcinv = 1.0 / paramb.spin_cutoff_radial;
   // ponytail: direct edge fill wins on large LMP cases; retune if benchmark mix changes.
   const bool direct_edge_cache =
     keep_edges && use_parallel_edges && use_lammps_edges && loop_count >= 1024;
@@ -4892,17 +4893,16 @@ void fill_spin_descriptor(
       double fcp = 0.0;
       double fn[MAX_NUM_N];
       double fnp[MAX_NUM_N];
-      const double rcinv = 1.0 / paramb.spin_cutoff_radial;
       if (cache_out) {
-        find_fc_and_fcp(paramb.spin_cutoff_radial, rcinv, d, fc, fcp);
+        find_fc_and_fcp(paramb.spin_cutoff_radial, spin_rcinv, d, fc, fcp);
         if (paramb.spin_basis_size == 3) {
-          find_spin_basis3_and_derivatives(rcinv, d, fc, fcp, fn, fnp);
+          find_spin_basis3_and_derivatives(spin_rcinv, d, fc, fcp, fn, fnp);
         } else {
-          find_fn_and_fnp(paramb.spin_basis_size, rcinv, d, fc, fcp, fn, fnp);
+          find_fn_and_fnp(paramb.spin_basis_size, spin_rcinv, d, fc, fcp, fn, fnp);
         }
       } else {
-        find_fc(paramb.spin_cutoff_radial, rcinv, d, fc);
-        find_fn(paramb.spin_basis_size, rcinv, d, fc, fn);
+        find_fc(paramb.spin_cutoff_radial, spin_rcinv, d, fc);
+        find_fn(paramb.spin_basis_size, spin_rcinv, d, fc, fn);
       }
       SpinEdge edge;
       edge.i = i;
@@ -4917,12 +4917,13 @@ void fill_spin_descriptor(
       for (int c = 0; c < C; ++c) {
         double w = 0.0;
         double dw = 0.0;
+        const double* coeff =
+          annmb.c_spin + (static_cast<std::size_t>(c) * B * paramb.num_types_sq + edge.t12);
         for (int k = 0; k < B; ++k) {
-          const std::size_t idx =
-            ((static_cast<std::size_t>(c) * B + k) * paramb.num_types_sq) + edge.t12;
-          w += fn[k] * annmb.c_spin[idx];
+          const double ck = coeff[static_cast<std::size_t>(k) * paramb.num_types_sq];
+          w += fn[k] * ck;
           if (cache_out) {
-            dw += fnp[k] * annmb.c_spin[idx];
+            dw += fnp[k] * ck;
           }
         }
         edge.weights[c] = w;
