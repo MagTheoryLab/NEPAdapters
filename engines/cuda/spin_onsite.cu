@@ -3592,10 +3592,12 @@ __global__ void __launch_bounds__(32, 8)
 accumulate_spin_density_forces_c4_l4_block_f32(
     int atom_count,
     int atom_stride,
+    int struct_dim,
     float spin_cutoff,
     const double* __restrict__ spins_soa3,
     const int* __restrict__ nn_radial,
     const int* __restrict__ nl_radial,
+    const float* __restrict__ fp,
     const float* __restrict__ spin_edge_dx,
     const float* __restrict__ spin_edge_dy,
     const float* __restrict__ spin_edge_dz,
@@ -3663,6 +3665,46 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     float grad_si[3] = {};
     float grad_sj[3] = {};
     float grad_dot = 0.0f;
+
+    const float sj2 = dot3f(sj, sj);
+    const float ri_dot_si = dot3f(rhat, si);
+    const float ri_dot_sj = dot3f(rhat, sj);
+    const float bond_axis = ri_dot_si * ri_dot_sj;
+    float scalar_weighted = 0.0f;
+    for (int c = 0; c < C; ++c) {
+      const float alpha = fp[atom + atom_stride * (struct_dim + 2 + c)];
+      grad_weight[c] += alpha * dot;
+      scalar_weighted += alpha * weights[c];
+    }
+    grad_dot += scalar_weighted;
+    scalar_weighted = 0.0f;
+    for (int c = 0; c < C; ++c) {
+      const float alpha = fp[atom + atom_stride * (struct_dim + 2 + C + c)];
+      grad_weight[c] += alpha * dot * dot;
+      scalar_weighted += alpha * weights[c];
+    }
+    grad_dot += 2.0f * dot * scalar_weighted;
+    scalar_weighted = 0.0f;
+    for (int c = 0; c < C; ++c) {
+      const float alpha = fp[atom + atom_stride * (struct_dim + 2 + 2 * C + c)];
+      grad_weight[c] += alpha * sj2;
+      scalar_weighted += alpha * weights[c];
+    }
+    for (int d = 0; d < 3; ++d) {
+      grad_sj[d] += 2.0f * scalar_weighted * sj[d];
+    }
+    scalar_weighted = 0.0f;
+    for (int c = 0; c < C; ++c) {
+      const float alpha = fp[atom + atom_stride * (struct_dim + 2 + 3 * C + c)];
+      grad_weight[c] += alpha * bond_axis;
+      scalar_weighted += alpha * weights[c];
+    }
+    for (int d = 0; d < 3; ++d) {
+      grad_si[d] += scalar_weighted * ri_dot_sj * rhat[d];
+      grad_sj[d] += scalar_weighted * ri_dot_si * rhat[d];
+      grad_rhat[d] +=
+          scalar_weighted * (ri_dot_sj * si[d] + ri_dot_si * sj[d]);
+    }
 
     for (int c = 0; c < C; ++c) {
       const float b[3] = {
@@ -5232,6 +5274,9 @@ void accumulate_spin_scalar_forces_on_device(
           "workspace missing spin edge dz");
   require(!use_cached_geometry || view.spin_edge_dist != nullptr,
           "workspace missing spin edge dist");
+  if (use_cached_geometry && !accumulate_virial) {
+    return;
+  }
   const int threads = 32;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
@@ -5389,10 +5434,12 @@ void accumulate_spin_density_forces_on_device(
       accumulate_spin_density_forces_c4_l4_block_f32<<<atom_count, threads>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
           static_cast<float>(protocol.spin_cutoff_radial),
           view.spins_soa3,
           view.nn_radial,
           view.nl_radial_slot_major,
+          view.fp,
           view.spin_edge_dx,
           view.spin_edge_dy,
           view.spin_edge_dz,
