@@ -121,6 +121,7 @@ public:
   struct SpinEdge {
     int i;
     int j;
+    int center;
     int t12;
     double dist;
     std::array<double, 3> rhat;
@@ -366,6 +367,7 @@ public:
   std::vector<double> lammps_radial_edge_d12;
   std::vector<double> lammps_radial_edge_gnp;
   std::vector<int> lammps_spin_types;
+  std::vector<double> lammps_spin_spins_aos;
   std::vector<double> lammps_spin_spins_soa;
   std::vector<double> lammps_spin_descriptor;
   SpinCache lammps_spin_cache;

@@ -312,7 +312,8 @@ bool check_chiral_derivatives(
 bool run_lammps_matches_batch_n(
     NepaModel* model,
     const std::vector<double>& positions,
-    const std::vector<double>& spins) {
+    const std::vector<double>& spins,
+    bool permute_ilist = false) {
   const int atom_count = static_cast<int>(spins.size() / 3);
   std::vector<double> batch_virial;
   const BatchPrediction batch =
@@ -329,6 +330,9 @@ bool run_lammps_matches_batch_n(
       }
     }
     firstneigh[static_cast<std::size_t>(i)] = neigh_storage[static_cast<std::size_t>(i)].data();
+  }
+  if (permute_ilist && atom_count == 4) {
+    ilist = {2, 0, 3, 1};
   }
   std::vector<int> types(static_cast<std::size_t>(atom_count), 1);
   int type_map[2] = {-1, 0};
@@ -816,7 +820,8 @@ int main() {
         nepa_load_model("cpu_opt", path.c_str(), &chiral_numeric_model) == NEPA_STATUS_OK &&
         chiral_numeric_model != nullptr &&
         check_chiral_derivatives(chiral_numeric_model, chiral_positions, chiral_spins) &&
-        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins);
+        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins) &&
+        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins, true);
     nepa_free_model(chiral_numeric_model);
   }
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
@@ -825,7 +830,8 @@ int main() {
       nepa_load_model("cpu_opt", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &fixture_numeric_model) ==
           NEPA_STATUS_OK &&
       fixture_numeric_model != nullptr &&
-      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins)
+      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins) &&
+      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins, true)
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE
       && check_spin_fixture_reference(fixture_numeric_model, NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE)
 #endif
