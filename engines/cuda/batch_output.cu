@@ -32,8 +32,10 @@ __global__ void pack_atom_outputs(
     int atom_count,
     int atom_stride,
     const double* force_soa3,
+    const double* mforce_soa3,
     const double* virial_soa9,
     double* output_forces_aos3,
+    double* output_mforces_aos3,
     double* output_virials_per_atom_row_major9) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
@@ -43,6 +45,11 @@ __global__ void pack_atom_outputs(
   output_forces_aos3[3 * atom + 0] = force_soa3[atom];
   output_forces_aos3[3 * atom + 1] = force_soa3[atom_stride + atom];
   output_forces_aos3[3 * atom + 2] = force_soa3[2 * atom_stride + atom];
+  if (output_mforces_aos3 != nullptr && mforce_soa3 != nullptr) {
+    output_mforces_aos3[3 * atom + 0] = mforce_soa3[atom];
+    output_mforces_aos3[3 * atom + 1] = mforce_soa3[atom_stride + atom];
+    output_mforces_aos3[3 * atom + 2] = mforce_soa3[2 * atom_stride + atom];
+  }
 
   for (int component = 0; component < 9; ++component) {
     const int internal = public_virial_to_internal(component);
@@ -131,8 +138,10 @@ void prepare_batched_outputs(
       atom_count,
       static_cast<int>(view.atom_capacity),
       view.force_soa3,
+      view.mforce_soa3,
       view.virial_soa9,
       view.output_forces_aos3,
+      view.output_mforces_aos3,
       view.output_virials_per_atom_row_major9);
   check_cuda(cudaGetLastError(), "pack batched atom outputs");
 

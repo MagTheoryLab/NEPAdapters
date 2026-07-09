@@ -176,6 +176,23 @@ if(TARGET NEPAdapters::cuda AND
   set_tests_properties(nep_adapters_cuda_lammps_host_sim_test PROPERTIES
     LABELS "contract;engine;cuda;lammps")
 
+  add_executable(nep_adapters_cuda_spin_protocol_test test_cuda_spin_protocol.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_spin_protocol_test
+    PRIVATE
+      NEPAdapters::cuda
+  )
+  target_compile_definitions(
+    nep_adapters_cuda_spin_protocol_test
+    PRIVATE
+      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+  )
+  add_test(
+    NAME nep_adapters_cuda_spin_protocol_test
+    COMMAND nep_adapters_cuda_spin_protocol_test)
+  set_tests_properties(nep_adapters_cuda_spin_protocol_test PROPERTIES
+    LABELS "contract;engine;cuda;spin")
+
   if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME AND
      EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt" AND
      EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in" AND
@@ -220,6 +237,83 @@ if(TARGET NEPAdapters::cuda AND
       COMMAND nep_adapters_cuda_lammps_kk_sim_test)
     set_tests_properties(nep_adapters_cuda_lammps_kk_sim_test PROPERTIES
       LABELS "contract;engine;cuda;device;lammps;kokkos")
+
+    if(TARGET NEPAdapters::cpu_opt)
+      add_executable(nep_adapters_cuda_spin_onsite_test
+        test_cuda_spin_onsite.cpp)
+      target_link_libraries(
+        nep_adapters_cuda_spin_onsite_test
+        PRIVATE
+          NEPAdapters::cuda
+          NEPAdapters::cpu_opt
+      )
+      add_test(
+        NAME nep_adapters_cuda_spin_onsite_test
+        COMMAND nep_adapters_cuda_spin_onsite_test)
+      set_tests_properties(nep_adapters_cuda_spin_onsite_test PROPERTIES
+        LABELS "parity;engine;cuda;device;spin")
+
+      add_executable(nep_adapters_cuda_spin_scalar_test
+        test_cuda_spin_scalar.cpp)
+      target_link_libraries(
+        nep_adapters_cuda_spin_scalar_test
+        PRIVATE
+          NEPAdapters::cuda
+          NEPAdapters::cpu_opt
+      )
+      add_test(
+        NAME nep_adapters_cuda_spin_scalar_test
+        COMMAND nep_adapters_cuda_spin_scalar_test)
+      set_tests_properties(nep_adapters_cuda_spin_scalar_test PROPERTIES
+        LABELS "parity;engine;cuda;device;spin")
+
+      add_executable(nep_adapters_cuda_spin_density_test
+        test_cuda_spin_density.cpp)
+      target_link_libraries(
+        nep_adapters_cuda_spin_density_test
+        PRIVATE
+          NEPAdapters::cuda
+          NEPAdapters::cpu_opt
+      )
+      add_test(
+        NAME nep_adapters_cuda_spin_density_test
+        COMMAND nep_adapters_cuda_spin_density_test)
+      set_tests_properties(nep_adapters_cuda_spin_density_test PROPERTIES
+        LABELS "parity;engine;cuda;device;spin")
+
+      add_executable(nep_adapters_cuda_spin_chiral_polar_test
+        test_cuda_spin_chiral_polar.cpp)
+      target_link_libraries(
+        nep_adapters_cuda_spin_chiral_polar_test
+        PRIVATE
+          NEPAdapters::cuda
+          NEPAdapters::cpu_opt
+      )
+      add_test(
+        NAME nep_adapters_cuda_spin_chiral_polar_test
+        COMMAND nep_adapters_cuda_spin_chiral_polar_test)
+      set_tests_properties(nep_adapters_cuda_spin_chiral_polar_test PROPERTIES
+        LABELS "parity;engine;cuda;device;spin")
+
+      add_executable(nep_adapters_cuda_spin_fixture_test
+        test_cuda_spin_fixture.cpp)
+      target_link_libraries(
+        nep_adapters_cuda_spin_fixture_test
+        PRIVATE
+          NEPAdapters::cuda
+          NEPAdapters::cpu_opt
+      )
+      target_compile_definitions(
+        nep_adapters_cuda_spin_fixture_test
+        PRIVATE
+          NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+      )
+      add_test(
+        NAME nep_adapters_cuda_spin_fixture_test
+        COMMAND nep_adapters_cuda_spin_fixture_test)
+      set_tests_properties(nep_adapters_cuda_spin_fixture_test PROPERTIES
+        LABELS "parity;engine;cuda;device;spin")
+    endif()
 
     add_executable(nep_adapters_cuda_device_model_test test_cuda_device_model.cu)
     target_link_libraries(

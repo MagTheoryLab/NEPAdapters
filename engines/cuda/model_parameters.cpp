@@ -38,6 +38,7 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
   packed.protocol = protocol;
   packed.has_charge = protocol.charge_mode > 0;
   packed.atomic_numbers = protocol.atomic_numbers;
+  packed.spin_baseline = protocol.spin_baseline;
   packed.flexible_zbl_parameters = std::move(parsed.flexible_zbl_parameters);
 
   const std::size_t dim = checked_count(protocol.descriptor_dim, "descriptor_dim");
@@ -99,13 +100,15 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
       (checked_count(protocol.basis_size_angular, "basis_size_angular") + 1);
   packed.descriptor_layout.radial_offset = 0;
   packed.descriptor_layout.angular_offset = packed.descriptor_layout.radial_count;
+  packed.descriptor_layout.spin_offset = protocol.ordinary_descriptor_parameter_count;
+  packed.descriptor_layout.spin_count = protocol.spin_descriptor_parameter_count;
   append_range(
       packed.descriptor_coefficients,
       raw,
       descriptor_offset,
       protocol.descriptor_parameter_count);
   packed.descriptor_coefficients_type_pair_major.assign(
-      protocol.descriptor_parameter_count,
+      protocol.ordinary_descriptor_parameter_count,
       0.0f);
   const std::size_t type_pairs = num_types * num_types;
   const std::size_t radial_basis_count =

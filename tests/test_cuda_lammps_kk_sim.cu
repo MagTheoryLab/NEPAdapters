@@ -368,6 +368,39 @@ bool run_device_layout_case(
     }
   }
 
+  const NepaStatus repeat_status =
+      nepa_find_force_lammps_device_neighbors(
+          model,
+          &device_input,
+          &device_result);
+  if (repeat_status != NEPA_STATUS_OK) {
+    std::cerr << case_name << " repeat status=" << repeat_status << "\n";
+    return false;
+  }
+  check_cuda(
+      cudaMemcpy(
+          forces.data(),
+          d_forces,
+          forces.size() * sizeof(double),
+          cudaMemcpyDeviceToHost),
+      "copy repeat forces");
+  for (int atom = 0; atom < nlocal; ++atom) {
+    for (int component = 0; component < 3; ++component) {
+      const double device_force =
+          forces[atom * force_atom_stride + component * force_component_stride];
+      const double expected_force = expected_forces[3 * atom + component];
+      const double diff = std::abs(device_force - expected_force);
+      if (diff > force_tolerance) {
+        std::cerr << case_name << " repeat force mismatch atom=" << atom
+                  << " component=" << component
+                  << " device=" << device_force
+                  << " expected=" << expected_force
+                  << " diff=" << diff << "\n";
+        return false;
+      }
+    }
+  }
+
   device_result.total_potential = nullptr;
   device_result.total_virial6 = nullptr;
   device_result.potential_per_atom = nullptr;

@@ -185,6 +185,10 @@ void write_lammps_device_outputs(
   require(result.forces != nullptr, "missing device force output");
   require(result.force_atom_stride > 0, "invalid force atom stride");
   require(result.force_component_stride > 0, "invalid force component stride");
+  if (result.mforces != nullptr) {
+    require(result.mforce_atom_stride > 0, "invalid mforce atom stride");
+    require(result.mforce_component_stride > 0, "invalid mforce component stride");
+  }
   if (result.virials_per_atom9 != nullptr) {
     require(result.virial_atom_stride > 0, "invalid virial atom stride");
     require(result.virial_component_stride > 0, "invalid virial component stride");
@@ -195,6 +199,9 @@ void write_lammps_device_outputs(
           "nall exceeds workspace atom capacity");
   require(view.potential != nullptr, "workspace missing potential");
   require(view.force_soa3 != nullptr, "workspace missing force output");
+  if (result.mforces != nullptr) {
+    require(view.mforce_soa3 != nullptr, "workspace missing mforce output");
+  }
   require(view.virial_soa9 != nullptr, "workspace missing virial output");
   if (write_totals) {
     require(view.lammps_partial_sums != nullptr,
@@ -211,6 +218,16 @@ void write_lammps_device_outputs(
         result.force_atom_stride,
         result.force_component_stride);
     check_cuda(cudaGetLastError(), "write device LAMMPS forces");
+    if (result.mforces != nullptr) {
+      write_lammps_forces<<<force_blocks, kThreads>>>(
+          input.nall,
+          static_cast<int>(view.atom_capacity),
+          view.mforce_soa3,
+          result.mforces,
+          result.mforce_atom_stride,
+          result.mforce_component_stride);
+      check_cuda(cudaGetLastError(), "write device LAMMPS mforces");
+    }
   }
 
   const int atom_blocks = (input.nlocal + kThreads - 1) / kThreads;

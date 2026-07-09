@@ -25,6 +25,7 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     radial_force.cu
     radial_descriptor.cu
     radial_basis_cache.cu
+    spin_onsite.cu
     zbl_force.cu
   )
   set_source_files_properties(
@@ -43,6 +44,7 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     radial_force.cu
     radial_descriptor.cu
     radial_basis_cache.cu
+    spin_onsite.cu
     zbl_force.cu
     PROPERTIES LANGUAGE CUDA)
   target_include_directories(
@@ -50,7 +52,7 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     PRIVATE
       ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_compile_definitions(nep_adapters_cuda PRIVATE NEP_ADAPTERS_CUDA_DEVICE_RUNTIME=1)
-  target_link_libraries(nep_adapters_cuda PRIVATE CUDA::cufft)
+  target_link_libraries(nep_adapters_cuda PRIVATE CUDA::cufft CUDA::cublas)
 endif()
 
 target_link_libraries(nep_adapters_cuda PUBLIC NEPAdapters::nep_adapters)

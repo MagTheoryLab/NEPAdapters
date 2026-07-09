@@ -17,6 +17,7 @@
 #include "radial_basis_cache.hpp"
 #include "radial_descriptor.hpp"
 #include "radial_force.hpp"
+#include "spin_onsite.hpp"
 #include "zbl_force.hpp"
 #endif
 
@@ -61,9 +62,13 @@ bool supports_batch_force(const nep_adapters::cuda_backend::ModelProtocol& proto
          body.l_max_3body <= 4;
 }
 
+bool supports_spin_force(const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+  return supports_batch_force(protocol) && protocol.spin_mode != 0;
+}
+
 bool supports_batched_execution(
     const nep_adapters::cuda_backend::ModelProtocol& protocol) {
-  return supports_batch_force(protocol);
+  return supports_batch_force(protocol) && protocol.spin_mode == 0;
 }
 
 bool needs_angular_terms(
@@ -146,18 +151,25 @@ class LammpsDevicePairProfiler {
       float radial_force_ms,
       float angular_force_ms,
       float zbl_force_ms,
+      float spin_onsite_ms,
+      float spin_scalar_ms,
+      float spin_density_ms,
+      float spin_chiral_ms,
       float output_ms) const {
     if (!enabled_) {
       return;
     }
     const float total_ms =
         stage_ms + clear_ms + descriptor_ann_ms + radial_force_ms +
-        angular_force_ms + zbl_force_ms + output_ms;
+        angular_force_ms + zbl_force_ms + spin_onsite_ms + spin_scalar_ms +
+        spin_density_ms + spin_chiral_ms + output_ms;
     std::fprintf(
         stderr,
         "NEPA_PAIR_PROFILE sample=%d nlocal=%d rebuild=%d "
         "stage_ms=%.3f clear_ms=%.3f descriptor_ann_ms=%.3f "
         "radial_force_ms=%.3f angular_force_ms=%.3f zbl_force_ms=%.3f "
+        "spin_onsite_ms=%.3f spin_scalar_ms=%.3f spin_density_ms=%.3f "
+        "spin_chiral_ms=%.3f "
         "output_ms=%.3f total_ms=%.3f\n",
         sample_,
         nlocal_,
@@ -168,6 +180,10 @@ class LammpsDevicePairProfiler {
         radial_force_ms,
         angular_force_ms,
         zbl_force_ms,
+        spin_onsite_ms,
+        spin_scalar_ms,
+        spin_density_ms,
+        spin_chiral_ms,
         output_ms,
         total_ms);
   }
@@ -291,7 +307,7 @@ void build_descriptors_and_ann_stage(
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
     bool has_angular,
     bool store_potential = true) {
-  if (protocol.charge_mode == 0 && has_angular &&
+  if (protocol.spin_mode == 0 && protocol.charge_mode == 0 && has_angular &&
       nep_adapters::cuda_backend::
           try_build_descriptors_and_ann_from_positions_on_device(
               protocol,
@@ -309,6 +325,14 @@ void build_descriptors_and_ann_stage(
       device,
       workspace,
       has_angular);
+  if (protocol.spin_mode != 0) {
+    nep_adapters::cuda_backend::build_spin_descriptors_on_device(
+        protocol,
+        atom_count,
+        box,
+        device,
+        workspace);
+  }
   build_angular_descriptors_and_ann_stage(
       protocol,
       atom_count,
@@ -421,6 +445,19 @@ std::vector<double> copy_device_doubles(const double* device, std::size_t count)
   return host;
 }
 
+std::vector<float> copy_device_floats(const float* device, std::size_t count) {
+  std::vector<float> host(count, 0.0f);
+  const cudaError_t status = cudaMemcpy(
+      host.data(),
+      device,
+      count * sizeof(float),
+      cudaMemcpyDeviceToHost);
+  if (status != cudaSuccess) {
+    throw std::runtime_error("failed to copy CUDA float output");
+  }
+  return host;
+}
+
 void copy_device_doubles_to_host(
     const double* device,
     std::size_t count,
@@ -468,12 +505,17 @@ class CudaModel : public nep_adapters::Model {
     out.cutoff_angular = protocol_.cutoff_angular;
     out.cutoff_max = protocol_.cutoff_max;
     out.capabilities = nep_adapters::to_mask(nep_adapters::Capability::device_input);
+    if (protocol_.spin_mode > 0) {
+      out.capabilities |= nep_adapters::to_mask(nep_adapters::Capability::spin);
+    }
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
     if (supports_batch_force(protocol_)) {
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::external_neighbors);
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::descriptors);
     } else if (protocol_.charge_mode > 0) {
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
@@ -507,6 +549,9 @@ class CudaModel : public nep_adapters::Model {
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
       if (!supports_batch_force(protocol_) && protocol_.charge_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
+      }
+      if (protocol_.spin_mode != 0 && batch.spins_aos3 == nullptr) {
+        return NEPA_STATUS_INVALID_ARGUMENT;
       }
       if (protocol_.charge_mode > 0 && batch.num_structures != 1) {
         return NEPA_STATUS_UNSUPPORTED;
@@ -644,6 +689,10 @@ class CudaModel : public nep_adapters::Model {
         single.types = batch.types + atom_offset;
         single.positions_aos3 =
             batch.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
+        single.spins_aos3 =
+            batch.spins_aos3 != nullptr
+                ? batch.spins_aos3 + 3 * static_cast<std::size_t>(atom_offset)
+                : nullptr;
         single.boxes_row_major9 =
             batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
         single.pbc_flags3 =
@@ -659,6 +708,9 @@ class CudaModel : public nep_adapters::Model {
         const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        if (view.mforce_soa3 != nullptr) {
+          clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+        }
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
         nep_adapters::cuda_backend::build_internal_neighbors_on_device(
             protocol_,
@@ -716,11 +768,44 @@ class CudaModel : public nep_adapters::Model {
               device_,
               workspace);
         }
+        if (protocol_.spin_mode != 0) {
+          nep_adapters::cuda_backend::accumulate_spin_onsite_mforces_on_device(
+              protocol_,
+              atom_count,
+              workspace);
+          nep_adapters::cuda_backend::accumulate_spin_scalar_forces_on_device(
+              protocol_,
+              atom_count,
+              box,
+              device_,
+              workspace,
+              true);
+          nep_adapters::cuda_backend::accumulate_spin_density_forces_on_device(
+              protocol_,
+              atom_count,
+              box,
+              device_,
+              workspace,
+              true);
+          if (protocol_.spin_chiral != 0) {
+            nep_adapters::cuda_backend::accumulate_spin_chiral_polar_forces_on_device(
+                protocol_,
+                atom_count,
+                box,
+                device_,
+                workspace,
+                true);
+          }
+        }
 
         const std::vector<double> potential =
             copy_device_doubles(view.potential, view.atom_capacity);
         const std::vector<double> force_soa =
             copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        const std::vector<double> mforce_soa =
+            result.mforces_aos3 != nullptr && protocol_.spin_mode != 0
+                ? copy_device_doubles(view.mforce_soa3, view.atom_capacity * 3)
+                : std::vector<double>{};
         const std::vector<double> virial_soa =
             copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
         const std::vector<double> charge =
@@ -746,6 +831,14 @@ class CudaModel : public nep_adapters::Model {
               force_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
           result.forces_aos3[3 * global_atom + 2] =
               force_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+          if (result.mforces_aos3 != nullptr && protocol_.spin_mode != 0) {
+            result.mforces_aos3[3 * global_atom + 0] =
+                mforce_soa[static_cast<std::size_t>(atom)];
+            result.mforces_aos3[3 * global_atom + 1] =
+                mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
+            result.mforces_aos3[3 * global_atom + 2] =
+                mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+          }
           if (result.virials_per_atom_row_major9 != nullptr) {
             for (int component = 0; component < 9; ++component) {
               const int internal_component =
@@ -775,7 +868,122 @@ class CudaModel : public nep_adapters::Model {
 #else
       (void)nep_adapters::cuda_backend::stage_batch_for_internal_neighbors(batch);
 #endif
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  NepaStatus find_descriptors(
+      const NepaStructureBatch& batch,
+      NepaFindDescriptorResult& result) override {
+    if (!valid_batch(batch) || result.descriptors == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if (protocol_.spin_mode != 0 && batch.spins_aos3 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+      if (!supports_batch_force(protocol_)) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+      std::size_t max_structure_atoms = 0;
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        max_structure_atoms = std::max(
+            max_structure_atoms,
+            static_cast<std::size_t>(batch.atom_counts[structure]));
+      }
+      nep_adapters::cuda_backend::DeviceWorkspace workspace(
+          nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+              protocol_,
+              max_structure_atoms,
+              1));
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        const std::int32_t atom_count = batch.atom_counts[structure];
+        const std::int32_t atom_offset = batch.atom_offsets[structure];
+        const std::int32_t local_atom_counts[] = {atom_count};
+        const std::int32_t local_atom_offsets[] = {0};
+        NepaStructureBatch single{};
+        single.num_structures = 1;
+        single.total_atoms = atom_count;
+        single.atom_counts = local_atom_counts;
+        single.atom_offsets = local_atom_offsets;
+        single.types = batch.types + atom_offset;
+        single.positions_aos3 =
+            batch.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
+        single.spins_aos3 =
+            batch.spins_aos3 != nullptr
+                ? batch.spins_aos3 + 3 * static_cast<std::size_t>(atom_offset)
+                : nullptr;
+        single.boxes_row_major9 =
+            batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
+        single.pbc_flags3 =
+            batch.pbc_flags3 != nullptr
+                ? batch.pbc_flags3 + 3 * static_cast<std::size_t>(structure)
+                : nullptr;
+        nep_adapters::cuda_backend::SimulationBox box;
+        if (!make_simulation_box(single, box)) {
+          return NEPA_STATUS_UNSUPPORTED;
+        }
+        nep_adapters::cuda_backend::stage_batch_on_device(single, workspace);
+        nep_adapters::cuda_backend::build_internal_neighbors_on_device(
+            protocol_,
+            atom_count,
+            box,
+            workspace);
+        build_radial_descriptor_stage(
+            protocol_,
+            atom_count,
+            box,
+            device_,
+            workspace,
+            needs_angular_terms(protocol_));
+        if (needs_angular_terms(protocol_)) {
+          nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
+              protocol_,
+              atom_count,
+              device_,
+              workspace);
+        }
+        if (protocol_.spin_mode != 0) {
+          nep_adapters::cuda_backend::build_spin_descriptors_on_device(
+              protocol_,
+              atom_count,
+              box,
+              device_,
+              workspace);
+        }
+        const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+        const std::vector<float> descriptor_soa = copy_device_floats(
+            view.descriptors,
+            view.atom_capacity * static_cast<std::size_t>(protocol_.descriptor_dim));
+        for (int atom = 0; atom < atom_count; ++atom) {
+          const std::size_t global_atom =
+              static_cast<std::size_t>(atom_offset + atom);
+          for (int dim = 0; dim < protocol_.descriptor_dim; ++dim) {
+            double value = descriptor_soa[
+                static_cast<std::size_t>(dim) * view.atom_capacity +
+                static_cast<std::size_t>(atom)];
+#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+            if (static_cast<std::size_t>(dim) < host_.q_scaler.size()) {
+              value *= host_.q_scaler[static_cast<std::size_t>(dim)];
+            }
+#endif
+            result.descriptors[
+                global_atom * static_cast<std::size_t>(protocol_.descriptor_dim) +
+                static_cast<std::size_t>(dim)] = value;
+          }
+        }
+      }
+      return NEPA_STATUS_OK;
+#else
+      (void)batch;
+      (void)result;
+#endif
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
     return NEPA_STATUS_UNSUPPORTED;
@@ -814,6 +1022,15 @@ class CudaModel : public nep_adapters::Model {
           make_nonperiodic_lammps_box();
       const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
       clear_device_doubles(view.potential, view.atom_capacity);
+      if (view.force_soa3 != nullptr) {
+        clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+      }
+      if (view.mforce_soa3 != nullptr) {
+        clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+      }
+      if (view.virial_soa9 != nullptr) {
+        clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+      }
       const bool has_angular = needs_angular_terms(protocol_);
       build_descriptors_and_ann_stage(
           protocol_,
@@ -861,11 +1078,44 @@ class CudaModel : public nep_adapters::Model {
             workspace,
             zbl_outputs);
       }
+      if (protocol_.spin_mode != 0) {
+        nep_adapters::cuda_backend::accumulate_spin_onsite_mforces_on_device(
+            protocol_,
+            atom_capacity,
+            workspace);
+        nep_adapters::cuda_backend::accumulate_spin_scalar_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+        nep_adapters::cuda_backend::accumulate_spin_density_forces_on_device(
+            protocol_,
+            atom_capacity,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+        if (protocol_.spin_chiral != 0) {
+          nep_adapters::cuda_backend::accumulate_spin_chiral_polar_forces_on_device(
+              protocol_,
+              atom_capacity,
+              box,
+              device_,
+              workspace,
+              accumulate_virial);
+        }
+      }
 
       const std::vector<double> potential =
           copy_device_doubles(view.potential, view.atom_capacity);
       const std::vector<double> force_soa =
           copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
+      const std::vector<double> mforce_soa =
+          result.mforces != nullptr && protocol_.spin_mode != 0
+              ? copy_device_doubles(view.mforce_soa3, view.atom_capacity * 3)
+              : std::vector<double>{};
       const std::vector<double> virial_soa =
           copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
 
@@ -882,6 +1132,14 @@ class CudaModel : public nep_adapters::Model {
               force_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
           result.forces[atom][2] =
               force_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+        }
+        if (result.mforces != nullptr && result.mforces[atom] != nullptr &&
+            protocol_.spin_mode != 0) {
+          result.mforces[atom][0] = mforce_soa[static_cast<std::size_t>(atom)];
+          result.mforces[atom][1] =
+              mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
+          result.mforces[atom][2] =
+              mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
         }
         if (result.virials_per_atom9 != nullptr &&
             result.virials_per_atom9[atom] != nullptr) {
@@ -925,6 +1183,10 @@ class CudaModel : public nep_adapters::Model {
   NepaStatus find_force_lammps_device_neighbors(
       const NepaLammpsDeviceNeighborInput& input,
       NepaLammpsDeviceNeighborResult& result) override {
+    const auto invalid_argument = [](const char* message) {
+      nep_adapters::set_last_error(message);
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    };
     if (input.nlocal < 0 || input.nall < input.nlocal || input.inum <= 0 ||
         input.max_neighbors < 0 || input.neighbor_rows <= 0 ||
         input.numneigh_length <= 0 || input.ilist == nullptr ||
@@ -934,20 +1196,29 @@ class CudaModel : public nep_adapters::Model {
         input.position_atom_stride <= 0 || input.position_component_stride <= 0 ||
         result.forces == nullptr || result.force_atom_stride <= 0 ||
         result.force_component_stride <= 0) {
-      return NEPA_STATUS_INVALID_ARGUMENT;
+      return invalid_argument("invalid device LAMMPS neighbor input or force output");
     }
     if ((result.total_potential == nullptr) !=
         (result.total_virial6 == nullptr)) {
-      return NEPA_STATUS_INVALID_ARGUMENT;
+      return invalid_argument("device LAMMPS totals require both energy and virial pointers");
     }
     if (result.virials_per_atom9 != nullptr &&
         (result.virial_atom_stride <= 0 ||
          result.virial_component_stride <= 0)) {
-      return NEPA_STATUS_INVALID_ARGUMENT;
+      return invalid_argument("invalid device LAMMPS per-atom virial layout");
     }
     if ((input.type_map == nullptr && input.type_map_length != 0) ||
         (input.type_map != nullptr && input.type_map_length <= 0)) {
-      return NEPA_STATUS_INVALID_ARGUMENT;
+      return invalid_argument("invalid device LAMMPS type map layout");
+    }
+    if (protocol_.spin_mode != 0 &&
+        (input.spins == nullptr || input.spin_atom_stride <= 0 ||
+         input.spin_component_stride <= 0)) {
+      return invalid_argument("spin model requires valid device LAMMPS spins");
+    }
+    if (result.mforces != nullptr &&
+        (result.mforce_atom_stride <= 0 || result.mforce_component_stride <= 0)) {
+      return invalid_argument("invalid device LAMMPS mforce layout");
     }
 
     try {
@@ -980,10 +1251,22 @@ class CudaModel : public nep_adapters::Model {
       }
       active_atom_capacity = std::min(active_atom_capacity, atom_capacity);
       nep_adapters::cuda_backend::ModelProtocol external_protocol = protocol_;
+      if (input.max_neighbors >= 0) {
+        external_protocol.neighbor_capacity_radial = std::min(
+            external_protocol.neighbor_capacity_radial,
+            input.max_neighbors);
+        external_protocol.neighbor_capacity_angular = std::min(
+            external_protocol.neighbor_capacity_angular,
+            input.max_neighbors);
+      }
       const bool rebuild_workspace =
           lammps_device_workspace_ == nullptr ||
           atom_capacity > lammps_device_atom_capacity_ ||
-          active_atom_capacity > lammps_device_active_atom_capacity_;
+          active_atom_capacity > lammps_device_active_atom_capacity_ ||
+          external_protocol.neighbor_capacity_radial >
+              lammps_device_radial_capacity_ ||
+          external_protocol.neighbor_capacity_angular >
+              lammps_device_angular_capacity_;
       LammpsDevicePairProfiler profiler(input.nlocal, rebuild_workspace);
       float stage_ms = 0.0f;
       float clear_ms = 0.0f;
@@ -991,6 +1274,10 @@ class CudaModel : public nep_adapters::Model {
       float radial_force_ms = 0.0f;
       float angular_force_ms = 0.0f;
       float zbl_force_ms = 0.0f;
+      float spin_onsite_ms = 0.0f;
+      float spin_scalar_ms = 0.0f;
+      float spin_density_ms = 0.0f;
+      float spin_chiral_ms = 0.0f;
       float output_ms = 0.0f;
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
           lammps_device_workspace(
@@ -1011,8 +1298,17 @@ class CudaModel : public nep_adapters::Model {
       const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
       const bool store_potential =
           result.total_potential != nullptr || result.potential_per_atom != nullptr;
+      const bool accumulate_virial =
+          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
       if (store_potential) {
         clear_device_doubles(view.potential, static_cast<std::size_t>(input.nlocal));
+      }
+      clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+      if (view.mforce_soa3 != nullptr) {
+        clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+      }
+      if (accumulate_virial) {
+        clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
       }
       profiler.split(clear_ms);
       const bool has_angular = needs_angular_terms(external_protocol);
@@ -1039,8 +1335,6 @@ class CudaModel : public nep_adapters::Model {
             store_potential);
       }
       profiler.split(descriptor_ann_ms);
-      const bool accumulate_virial =
-          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
       const bool zbl_outputs =
           result.total_potential != nullptr || result.potential_per_atom != nullptr ||
           result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
@@ -1072,6 +1366,39 @@ class CudaModel : public nep_adapters::Model {
             zbl_outputs);
       }
       profiler.split(zbl_force_ms);
+      if (external_protocol.spin_mode != 0) {
+        nep_adapters::cuda_backend::accumulate_spin_onsite_mforces_on_device(
+            external_protocol,
+            input.nlocal,
+            workspace);
+        profiler.split(spin_onsite_ms);
+        nep_adapters::cuda_backend::accumulate_spin_scalar_forces_on_device(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+        profiler.split(spin_scalar_ms);
+        nep_adapters::cuda_backend::accumulate_spin_density_forces_on_device(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            accumulate_virial);
+        profiler.split(spin_density_ms);
+        if (external_protocol.spin_chiral != 0) {
+          nep_adapters::cuda_backend::accumulate_spin_chiral_polar_forces_on_device(
+              external_protocol,
+              input.nlocal,
+              box,
+              device_,
+              workspace,
+              accumulate_virial);
+        }
+        profiler.split(spin_chiral_ms);
+      }
       nep_adapters::cuda_backend::write_lammps_device_outputs(
           input,
           result,
@@ -1084,6 +1411,10 @@ class CudaModel : public nep_adapters::Model {
           radial_force_ms,
           angular_force_ms,
           zbl_force_ms,
+          spin_onsite_ms,
+          spin_scalar_ms,
+          spin_density_ms,
+          spin_chiral_ms,
           output_ms);
       return NEPA_STATUS_OK;
 #else
@@ -1116,7 +1447,8 @@ class CudaModel : public nep_adapters::Model {
             protocol,
             atom_capacity,
             active_atom_capacity,
-            false));
+            false,
+            needs_angular_terms(protocol) || protocol.spin_mode != 0));
     lammps_device_workspace_ = std::move(workspace);
     lammps_device_atom_capacity_ = atom_capacity;
     lammps_device_active_atom_capacity_ = active_atom_capacity;

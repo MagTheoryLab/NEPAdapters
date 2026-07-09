@@ -122,3 +122,23 @@ if(TARGET NEPAdapters::cuda)
       CUDA_STANDARD_REQUIRED ON)
   endif()
 endif()
+
+if(TARGET NEPAdapters::cuda AND TARGET NEPAdapters::cpu_opt AND
+   EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt")
+  add_executable(nep_adapters_bench_spin_gpu cuda/bench_spin_gpu.cpp)
+  target_link_libraries(
+    nep_adapters_bench_spin_gpu
+    PRIVATE
+      NEPAdapters::cuda
+      NEPAdapters::cpu_opt)
+  target_compile_definitions(
+    nep_adapters_bench_spin_gpu
+    PRIVATE
+      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt")
+  add_test(
+    NAME nep_adapters_bench_spin_gpu
+    COMMAND nep_adapters_bench_spin_gpu --warmup 1 --iterations 2 --replicate 2)
+  set_tests_properties(nep_adapters_bench_spin_gpu PROPERTIES
+    LABELS "bench;performance;engine;cuda;spin"
+    TIMEOUT 120)
+endif()

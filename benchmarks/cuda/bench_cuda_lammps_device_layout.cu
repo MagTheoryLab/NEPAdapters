@@ -33,6 +33,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -52,6 +53,7 @@ struct Options {
   bool breakdown = false;
   bool split_pipeline = false;
   bool ann_gemm_ablation = false;
+  bool strip_spin_model = false;
   std::string model_path;
   std::string replay_path;
   double spacing = 2.0;
@@ -160,6 +162,8 @@ Options parse_options(int argc, char** argv) {
       options.split_pipeline = true;
     } else if (arg == "--ann-gemm-ablation") {
       options.ann_gemm_ablation = true;
+    } else if (arg == "--strip-spin-model") {
+      options.strip_spin_model = true;
     } else {
       std::cerr << "Usage: " << argv[0]
                 << " [--atoms N] [--warmup N] [--iterations N]"
@@ -170,11 +174,150 @@ Options parse_options(int argc, char** argv) {
                 << " [--skin X]"
                 << " [--radial-cutoff X] [--angular-cutoff X]"
                 << " [--totals] [--per-atom] [--breakdown]"
+                << " [--strip-spin-model]"
                 << " [--split-pipeline] [--ann-gemm-ablation]\n";
       std::exit(EXIT_FAILURE);
     }
   }
+  if (options.strip_spin_model && options.model_path.empty()) {
+    std::cerr << "--strip-spin-model requires --model PATH\n";
+    std::exit(EXIT_FAILURE);
+  }
   return options;
+}
+
+std::vector<std::string> split_tokens(const std::string& line) {
+  std::istringstream stream(line);
+  std::vector<std::string> tokens;
+  std::string token;
+  while (stream >> token) {
+    tokens.push_back(token);
+  }
+  return tokens;
+}
+
+int parse_model_int(const std::string& value) {
+  return std::stoi(value);
+}
+
+std::string write_struct_model_from_spin(const std::string& spin_model_path) {
+  std::ifstream input(spin_model_path);
+  if (!input) {
+    throw std::runtime_error("failed to open spin model: " + spin_model_path);
+  }
+
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!split_tokens(line).empty()) {
+      lines.push_back(line);
+    }
+  }
+  if (lines.empty()) {
+    throw std::runtime_error("empty spin model: " + spin_model_path);
+  }
+
+  const std::vector<std::string> first = split_tokens(lines[0]);
+  std::size_t cursor = 1;
+  int spin_compress = 0;
+  int spin_basis_size = 0;
+  while (cursor < lines.size()) {
+    const std::vector<std::string> tokens = split_tokens(lines[cursor]);
+    if (tokens[0] == "spin_basis_size") {
+      spin_basis_size = parse_model_int(tokens[1]);
+    } else if (tokens[0] == "spin_compress") {
+      spin_compress = parse_model_int(tokens[1]);
+    } else if (tokens[0] == "cutoff") {
+      break;
+    }
+    ++cursor;
+  }
+  if (cursor >= lines.size()) {
+    throw std::runtime_error("spin model is missing structural cutoff block");
+  }
+
+  const std::string cutoff = lines[cursor++];
+  const std::vector<std::string> n_max_tokens = split_tokens(lines[cursor]);
+  const std::string n_max = lines[cursor++];
+  const std::vector<std::string> basis_tokens = split_tokens(lines[cursor]);
+  const std::string basis_size = lines[cursor++];
+  const std::vector<std::string> l_max_tokens = split_tokens(lines[cursor]);
+  const std::string l_max = lines[cursor++];
+  const std::vector<std::string> ann_tokens = split_tokens(lines[cursor]);
+  const std::string ann = lines[cursor++];
+
+  const int num_types = parse_model_int(first[1]);
+  const int n_max_radial = parse_model_int(n_max_tokens[1]);
+  const int n_max_angular = parse_model_int(n_max_tokens[2]);
+  const int basis_radial = parse_model_int(basis_tokens[1]);
+  const int basis_angular = parse_model_int(basis_tokens[2]);
+  const int l_max_3body = parse_model_int(l_max_tokens[1]);
+  int channels = l_max_3body;
+  for (std::size_t i = 2; i < l_max_tokens.size(); ++i) {
+    channels += parse_model_int(l_max_tokens[i]) != 0 ? 1 : 0;
+  }
+  const int hidden = parse_model_int(ann_tokens[1]);
+  const int struct_dim = (n_max_radial + 1) + (n_max_angular + 1) * channels;
+  const int spin_dim =
+      2 + 4 * spin_compress + spin_compress + 3 * spin_compress +
+      3 * spin_compress + spin_compress + spin_compress + spin_compress +
+      std::min(2, spin_compress) + 2 * spin_compress;
+  const int spin_model_dim = struct_dim + spin_dim;
+  const int ordinary_coeff_count =
+      num_types * num_types *
+      ((n_max_radial + 1) * (basis_radial + 1) +
+       (n_max_angular + 1) * (basis_angular + 1));
+  const int spin_coeff_count =
+      num_types * num_types * spin_compress * (spin_basis_size + 1);
+
+  std::vector<double> scalars;
+  for (; cursor < lines.size(); ++cursor) {
+    scalars.push_back(std::stod(split_tokens(lines[cursor])[0]));
+  }
+  const int spin_ann_count = (spin_model_dim + 2) * hidden * num_types + 1;
+  const int spin_param_count =
+      spin_ann_count + ordinary_coeff_count + spin_coeff_count;
+  if (static_cast<int>(scalars.size()) < spin_param_count + spin_model_dim) {
+    throw std::runtime_error("spin model parameter count is too small");
+  }
+
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      "nep_adapters_lammps_device_struct_from_spin.nep";
+  std::ofstream out(path);
+  out << "nep4";
+  for (std::size_t i = 1; i < first.size(); ++i) {
+    out << ' ' << first[i];
+  }
+  out << "\n" << cutoff << "\n" << n_max << "\n" << basis_size << "\n"
+      << l_max << "\n" << ann << "\n";
+
+  std::size_t offset = 0;
+  for (int type = 0; type < num_types; ++type) {
+    for (int neuron = 0; neuron < hidden; ++neuron) {
+      for (int d = 0; d < struct_dim; ++d) {
+        out << scalars[offset + static_cast<std::size_t>(neuron) *
+                                  spin_model_dim + d]
+            << "\n";
+      }
+    }
+    offset += static_cast<std::size_t>(hidden) * spin_model_dim;
+    for (int i = 0; i < hidden; ++i) {
+      out << scalars[offset++] << "\n";
+    }
+    for (int i = 0; i < hidden; ++i) {
+      out << scalars[offset++] << "\n";
+    }
+  }
+  out << scalars[offset++] << "\n";
+  for (int i = 0; i < ordinary_coeff_count; ++i) {
+    out << scalars[offset++] << "\n";
+  }
+  offset += spin_coeff_count;
+  for (int i = 0; i < struct_dim; ++i) {
+    out << scalars[static_cast<std::size_t>(spin_param_count + i)] << "\n";
+  }
+  return path.string();
 }
 
 void check_cuda(cudaError_t status, const char* action) {
@@ -259,6 +402,10 @@ struct LayoutStorage {
   int position_component_stride = 0;
   int force_atom_stride = 0;
   int force_component_stride = 0;
+  int spin_atom_stride = 0;
+  int spin_component_stride = 0;
+  int mforce_atom_stride = 0;
+  int mforce_component_stride = 0;
   int virial_atom_stride = 0;
   int virial_component_stride = 0;
 
@@ -269,10 +416,12 @@ struct LayoutStorage {
   int* type_map = nullptr;
   int type_map_length = 0;
   double* positions = nullptr;
+  double* spins = nullptr;
   double* total_potential = nullptr;
   double* total_virial6 = nullptr;
   double* potential_per_atom = nullptr;
   double* forces = nullptr;
+  double* mforces = nullptr;
   double* virials = nullptr;
 };
 
@@ -451,7 +600,8 @@ std::vector<int> make_types(int atom_count, bool use_type_map) {
 LayoutStorage make_layout(
     const FixedNeighborSystem& system,
     bool soa_layout,
-    bool use_type_map) {
+    bool use_type_map,
+    bool spin_model) {
   LayoutStorage storage;
   storage.atom_count = system.atom_count;
   storage.nall = system.atom_count;
@@ -493,7 +643,10 @@ LayoutStorage make_layout(
 
     storage.position_atom_stride = 1;
     storage.position_component_stride = storage.pitch;
+    storage.spin_atom_stride = 1;
+    storage.spin_component_stride = storage.pitch;
     std::vector<double> positions(3 * static_cast<std::size_t>(storage.pitch), 0.0);
+    std::vector<double> spins(4 * static_cast<std::size_t>(storage.pitch), 0.0);
     for (int atom = 0; atom < system.atom_count; ++atom) {
       positions[static_cast<std::size_t>(atom)] =
           system.positions_aos3[3 * static_cast<std::size_t>(atom)];
@@ -501,17 +654,32 @@ LayoutStorage make_layout(
           system.positions_aos3[3 * static_cast<std::size_t>(atom) + 1];
       positions[static_cast<std::size_t>(atom) + 2 * storage.pitch] =
           system.positions_aos3[3 * static_cast<std::size_t>(atom) + 2];
+      spins[static_cast<std::size_t>(atom)] = 0.5;
+      spins[static_cast<std::size_t>(atom) + storage.pitch] = 0.1;
+      spins[static_cast<std::size_t>(atom) + 2 * storage.pitch] = 0.0;
+      spins[static_cast<std::size_t>(atom) + 3 * storage.pitch] = 2.0;
     }
     storage.positions = copy_to_device(positions, "copy soa positions");
+    if (spin_model) {
+      storage.spins = copy_to_device(spins, "copy soa spins");
+    }
 
     storage.force_atom_stride = 1;
     storage.force_component_stride = storage.pitch;
+    storage.mforce_atom_stride = 1;
+    storage.mforce_component_stride = storage.pitch;
     storage.virial_atom_stride = 1;
     storage.virial_component_stride = storage.pitch;
     check_cuda(cudaMalloc(
                    reinterpret_cast<void**>(&storage.forces),
                    3 * static_cast<std::size_t>(storage.pitch) * sizeof(double)),
                "allocate soa forces");
+    if (spin_model) {
+      check_cuda(cudaMalloc(
+                     reinterpret_cast<void**>(&storage.mforces),
+                     3 * static_cast<std::size_t>(storage.pitch) * sizeof(double)),
+                 "allocate soa mforces");
+    }
     check_cuda(cudaMalloc(
                    reinterpret_cast<void**>(&storage.virials),
                    9 * static_cast<std::size_t>(storage.pitch) * sizeof(double)),
@@ -524,16 +692,36 @@ LayoutStorage make_layout(
 
     storage.position_atom_stride = 3;
     storage.position_component_stride = 1;
+    storage.spin_atom_stride = 4;
+    storage.spin_component_stride = 1;
     storage.positions = copy_to_device(system.positions_aos3, "copy aos positions");
+    if (spin_model) {
+      std::vector<double> spins(4 * static_cast<std::size_t>(system.atom_count), 0.0);
+      for (int atom = 0; atom < system.atom_count; ++atom) {
+        spins[4 * static_cast<std::size_t>(atom) + 0] = 0.5;
+        spins[4 * static_cast<std::size_t>(atom) + 1] = 0.1;
+        spins[4 * static_cast<std::size_t>(atom) + 2] = 0.0;
+        spins[4 * static_cast<std::size_t>(atom) + 3] = 2.0;
+      }
+      storage.spins = copy_to_device(spins, "copy aos spins");
+    }
 
     storage.force_atom_stride = 3;
     storage.force_component_stride = 1;
+    storage.mforce_atom_stride = 3;
+    storage.mforce_component_stride = 1;
     storage.virial_atom_stride = 9;
     storage.virial_component_stride = 1;
     check_cuda(cudaMalloc(
                    reinterpret_cast<void**>(&storage.forces),
                    3 * static_cast<std::size_t>(system.atom_count) * sizeof(double)),
                "allocate aos forces");
+    if (spin_model) {
+      check_cuda(cudaMalloc(
+                     reinterpret_cast<void**>(&storage.mforces),
+                     3 * static_cast<std::size_t>(system.atom_count) * sizeof(double)),
+                 "allocate aos mforces");
+    }
     check_cuda(cudaMalloc(
                    reinterpret_cast<void**>(&storage.virials),
                    9 * static_cast<std::size_t>(system.atom_count) * sizeof(double)),
@@ -667,6 +855,9 @@ NepaLammpsDeviceNeighborInput make_device_input(const LayoutStorage& storage) {
   input.positions = storage.positions;
   input.position_atom_stride = storage.position_atom_stride;
   input.position_component_stride = storage.position_component_stride;
+  input.spins = storage.spins;
+  input.spin_atom_stride = storage.spin_atom_stride;
+  input.spin_component_stride = storage.spin_component_stride;
   return input;
 }
 
@@ -677,10 +868,12 @@ void free_layout(LayoutStorage& storage) {
   cudaFree(storage.types);
   cudaFree(storage.type_map);
   cudaFree(storage.positions);
+  cudaFree(storage.spins);
   cudaFree(storage.total_potential);
   cudaFree(storage.total_virial6);
   cudaFree(storage.potential_per_atom);
   cudaFree(storage.forces);
+  cudaFree(storage.mforces);
   cudaFree(storage.virials);
 }
 
@@ -698,6 +891,9 @@ void run_once(
   result.forces = storage.forces;
   result.force_atom_stride = storage.force_atom_stride;
   result.force_component_stride = storage.force_component_stride;
+  result.mforces = storage.mforces;
+  result.mforce_atom_stride = storage.mforce_atom_stride;
+  result.mforce_component_stride = storage.mforce_component_stride;
   result.virials_per_atom9 = options.write_per_atom ? storage.virials : nullptr;
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
@@ -705,9 +901,12 @@ void run_once(
   const NepaStatus status =
       nepa_find_force_lammps_device_neighbors(model, &input, &result);
   if (status != NEPA_STATUS_OK) {
+    const char* detail = nepa_last_error_message();
+    const std::string suffix =
+        detail != nullptr && detail[0] != '\0' ? std::string(": ") + detail : "";
     throw std::runtime_error(
         std::string("nepa_find_force_lammps_device_neighbors failed: ") +
-        std::to_string(status));
+        std::to_string(status) + suffix);
   }
 }
 
@@ -906,6 +1105,9 @@ void run_reused_workspace_once(
   result.forces = storage.forces;
   result.force_atom_stride = storage.force_atom_stride;
   result.force_component_stride = storage.force_component_stride;
+  result.mforces = storage.mforces;
+  result.mforce_atom_stride = storage.mforce_atom_stride;
+  result.mforce_component_stride = storage.mforce_component_stride;
   result.virials_per_atom9 = options.write_per_atom ? storage.virials : nullptr;
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
@@ -1018,6 +1220,9 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
   result.forces = storage.forces;
   result.force_atom_stride = storage.force_atom_stride;
   result.force_component_stride = storage.force_component_stride;
+  result.mforces = storage.mforces;
+  result.mforce_atom_stride = storage.mforce_atom_stride;
+  result.mforce_component_stride = storage.mforce_component_stride;
   result.virials_per_atom9 = options.write_per_atom ? storage.virials : nullptr;
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
@@ -1132,7 +1337,11 @@ ReusedWorkspaceTiming time_reused_workspace_layout(
     const LayoutStorage& storage,
     const Options& options) {
   NepaLammpsDeviceNeighborInput input = make_device_input(storage);
-  const nep_adapters::cuda_backend::ModelProtocol external_protocol = protocol;
+  nep_adapters::cuda_backend::ModelProtocol external_protocol = protocol;
+  external_protocol.neighbor_capacity_radial =
+      std::min(external_protocol.neighbor_capacity_radial, storage.max_neighbors);
+  external_protocol.neighbor_capacity_angular =
+      std::min(external_protocol.neighbor_capacity_angular, storage.max_neighbors);
   nep_adapters::cuda_backend::DeviceWorkspace workspace(
       nep_adapters::cuda_backend::make_external_neighbor_workspace_plan(
           external_protocol,
@@ -1282,8 +1491,9 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  const std::string model_path =
-      options.model_path.empty() ? write_radial_model(options) : options.model_path;
+  const std::string model_path = options.strip_spin_model
+      ? write_struct_model_from_spin(options.model_path)
+      : (options.model_path.empty() ? write_radial_model(options) : options.model_path);
   nep_adapters::cuda_backend::HostModelParameters host;
   try {
     host = nep_adapters::cuda_backend::load_host_model_parameters(model_path);
@@ -1433,7 +1643,11 @@ int main(int argc, char** argv) {
     };
     if (options.layout != "both") {
       LayoutStorage layout =
-          make_layout(system, options.layout == "nolegacy", options.use_type_map);
+          make_layout(
+              system,
+              options.layout == "nolegacy",
+              options.use_type_map,
+              host.protocol.spin_mode != 0);
       if (options.mode == "all" || options.mode == "api") {
         const double ms = time_layout(model, layout, options);
         std::cout << options.layout << "_ms=" << ms << '\n'
@@ -1461,8 +1675,10 @@ int main(int argc, char** argv) {
       }
       free_layout(layout);
     } else {
-    LayoutStorage legacy = make_layout(system, false, options.use_type_map);
-    LayoutStorage nolegacy = make_layout(system, true, options.use_type_map);
+    LayoutStorage legacy =
+        make_layout(system, false, options.use_type_map, host.protocol.spin_mode != 0);
+    LayoutStorage nolegacy =
+        make_layout(system, true, options.use_type_map, host.protocol.spin_mode != 0);
     if (options.mode == "all" || options.mode == "api") {
       const double legacy_ms = time_layout(model, legacy, options);
       const double nolegacy_ms = time_layout(model, nolegacy, options);

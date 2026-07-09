@@ -21,8 +21,10 @@ struct AnnTypeBlock {
 struct DescriptorCoefficientLayout {
   std::size_t radial_offset = 0;
   std::size_t angular_offset = 0;
+  std::size_t spin_offset = 0;
   std::size_t radial_count = 0;
   std::size_t angular_count = 0;
+  std::size_t spin_count = 0;
 };
 
 struct HostModelParameters {
@@ -32,6 +34,7 @@ struct HostModelParameters {
   std::vector<float> descriptor_coefficients;
   std::vector<float> descriptor_coefficients_type_pair_major;
   std::vector<float> q_scaler;
+  std::vector<float> spin_baseline;
   std::vector<int> atomic_numbers;
   std::vector<float> flexible_zbl_parameters;
   std::vector<AnnTypeBlock> ann_blocks;

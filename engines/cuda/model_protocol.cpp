@@ -86,16 +86,14 @@ bool flag_from_token(const std::string& token) {
 }
 
 void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
-  if (tag.find("_spin") != std::string::npos) {
-    throw std::runtime_error("CUDA engine skeleton only accepts non-spin NEP models");
-  }
   if (tag.find("_dipole") != std::string::npos ||
       tag.find("_polarizability") != std::string::npos ||
       tag.find("_temperature") != std::string::npos) {
     throw std::runtime_error("CUDA engine skeleton only accepts ordinary potential models");
   }
 
-  if (tag == "nep4" || tag == "nep4_zbl") {
+  if (tag == "nep4" || tag == "nep4_zbl" ||
+      tag == "nep4_spin" || tag == "nep4_spin1") {
     protocol.version = 4;
   } else if (tag == "nep4_charge1" || tag == "nep4_zbl_charge1") {
     protocol.version = 4;
@@ -112,6 +110,29 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
     throw std::runtime_error("CUDA engine skeleton only accepts ordinary NEP4/NEP5 models");
   }
   protocol.has_zbl = tag.find("_zbl") != std::string::npos;
+  protocol.spin_mode = tag.find("_spin") != std::string::npos ? 1 : 0;
+}
+
+int spin_descriptor_dim(int compress, int l_max, bool chiral) {
+  int dim = 2 + 4 * compress;
+  if (l_max >= 0) {
+    dim += compress;
+  }
+  if (l_max >= 1) {
+    dim += 3 * compress;
+  }
+  for (int ell = 2; ell <= l_max; ++ell) {
+    dim += compress;
+  }
+  dim += compress;
+  dim += compress;
+  if (l_max >= 1) {
+    dim += compress;
+  }
+  if (chiral) {
+    dim += std::min(2, compress) + 2 * compress;
+  }
+  return dim;
 }
 
 void parse_zbl(
@@ -227,10 +248,128 @@ void parse_ann(
   }
 }
 
+void parse_spin_header_line(
+    const std::vector<std::string>& tokens,
+    ModelProtocol& protocol) {
+  if (tokens.empty()) {
+    return;
+  }
+  if (tokens[0] == "spin_baseline") {
+    if (tokens.size() != static_cast<std::size_t>(1 + protocol.num_types)) {
+      throw std::runtime_error("spin_baseline must have one value per type");
+    }
+    protocol.spin_baseline.resize(static_cast<std::size_t>(protocol.num_types));
+    for (int type = 0; type < protocol.num_types; ++type) {
+      protocol.spin_baseline[static_cast<std::size_t>(type)] =
+          parse_float_token(tokens[static_cast<std::size_t>(1 + type)]);
+    }
+  } else if (tokens[0] == "spin_chiral") {
+    protocol.spin_chiral = parse_int(tokens[1]);
+    if (protocol.spin_chiral != 0 && protocol.spin_chiral != 1) {
+      throw std::runtime_error("spin_chiral must be 0 or 1");
+    }
+  } else if (tokens[0] == "spin_compress") {
+    protocol.spin_compress = parse_int(tokens[1]);
+  } else if (tokens[0] == "spin_basis_size") {
+    protocol.spin_basis_size = parse_int(tokens[1]);
+  } else if (tokens[0] == "spin_l_max") {
+    protocol.spin_l_max = parse_int(tokens[1]);
+  } else if (tokens[0] == "spin_cutoff") {
+    protocol.spin_cutoff_radial = parse_double(tokens[1]);
+  } else if (tokens[0] == "spin_dof_type" || tokens[0] == "spin_type") {
+    protocol.spin_dof_type_active.assign(
+        static_cast<std::size_t>(protocol.num_types), 0);
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+      const auto found =
+          std::find(protocol.elements.begin(), protocol.elements.end(), tokens[i]);
+      if (found == protocol.elements.end()) {
+        throw std::runtime_error("unknown spin_dof_type in nep.txt");
+      }
+      protocol.spin_dof_type_active[
+          static_cast<std::size_t>(found - protocol.elements.begin())] = 1;
+    }
+  } else if (tokens[0] == "spin_env_type") {
+    protocol.spin_env_type_active.assign(
+        static_cast<std::size_t>(protocol.num_types), 0);
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+      const auto found =
+          std::find(protocol.elements.begin(), protocol.elements.end(), tokens[i]);
+      if (found == protocol.elements.end()) {
+        throw std::runtime_error("unknown spin_env_type in nep.txt");
+      }
+      protocol.spin_env_type_active[
+          static_cast<std::size_t>(found - protocol.elements.begin())] = 1;
+    }
+  } else if (tokens[0] == "spin_scaler" || tokens[0] == "spin_n_max") {
+    return;
+  } else {
+    throw std::runtime_error("unknown spin header line");
+  }
+}
+
+std::vector<std::string> parse_spin_block(
+    std::ifstream& input,
+    ModelProtocol& protocol,
+    std::vector<std::string> tokens) {
+  if (!protocol.spin_mode) {
+    return tokens;
+  }
+  if (tokens.empty() || tokens[0] != "spin_mode") {
+    throw std::runtime_error("spin model must contain spin_mode line");
+  }
+  protocol.spin_mode = parse_int(tokens[1]);
+  if (protocol.spin_mode != 1) {
+    throw std::runtime_error("only spin_mode 1 is supported");
+  }
+  if (tokens.size() >= 3) {
+    const int spin_header_lines = parse_int(tokens[2]);
+    for (int line = 0; line < spin_header_lines; ++line) {
+      parse_spin_header_line(next_tokens(input), protocol);
+    }
+    return next_tokens(input);
+  }
+  tokens = next_tokens(input);
+  while (!tokens.empty() && tokens[0].rfind("spin_", 0) == 0) {
+    parse_spin_header_line(tokens, protocol);
+    tokens = next_tokens(input);
+  }
+  return tokens;
+}
+
 void finalize_counts(ModelProtocol& protocol) {
-  protocol.descriptor_dim =
+  protocol.struct_descriptor_dim =
       protocol.n_max_radial + 1 +
       (protocol.n_max_angular + 1) * protocol.body_channels.channel_count();
+  if (protocol.spin_mode) {
+    if (protocol.spin_compress <= 0 || protocol.spin_l_max < 0 ||
+        protocol.spin_l_max > 4) {
+      throw std::runtime_error("invalid spin settings");
+    }
+    if (protocol.spin_basis_size + 1 < protocol.spin_compress) {
+      throw std::runtime_error("spin_basis_size must cover spin_compress");
+    }
+    if (protocol.spin_cutoff_radial <= 0.0) {
+      protocol.spin_cutoff_radial = protocol.cutoff_radial;
+    }
+    protocol.cutoff_radial = std::max(protocol.cutoff_radial, protocol.spin_cutoff_radial);
+    protocol.cutoff_max = std::max(protocol.cutoff_max, protocol.spin_cutoff_radial);
+    if (protocol.spin_dof_type_active.empty()) {
+      protocol.spin_dof_type_active.assign(
+          static_cast<std::size_t>(protocol.num_types), 1);
+    }
+    if (protocol.spin_env_type_active.empty()) {
+      protocol.spin_env_type_active = protocol.spin_dof_type_active;
+    }
+    if (protocol.spin_baseline.empty()) {
+      protocol.spin_baseline.assign(static_cast<std::size_t>(protocol.num_types), 0.0f);
+    }
+    protocol.spin_descriptor_dim = spin_descriptor_dim(
+        protocol.spin_compress,
+        protocol.spin_l_max,
+        protocol.spin_chiral != 0);
+  }
+  protocol.descriptor_dim =
+      protocol.struct_descriptor_dim + protocol.spin_descriptor_dim;
 
   const std::size_t dim = static_cast<std::size_t>(protocol.descriptor_dim);
   const std::size_t hidden = static_cast<std::size_t>(protocol.hidden_neurons);
@@ -245,12 +384,20 @@ void finalize_counts(ModelProtocol& protocol) {
   }
 
   const std::size_t type_pairs = types * types;
-  protocol.descriptor_parameter_count =
+  protocol.ordinary_descriptor_parameter_count =
       type_pairs *
       ((static_cast<std::size_t>(protocol.n_max_radial) + 1) *
            (static_cast<std::size_t>(protocol.basis_size_radial) + 1) +
        (static_cast<std::size_t>(protocol.n_max_angular) + 1) *
            (static_cast<std::size_t>(protocol.basis_size_angular) + 1));
+  if (protocol.spin_mode) {
+    protocol.spin_descriptor_parameter_count =
+        type_pairs * static_cast<std::size_t>(protocol.spin_compress) *
+        (static_cast<std::size_t>(protocol.spin_basis_size) + 1);
+  }
+  protocol.descriptor_parameter_count =
+      protocol.ordinary_descriptor_parameter_count +
+      protocol.spin_descriptor_parameter_count;
   protocol.model_parameter_count =
       protocol.ann_parameter_count + protocol.descriptor_parameter_count;
   protocol.q_scaler_count = dim;
@@ -292,6 +439,7 @@ ModelProtocol parse_model_header(std::ifstream& input) {
   }
 
   tokens = next_tokens(input);
+  tokens = parse_spin_block(input, protocol, tokens);
   if (protocol.has_zbl) {
     parse_zbl(tokens, protocol);
     tokens = next_tokens(input);

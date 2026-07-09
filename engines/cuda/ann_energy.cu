@@ -1,5 +1,6 @@
 #include "ann_energy.hpp"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -15,10 +16,25 @@ void check_cuda(cudaError_t status, const char* message) {
   }
 }
 
+void check_cublas(cublasStatus_t status, const char* message) {
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw std::runtime_error(
+        std::string(message) + ": cublas status " + std::to_string(status));
+  }
+}
+
 void require(bool condition, const char* message) {
   if (!condition) {
     throw std::runtime_error(message);
   }
+}
+
+cublasHandle_t cublas_handle() {
+  static cublasHandle_t handle = nullptr;
+  if (handle == nullptr) {
+    check_cublas(cublasCreate(&handle), "create cublas handle");
+  }
+  return handle;
 }
 
 __global__ void evaluate_ann_energy(
@@ -32,6 +48,7 @@ __global__ void evaluate_ann_energy(
     const float* __restrict__ descriptors,
     const float* __restrict__ q_scaler,
     const float* __restrict__ ann_type_major,
+    const float* __restrict__ spin_baseline,
     double* __restrict__ potential,
     float* __restrict__ fp) {
   (void)q_scaler;
@@ -74,7 +91,114 @@ __global__ void evaluate_ann_energy(
     }
   }
   const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-  potential[atom] = static_cast<double>(energy - type_bias - b1[0]);
+  const float baseline = spin_baseline != nullptr ? spin_baseline[type] : 0.0f;
+  potential[atom] = static_cast<double>(energy - type_bias - b1[0] + baseline);
+}
+
+__global__ void finish_single_type_ann_gemm(
+    int atom_count,
+    int version,
+    int descriptor_dim,
+    int hidden_neurons,
+    const float* __restrict__ ann_type_major,
+    const float* __restrict__ spin_baseline,
+    float* __restrict__ hidden_values,
+    double* __restrict__ potential,
+    float* __restrict__ hidden_delta) {
+  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+
+  const int w0_count = hidden_neurons * descriptor_dim;
+  const int type_extra_bias_count = version == 5 ? 1 : 0;
+  const int type_block_size =
+      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
+  const float* b0 = ann_type_major + w0_count;
+  const float* w1 = b0 + hidden_neurons;
+  const float* b1 = ann_type_major + type_block_size;
+
+  float energy = 0.0f;
+  for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
+    const int offset = atom + atom_count * neuron;
+    const float x1 = tanhf(hidden_values[offset] - b0[neuron]);
+    const float tanh_derivative = 1.0f - x1 * x1;
+    energy += w1[neuron] * x1;
+    hidden_delta[offset] = w1[neuron] * tanh_derivative;
+  }
+  const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
+  const float baseline = spin_baseline != nullptr ? spin_baseline[0] : 0.0f;
+  potential[atom] = static_cast<double>(energy - type_bias - b1[0] + baseline);
+}
+
+bool try_evaluate_single_type_ann_gemm(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& workspace_view) {
+  if (protocol.num_types != 1 || protocol.charge_mode != 0 ||
+      workspace_view.ann_hidden_values == nullptr ||
+      workspace_view.ann_hidden_delta == nullptr) {
+    return false;
+  }
+
+  const int descriptor_dim = protocol.descriptor_dim;
+  const int hidden_neurons = protocol.hidden_neurons;
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cublasHandle_t handle = cublas_handle();
+  check_cublas(
+      cublasSgemm(
+          handle,
+          CUBLAS_OP_N,
+          CUBLAS_OP_N,
+          atom_count,
+          hidden_neurons,
+          descriptor_dim,
+          &alpha,
+          workspace_view.descriptors,
+          static_cast<int>(workspace_view.atom_capacity),
+          model_view.ann_type_major_qscaled,
+          descriptor_dim,
+          &beta,
+          workspace_view.ann_hidden_values,
+          atom_count),
+      "ANN GEMM hidden");
+
+  const int threads = 128;
+  const int blocks = (atom_count + threads - 1) / threads;
+  if (blocks > 0) {
+    finish_single_type_ann_gemm<<<blocks, threads>>>(
+        atom_count,
+        protocol.version,
+        descriptor_dim,
+        hidden_neurons,
+        model_view.ann_type_major_qscaled,
+        model_view.spin_baseline,
+        workspace_view.ann_hidden_values,
+        workspace_view.potential,
+        workspace_view.ann_hidden_delta);
+  }
+  check_cuda(cudaGetLastError(), "finish ANN GEMM launch failed");
+
+  check_cublas(
+      cublasSgemm(
+          handle,
+          CUBLAS_OP_N,
+          CUBLAS_OP_T,
+          atom_count,
+          descriptor_dim,
+          hidden_neurons,
+          &alpha,
+          workspace_view.ann_hidden_delta,
+          atom_count,
+          model_view.ann_type_major_qscaled,
+          descriptor_dim,
+          &beta,
+          workspace_view.fp,
+          static_cast<int>(workspace_view.atom_capacity)),
+      "ANN GEMM fp");
+  return true;
 }
 
 __global__ void evaluate_qnep_ann(
@@ -208,6 +332,14 @@ void evaluate_ann_energy_on_device(
   require(workspace_view.potential != nullptr, "workspace missing potential output");
   require(workspace_view.fp != nullptr, "workspace missing descriptor derivative cache");
 
+  if (try_evaluate_single_type_ann_gemm(
+          protocol,
+          atom_count,
+          model_view,
+          workspace_view)) {
+    return;
+  }
+
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
@@ -222,6 +354,7 @@ void evaluate_ann_energy_on_device(
         workspace_view.descriptors,
         model_view.q_scaler,
         model_view.ann_type_major_qscaled,
+        model_view.spin_baseline,
         workspace_view.potential,
         workspace_view.fp);
   }

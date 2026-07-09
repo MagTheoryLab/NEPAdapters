@@ -22,12 +22,19 @@ struct BodyChannelConfig {
 struct ModelProtocol {
   int version = 0;
   int charge_mode = 0;
+  int spin_mode = 0;
   int num_types = 0;
   int n_max_radial = 0;
   int n_max_angular = 0;
   int basis_size_radial = 0;
   int basis_size_angular = 0;
   int descriptor_dim = 0;
+  int struct_descriptor_dim = 0;
+  int spin_descriptor_dim = 0;
+  int spin_compress = 0;
+  int spin_basis_size = 0;
+  int spin_l_max = 0;
+  int spin_chiral = 0;
   int hidden_neurons = 0;
   int max_neighbors_radial = 0;
   int max_neighbors_angular = 0;
@@ -40,12 +47,18 @@ struct ModelProtocol {
   double cutoff_radial = 0.0;
   double cutoff_angular = 0.0;
   double cutoff_max = 0.0;
+  double spin_cutoff_radial = 0.0;
   std::size_t ann_parameter_count = 0;
   std::size_t descriptor_parameter_count = 0;
+  std::size_t ordinary_descriptor_parameter_count = 0;
+  std::size_t spin_descriptor_parameter_count = 0;
   std::size_t model_parameter_count = 0;
   std::size_t q_scaler_count = 0;
   std::vector<std::string> elements;
   std::vector<int> atomic_numbers;
+  std::vector<float> spin_baseline;
+  std::vector<int> spin_dof_type_active;
+  std::vector<int> spin_env_type_active;
   BodyChannelConfig body_channels;
 };
 

@@ -21,8 +21,10 @@ struct DeviceWorkspaceView {
 
   int* types = nullptr;
   double* positions_soa3 = nullptr;
+  double* spins_soa3 = nullptr;
   double* potential = nullptr;
   double* force_soa3 = nullptr;
+  double* mforce_soa3 = nullptr;
   double* virial_soa9 = nullptr;
   double* charge = nullptr;
   double* bec_soa9 = nullptr;
@@ -36,6 +38,7 @@ struct DeviceWorkspaceView {
   double* box_inverse_row_major9 = nullptr;
   int* pbc_flags3 = nullptr;
   double* output_forces_aos3 = nullptr;
+  double* output_mforces_aos3 = nullptr;
   double* output_virials_per_atom_row_major9 = nullptr;
   double* structure_energy = nullptr;
   double* structure_virial_row_major9 = nullptr;
@@ -58,6 +61,8 @@ struct DeviceWorkspaceView {
 
   float* parameters_and_q_scaler = nullptr;
   float* fp = nullptr;
+  float* ann_hidden_values = nullptr;
+  float* ann_hidden_delta = nullptr;
   float* charge_derivative = nullptr;
   float* descriptors = nullptr;
   float* sum_fxyz = nullptr;
@@ -70,6 +75,28 @@ struct DeviceWorkspaceView {
   float* f12x = nullptr;
   float* f12y = nullptr;
   float* f12z = nullptr;
+  float* spin_density_rho0 = nullptr;
+  float* spin_density_raw1 = nullptr;
+  float* spin_density_l1_rdot = nullptr;
+  float* spin_density_l1_cross = nullptr;
+  float* spin_density_l1_stf = nullptr;
+  float* spin_density_angular2 = nullptr;
+  float* spin_density_angular3 = nullptr;
+  float* spin_density_angular4 = nullptr;
+  float* spin_density_geom = nullptr;
+  float* spin_density_rho0_dot = nullptr;
+  float* spin_density_raw1_dot = nullptr;
+  float* spin_edge_dx = nullptr;
+  float* spin_edge_dy = nullptr;
+  float* spin_edge_dz = nullptr;
+  float* spin_edge_dist = nullptr;
+  float* spin_edge_weights = nullptr;
+  float* spin_edge_weight_derivatives = nullptr;
+  float* spin_chiral_polar = nullptr;
+  float* spin_chiral_octupoles_raw = nullptr;
+  float* spin_chiral_hexadecapoles_raw = nullptr;
+  float* spin_chiral_chirals = nullptr;
+  float* spin_chiral_pseudodevs = nullptr;
 };
 
 class DeviceWorkspace {
@@ -103,6 +130,7 @@ class DeviceWorkspace {
     ScalarType type = ScalarType::float32;
     std::size_t element_count = 0;
     void* device = nullptr;
+    bool async_allocated = false;
   };
 
   Allocation* find_allocation(const std::string& name);

@@ -167,6 +167,26 @@ __global__ void stage_lammps_device_positions(
       device_positions[atom * position_atom_stride + 2 * position_component_stride];
 }
 
+__global__ void stage_lammps_device_spins(
+    int atom_count,
+    int atom_stride,
+    const double* device_spins,
+    int spin_atom_stride,
+    int spin_component_stride,
+    double* spins_soa3) {
+  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+  const double scale =
+      device_spins[atom * spin_atom_stride + 3 * spin_component_stride];
+  spins_soa3[atom] = device_spins[atom * spin_atom_stride] * scale;
+  spins_soa3[atom_stride + atom] =
+      device_spins[atom * spin_atom_stride + spin_component_stride] * scale;
+  spins_soa3[2 * atom_stride + atom] =
+      device_spins[atom * spin_atom_stride + 2 * spin_component_stride] * scale;
+}
+
 __global__ void stage_lammps_device_types(
     int atom_count,
     const int* lammps_types,
@@ -453,6 +473,9 @@ void validate_batch_for_device_staging(
   require(batch.atom_offsets != nullptr, "missing atom offsets");
   require(batch.types != nullptr, "missing atom types");
   require(batch.positions_aos3 != nullptr, "missing atom positions");
+  if (view.spins_soa3 != nullptr) {
+    require(batch.spins_aos3 != nullptr, "spin model requires atom spins");
+  }
   require(batch.boxes_row_major9 != nullptr, "missing boxes");
   require(view.types != nullptr, "workspace missing types");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
@@ -612,6 +635,14 @@ void stage_batch_on_device(
       batch.positions_aos3,
       batch.positions_aos3 + static_cast<std::size_t>(batch.total_atoms) * 3);
   double* positions_aos3_device = upload_temp(positions_aos3, "upload positions_aos3");
+  std::vector<double> spins_aos3;
+  double* spins_aos3_device = nullptr;
+  if (view.spins_soa3 != nullptr) {
+    spins_aos3.assign(
+        batch.spins_aos3,
+        batch.spins_aos3 + static_cast<std::size_t>(batch.total_atoms) * 3);
+    spins_aos3_device = upload_temp(spins_aos3, "upload spins_aos3");
+  }
   int* atom_counts_device = upload_temp(atom_counts, "upload atom_counts");
   int* atom_offsets_device = upload_temp(atom_offsets, "upload atom_offsets");
 
@@ -623,6 +654,14 @@ void stage_batch_on_device(
         positions_aos3_device,
         view.positions_soa3);
     check_cuda(cudaGetLastError(), "stage positions AoS to SoA");
+    if (view.spins_soa3 != nullptr) {
+      stage_positions_aos_to_soa<<<atom_blocks, kBlockSize>>>(
+          batch.total_atoms,
+          static_cast<int>(view.atom_capacity),
+          spins_aos3_device,
+          view.spins_soa3);
+      check_cuda(cudaGetLastError(), "stage spins AoS to SoA");
+    }
 
     stage_atom_to_structure<<<batch.num_structures, kBlockSize>>>(
         batch.num_structures,
@@ -633,12 +672,14 @@ void stage_batch_on_device(
     check_cuda(cudaDeviceSynchronize(), "synchronize batch staging");
   } catch (...) {
     free_temp(positions_aos3_device);
+    free_temp(spins_aos3_device);
     free_temp(atom_counts_device);
     free_temp(atom_offsets_device);
     throw;
   }
 
   free_temp(positions_aos3_device);
+  free_temp(spins_aos3_device);
   free_temp(atom_counts_device);
   free_temp(atom_offsets_device);
 }
@@ -655,6 +696,9 @@ void stage_lammps_external_neighbors_on_device(
   require(input.types != nullptr, "missing types");
   require(input.type_map != nullptr, "missing type_map");
   require(input.positions != nullptr, "missing positions");
+  if (protocol.spin_mode != 0) {
+    require(input.spins != nullptr, "spin model requires LAMMPS spins");
+  }
 
   const DeviceWorkspaceView view = workspace.view();
   const int atom_capacity = lammps_atom_capacity(input);
@@ -666,6 +710,7 @@ void stage_lammps_external_neighbors_on_device(
   int max_lammps_type = 0;
   std::vector<int> lammps_types(static_cast<std::size_t>(atom_capacity), 0);
   std::vector<double> positions_aos3(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
+  std::vector<double> spins_aos3(static_cast<std::size_t>(atom_capacity) * 3, 0.0);
   for (int atom = 0; atom < atom_capacity; ++atom) {
     require(input.positions[atom] != nullptr, "missing LAMMPS position row");
     const int lammps_type = input.types[atom];
@@ -675,6 +720,16 @@ void stage_lammps_external_neighbors_on_device(
     positions_aos3[3 * static_cast<std::size_t>(atom)] = input.positions[atom][0];
     positions_aos3[3 * static_cast<std::size_t>(atom) + 1] = input.positions[atom][1];
     positions_aos3[3 * static_cast<std::size_t>(atom) + 2] = input.positions[atom][2];
+    if (protocol.spin_mode != 0) {
+      require(input.spins[atom] != nullptr, "missing LAMMPS spin row");
+      const double spin_scale = input.spins[atom][3];
+      spins_aos3[3 * static_cast<std::size_t>(atom)] =
+          input.spins[atom][0] * spin_scale;
+      spins_aos3[3 * static_cast<std::size_t>(atom) + 1] =
+          input.spins[atom][1] * spin_scale;
+      spins_aos3[3 * static_cast<std::size_t>(atom) + 2] =
+          input.spins[atom][2] * spin_scale;
+    }
   }
 
   std::vector<int> type_map(
@@ -735,6 +790,9 @@ void stage_lammps_external_neighbors_on_device(
   int* lammps_types_device = upload_temp(lammps_types, "upload lammps types");
   int* type_map_device = upload_temp(type_map, "upload type map");
   double* positions_aos3_device = upload_temp(positions_aos3, "upload lammps positions");
+  double* spins_aos3_device = protocol.spin_mode != 0
+      ? upload_temp(spins_aos3, "upload lammps spins")
+      : nullptr;
   int* active_device = upload_temp(active_atom_indices, "upload active atoms");
   int* counts_device = upload_temp(row_counts, "upload neighbor counts");
   int* radial_device = upload_temp(radial_neighbors, "upload radial neighbors");
@@ -755,6 +813,14 @@ void stage_lammps_external_neighbors_on_device(
         positions_aos3_device,
         view.positions_soa3);
     check_cuda(cudaGetLastError(), "stage LAMMPS positions");
+    if (protocol.spin_mode != 0) {
+      stage_positions_aos_to_soa<<<atom_blocks, kBlockSize>>>(
+          atom_capacity,
+          static_cast<int>(view.atom_capacity),
+          spins_aos3_device,
+          view.spins_soa3);
+      check_cuda(cudaGetLastError(), "stage LAMMPS spins");
+    }
 
     const int active_blocks = (input.inum + kBlockSize - 1) / kBlockSize;
     stage_lammps_neighbors_slot_major<<<active_blocks, kBlockSize>>>(
@@ -783,6 +849,7 @@ void stage_lammps_external_neighbors_on_device(
     free_temp(lammps_types_device);
     free_temp(type_map_device);
     free_temp(positions_aos3_device);
+    free_temp(spins_aos3_device);
     free_temp(active_device);
     free_temp(counts_device);
     free_temp(radial_device);
@@ -793,6 +860,7 @@ void stage_lammps_external_neighbors_on_device(
   free_temp(lammps_types_device);
   free_temp(type_map_device);
   free_temp(positions_aos3_device);
+  free_temp(spins_aos3_device);
   free_temp(active_device);
   free_temp(counts_device);
   free_temp(radial_device);
@@ -816,6 +884,11 @@ LammpsDeviceNeighborCounts count_lammps_device_neighbors_on_device(
   require(input.positions != nullptr, "missing device positions");
   require(input.position_atom_stride > 0, "invalid position atom stride");
   require(input.position_component_stride > 0, "invalid position component stride");
+  if (protocol.spin_mode != 0) {
+    require(input.spins != nullptr, "spin model requires device spins");
+    require(input.spin_atom_stride > 0, "invalid spin atom stride");
+    require(input.spin_component_stride > 0, "invalid spin component stride");
+  }
   require(input.nlocal <= input.neighbor_rows,
           "device LAMMPS local atoms exceed neighbor rows");
   require(input.nlocal <= input.numneigh_length,
@@ -922,6 +995,9 @@ LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
           "device LAMMPS local atoms exceed numneigh length");
   require(view.types != nullptr, "workspace missing types");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
+  if (protocol.spin_mode != 0) {
+    require(view.spins_soa3 != nullptr, "workspace missing spins");
+  }
   require(view.nn_radial != nullptr, "workspace missing radial counts");
   require(view.neighbor_overflow != nullptr, "workspace missing neighbor overflow flag");
   const bool stage_angular = protocol.body_channels.channel_count() > 0;
@@ -974,6 +1050,16 @@ LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
                   view.atom_capacity
           ? input.positions
           : view.positions_soa3;
+  if (protocol.spin_mode != 0) {
+    stage_lammps_device_spins<<<atom_blocks, kBlockSize>>>(
+        input.nall,
+        static_cast<int>(view.atom_capacity),
+        input.spins,
+        input.spin_atom_stride,
+        input.spin_component_stride,
+        view.spins_soa3);
+    check_cuda(cudaGetLastError(), "stage device LAMMPS spins");
+  }
 
   const int active_blocks =
       (input.inum + kStagingWarpsPerBlock - 1) / kStagingWarpsPerBlock;

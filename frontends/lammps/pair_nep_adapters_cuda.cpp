@@ -288,6 +288,8 @@ void PairNEPAdaptersCUDA::coeff(int narg, char** arg) {
   }
   charge_model_ = (info.capabilities & NEPA_CAPABILITY_CHARGE) != 0;
 #ifdef LMP_KOKKOS
+  datamask_read = X_MASK | TYPE_MASK | (spin_model_ ? SP_MASK : EMPTY_MASK);
+  datamask_modify = F_MASK | (spin_model_ ? FM_MASK : EMPTY_MASK);
   d_type_map_ = Kokkos::View<int*, LMPDeviceType>();
   d_type_map_length_ = 0;
 #endif
@@ -369,6 +371,8 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
   auto x = atom_kk->k_x.template view<LMPDeviceType>();
   auto f = atom_kk->k_f.template view<LMPDeviceType>();
   auto type = atom_kk->k_type.template view<LMPDeviceType>();
+  auto sp = atom_kk->k_sp.template view<LMPDeviceType>();
+  auto fm = atom_kk->k_fm.template view<LMPDeviceType>();
 
   auto* k_list = static_cast<NeighListKokkos<LMPDeviceType>*>(list);
   auto neighbors = k_list->d_neighbors;
@@ -379,6 +383,10 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
       checked_strides2(f, error, label_);
   const std::array<int, 2> position_stride =
       checked_strides2(x, error, label_);
+  const std::array<int, 2> spin_stride =
+      spin_model_ ? checked_strides2(sp, error, label_) : std::array<int, 2>{0, 0};
+  const std::array<int, 2> mforce_stride =
+      spin_model_ ? checked_strides2(fm, error, label_) : std::array<int, 2>{0, 0};
   const std::array<int, 2> neighbor_stride =
       checked_strides2(neighbors, error, label_);
   if (neighbors.extent(1) >
@@ -416,6 +424,9 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
   input.positions = x.data();
   input.position_atom_stride = position_stride[0];
   input.position_component_stride = position_stride[1];
+  input.spins = spin_model_ ? sp.data() : nullptr;
+  input.spin_atom_stride = spin_stride[0];
+  input.spin_component_stride = spin_stride[1];
 
   NepaLammpsDeviceNeighborResult result{};
   result.total_potential = want_global_tally ? d_total_potential_.data() : nullptr;
@@ -424,6 +435,9 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
   result.forces = f.data();
   result.force_atom_stride = f_stride[0];
   result.force_component_stride = f_stride[1];
+  result.mforces = spin_model_ ? fm.data() : nullptr;
+  result.mforce_atom_stride = mforce_stride[0];
+  result.mforce_component_stride = mforce_stride[1];
   if (vflag_atom || cvflag_atom) {
     result.virials_per_atom9 = d_lammps_raw9_.data();
     result.virial_atom_stride = 9;

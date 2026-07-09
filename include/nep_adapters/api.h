@@ -139,6 +139,9 @@ typedef struct NepaLammpsDeviceNeighborInput {
   const double* positions;
   int position_atom_stride;
   int position_component_stride;
+  const double* spins;
+  int spin_atom_stride;
+  int spin_component_stride;
 } NepaLammpsDeviceNeighborInput;
 
 typedef struct NepaLammpsDeviceNeighborResult {
@@ -151,6 +154,9 @@ typedef struct NepaLammpsDeviceNeighborResult {
   double* forces;
   int force_atom_stride;
   int force_component_stride;
+  double* mforces;
+  int mforce_atom_stride;
+  int mforce_component_stride;
   /* Per-atom 9 components in NEP compute_for_lammps() order:
      xx, yy, zz, xy, xz, yz, yx, zx, zy. */
   double* virials_per_atom9;

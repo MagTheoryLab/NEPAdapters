@@ -51,7 +51,8 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
-    bool include_basis_cache = true);
+    bool include_basis_cache = true,
+    bool include_angular_vectors = true);
 
 WorkspacePlan make_model_workspace_plan(const ModelProtocol& protocol);
 

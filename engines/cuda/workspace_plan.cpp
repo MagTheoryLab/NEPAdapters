@@ -35,6 +35,121 @@ void add_common_atom_arrays(WorkspacePlan& plan) {
   add_array(plan, "virial_soa9", ScalarType::float64, plan.atom_capacity * 9);
 }
 
+void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
+  if (protocol.spin_mode == 0) {
+    return;
+  }
+  add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
+  add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
+  const std::size_t spin_compress =
+      static_cast<std::size_t>(protocol.spin_compress);
+  add_array(
+      plan,
+      "spin_density_rho0",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 3);
+  add_array(
+      plan,
+      "spin_density_raw1",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 9);
+  add_array(
+      plan,
+      "spin_density_l1_rdot",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress);
+  add_array(
+      plan,
+      "spin_density_l1_cross",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 3);
+  add_array(
+      plan,
+      "spin_density_l1_stf",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 9);
+  if (protocol.spin_l_max >= 2) {
+    add_array(
+        plan,
+        "spin_density_angular2",
+        ScalarType::float32,
+        plan.atom_capacity * spin_compress * 15);
+  }
+  if (protocol.spin_l_max >= 3) {
+    add_array(
+        plan,
+        "spin_density_angular3",
+        ScalarType::float32,
+        plan.atom_capacity * spin_compress * 21);
+  }
+  if (protocol.spin_l_max >= 4) {
+    add_array(
+        plan,
+        "spin_density_angular4",
+        ScalarType::float32,
+        plan.atom_capacity * spin_compress * 27);
+  }
+  add_array(
+      plan,
+      "spin_density_geom",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 9);
+  add_array(
+      plan,
+      "spin_density_rho0_dot",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 3);
+  add_array(
+      plan,
+      "spin_density_raw1_dot",
+      ScalarType::float32,
+      plan.atom_capacity * spin_compress * 9);
+  const std::size_t spin_edge_count = plan.atom_capacity *
+      static_cast<std::size_t>(protocol.neighbor_capacity_radial);
+  add_array(plan, "spin_edge_dx", ScalarType::float32, spin_edge_count);
+  add_array(plan, "spin_edge_dy", ScalarType::float32, spin_edge_count);
+  add_array(plan, "spin_edge_dz", ScalarType::float32, spin_edge_count);
+  add_array(plan, "spin_edge_dist", ScalarType::float32, spin_edge_count);
+  add_array(
+      plan,
+      "spin_edge_weights",
+      ScalarType::float32,
+      spin_edge_count * spin_compress);
+  add_array(
+      plan,
+      "spin_edge_weight_derivatives",
+      ScalarType::float32,
+      spin_edge_count * spin_compress);
+  if (protocol.spin_chiral != 0) {
+    const std::size_t chi_c = spin_compress < 2 ? spin_compress : 2;
+    add_array(
+        plan,
+        "spin_chiral_polar",
+        ScalarType::float32,
+        plan.atom_capacity * spin_compress * 3);
+    add_array(
+        plan,
+        "spin_chiral_octupoles_raw",
+        ScalarType::float32,
+        plan.atom_capacity * chi_c * 10);
+    add_array(
+        plan,
+        "spin_chiral_hexadecapoles_raw",
+        ScalarType::float32,
+        plan.atom_capacity * chi_c * 15);
+    add_array(
+        plan,
+        "spin_chiral_chirals",
+        ScalarType::float32,
+        plan.atom_capacity * chi_c);
+    add_array(
+        plan,
+        "spin_chiral_pseudodevs",
+        ScalarType::float32,
+        plan.atom_capacity * spin_compress * 9);
+  }
+}
+
 void add_slot_major_neighbor_arrays(
     WorkspacePlan& plan,
     const ModelProtocol& protocol) {
@@ -77,6 +192,13 @@ void add_execution_scratch(
       "fp",
       ScalarType::float32,
       plan.atom_capacity * static_cast<std::size_t>(protocol.descriptor_dim));
+  if (protocol.spin_mode != 0 && protocol.charge_mode == 0 &&
+      protocol.num_types == 1) {
+    const std::size_t hidden_count = plan.atom_capacity *
+        static_cast<std::size_t>(protocol.hidden_neurons);
+    add_array(plan, "ann_hidden_values", ScalarType::float32, hidden_count);
+    add_array(plan, "ann_hidden_delta", ScalarType::float32, hidden_count);
+  }
   if (protocol.charge_mode > 0) {
     add_array(plan, "charge", ScalarType::float64, plan.atom_capacity);
     add_array(plan, "bec_soa9", ScalarType::float64, plan.atom_capacity * 9);
@@ -200,6 +322,7 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
   plan.structure_capacity = structure_capacity;
 
   add_common_atom_arrays(plan);
+  add_spin_arrays(plan, protocol);
   add_array(plan, "atom_to_structure", ScalarType::int32, atom_capacity);
   add_array(plan, "structure_atom_counts", ScalarType::int32, structure_capacity);
   add_array(plan, "structure_atom_offsets", ScalarType::int32, structure_capacity);
@@ -207,6 +330,9 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
   add_array(plan, "box_inverse_row_major9", ScalarType::float64, structure_capacity * 9);
   add_array(plan, "pbc_flags3", ScalarType::int32, structure_capacity * 3);
   add_array(plan, "output_forces_aos3", ScalarType::float64, atom_capacity * 3);
+  if (protocol.spin_mode != 0) {
+    add_array(plan, "output_mforces_aos3", ScalarType::float64, atom_capacity * 3);
+  }
   add_array(
       plan,
       "output_virials_per_atom_row_major9",
@@ -231,7 +357,8 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
-    bool include_basis_cache) {
+    bool include_basis_cache,
+    bool include_angular_vectors) {
   if (atom_capacity == 0) {
     throw std::runtime_error("atom_capacity must be positive");
   }
@@ -246,6 +373,7 @@ WorkspacePlan make_external_neighbor_workspace_plan(
   plan.structure_capacity = 0;
 
   add_common_atom_arrays(plan);
+  add_spin_arrays(plan, protocol);
   add_array(plan, "active_atom_indices", ScalarType::int32, active_atom_capacity);
   add_slot_major_neighbor_arrays(plan, protocol);
   add_array(plan, "neighbor_overflow", ScalarType::int32, 3);
@@ -255,7 +383,11 @@ WorkspacePlan make_external_neighbor_workspace_plan(
       ScalarType::float64,
       7 * ((atom_capacity + kLammpsReductionThreads - 1) /
            kLammpsReductionThreads));
-  add_execution_scratch(plan, protocol, include_basis_cache, include_basis_cache);
+  add_execution_scratch(
+      plan,
+      protocol,
+      include_basis_cache,
+      include_angular_vectors);
 
   return plan;
 }
