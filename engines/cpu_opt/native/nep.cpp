@@ -85,6 +85,7 @@ struct NepPhaseTotals {
   double spin_contract = 0.0;
   double spin_chiral = 0.0;
   double spin_copy = 0.0;
+  double spin_ann = 0.0;
   double spin_gradient = 0.0;
   double spin_gradient_nonchiral = 0.0;
   double spin_gradient_chiral = 0.0;
@@ -109,7 +110,8 @@ struct NepPhaseTimerState {
       totals.setup + totals.neighbor + totals.cache + totals.table + totals.descriptor +
       totals.scratch + totals.radial + totals.angular + totals.reduce + totals.zbl +
       totals.spin_setup + totals.spin_edges + totals.spin_unpack + totals.spin_merge +
-      totals.spin_contract + totals.spin_chiral + totals.spin_copy + totals.spin_gradient;
+      totals.spin_contract + totals.spin_chiral + totals.spin_copy + totals.spin_ann +
+      totals.spin_gradient;
     std::cerr << "{\"phase_timer\":\"nep_cpu\","
               << "\"mode\":\"" << mode << "\","
               << "\"calls\":" << totals.calls << ','
@@ -137,6 +139,7 @@ struct NepPhaseTimerState {
               << "\"spin_contract\":" << totals.spin_contract << ','
               << "\"spin_chiral\":" << totals.spin_chiral << ','
               << "\"spin_copy\":" << totals.spin_copy << ','
+              << "\"spin_ann\":" << totals.spin_ann << ','
               << "\"spin_gradient\":" << totals.spin_gradient << ','
               << "\"spin_gradient_nonchiral\":" << totals.spin_gradient_nonchiral << ','
               << "\"spin_gradient_chiral\":" << totals.spin_gradient_chiral
@@ -5088,9 +5091,24 @@ struct SpinPhaseBreakdown {
   double contract = 0.0;
   double chiral = 0.0;
   double copy = 0.0;
+  double ann = 0.0;
   double gradient_nonchiral = 0.0;
   double gradient_chiral = 0.0;
 };
+
+void add_spin_phase_breakdown(SpinPhaseBreakdown& dst, const SpinPhaseBreakdown& src)
+{
+  dst.setup += src.setup;
+  dst.edges += src.edges;
+  dst.unpack += src.unpack;
+  dst.merge += src.merge;
+  dst.contract += src.contract;
+  dst.chiral += src.chiral;
+  dst.copy += src.copy;
+  dst.ann += src.ann;
+  dst.gradient_nonchiral += src.gradient_nonchiral;
+  dst.gradient_chiral += src.gradient_chiral;
+}
 
 void clear_spin_cache(SpinCache& cache)
 {
@@ -8082,7 +8100,6 @@ bool compute_spin_lammps_fused_center(
     return value;
   };
 
-  auto phase_mark = NepPhaseClock::now();
 #if defined(_OPENMP)
   const int num_threads = lammps_scratch->num_threads;
   const bool use_parallel = num_threads > 1 && inum > 256;
@@ -8100,6 +8117,13 @@ bool compute_spin_lammps_fused_center(
 #else
     const int tid = 0;
 #endif
+    SpinPhaseBreakdown thread_phase;
+    auto thread_phase_mark = NepPhaseClock::now();
+    auto add_thread_phase = [&](double SpinPhaseBreakdown::*slot) {
+      if (phase) {
+        thread_phase.*slot += nep_phase_elapsed(thread_phase_mark);
+      }
+    };
     SpinCache cache;
     cache.edge_offsets.resize(2);
     cache.rho0.resize(static_cast<std::size_t>(C) * 3);
@@ -8139,11 +8163,15 @@ bool compute_spin_lammps_fused_center(
       : nullptr;
     local_scratch.mforce_private =
       lammps_scratch->mforce_private + static_cast<std::size_t>(tid) * 3 * lammps_scratch->force_rows;
+    add_thread_phase(&SpinPhaseBreakdown::setup);
 
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
     for (int ii = 0; ii < inum; ++ii) {
+      if (phase) {
+        thread_phase_mark = NepPhaseClock::now();
+      }
       const int atom = ilist[ii];
       double* q_full = descriptor_aos + static_cast<std::size_t>(ii) * annmb.dim;
       double q_spin[MAX_DIM] = {0.0};
@@ -8180,6 +8208,7 @@ bool compute_spin_lammps_fused_center(
       cache.edges.clear();
       cache.edges.reserve(static_cast<std::size_t>(NN[atom]));
       cache.edge_offsets[0] = 0;
+      add_thread_phase(&SpinPhaseBreakdown::setup);
 
       const int edge_offset = radial_cache->offsets[ii];
       for (int n = 0; n < NN[atom]; ++n) {
@@ -8300,6 +8329,7 @@ bool compute_spin_lammps_fused_center(
         cache.edges.push_back(std::move(edge));
       }
       cache.edge_offsets[1] = static_cast<int>(cache.edges.size());
+      add_thread_phase(&SpinPhaseBreakdown::edges);
 
       if (paramb.spin_chiral) {
         for (int c = 0; c < chiC; ++c) {
@@ -8311,6 +8341,7 @@ bool compute_spin_lammps_fused_center(
             cache.hexadecapoles.data() + static_cast<std::size_t>(c) * 81);
         }
       }
+      add_thread_phase(&SpinPhaseBreakdown::unpack);
 
       int offset = 2 + 4 * C;
       auto contract = [&](const std::vector<double>& a, const std::vector<double>& b, const int width) {
@@ -8347,6 +8378,7 @@ bool compute_spin_lammps_fused_center(
       if (l_max >= 1) {
         contract(cache.raw1, cache.raw1_dot, 9);
       }
+      add_thread_phase(&SpinPhaseBreakdown::contract);
 
       if (paramb.spin_chiral) {
         const int chiral_offset0 = offset;
@@ -8429,10 +8461,12 @@ bool compute_spin_lammps_fused_center(
           }
         }
       }
+      add_thread_phase(&SpinPhaseBreakdown::chiral);
 
       for (int d = 0; d < paramb.spin_dim; ++d) {
         q_full[offset0 + d] = q_spin[d] * paramb.q_scaler[offset0 + d];
       }
+      add_thread_phase(&SpinPhaseBreakdown::copy);
 
       double F = 0.0;
       double Fp_local[MAX_DIM] = {0.0};
@@ -8450,14 +8484,19 @@ bool compute_spin_lammps_fused_center(
         Fp[static_cast<std::size_t>(atom) * annmb.dim + d] =
           Fp_local[d] * paramb.q_scaler[d];
       }
+      add_thread_phase(&SpinPhaseBreakdown::ann);
 
       add_spin_gradient_lammps_single_center_nonchiral<true>(
         paramb, annmb, atom_capacity, spin_types, spins_aos3, cache, Fp,
         &local_scratch, atom, &chiral_grad_weight, &chiral_grad_rhat);
+      add_thread_phase(&SpinPhaseBreakdown::gradient_nonchiral);
     }
-  }
-  if (phase) {
-    phase->gradient_nonchiral += nep_phase_elapsed(phase_mark);
+    if (phase) {
+#if defined(_OPENMP)
+#pragma omp critical(nep_spin_phase)
+#endif
+      add_spin_phase_breakdown(*phase, thread_phase);
+    }
   }
   return true;
 }
@@ -10516,6 +10555,7 @@ void NEP::compute_for_lammps(
     totals.spin_contract += spin_phase.contract;
     totals.spin_chiral += spin_phase.chiral;
     totals.spin_copy += spin_phase.copy;
+    totals.spin_ann += spin_phase.ann;
     totals.spin_gradient += spin_phase.gradient_nonchiral + spin_phase.gradient_chiral;
     totals.spin_gradient_nonchiral += spin_phase.gradient_nonchiral;
     totals.spin_gradient_chiral += spin_phase.gradient_chiral;
