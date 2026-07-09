@@ -342,7 +342,7 @@ def run_ncu(profile, plan, gpu, args, run_dir):
           small,
           run_dir,
           "density",
-          "accumulate_spin_density_forces_c4_l4_pull"),
+          "accumulate_spin_density_forces_c4_l4_(pull|block_f32)"),
   }
 
 

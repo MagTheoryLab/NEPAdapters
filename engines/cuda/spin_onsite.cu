@@ -3418,6 +3418,381 @@ __device__ void apply_edge_gradients_f32(
   }
 }
 
+__device__ int real_spherical_harmonics_spinf(
+    const float* rhat,
+    int ell,
+    float* out) {
+  const float x = rhat[0];
+  const float y = rhat[1];
+  const float z = rhat[2];
+  if (ell == 2) {
+    out[0] = sqrtf(static_cast<float>(15.0 / (4.0 * kPi))) * x * y;
+    out[1] = sqrtf(static_cast<float>(15.0 / (4.0 * kPi))) * y * z;
+    out[2] = sqrtf(static_cast<float>(5.0 / (16.0 * kPi))) *
+             (2.0f * z * z - x * x - y * y);
+    out[3] = sqrtf(static_cast<float>(15.0 / (4.0 * kPi))) * x * z;
+    out[4] = sqrtf(static_cast<float>(15.0 / (16.0 * kPi))) *
+             (x * x - y * y);
+    return 5;
+  }
+  if (ell == 3) {
+    const float rho2 = x * x + y * y;
+    out[0] = sqrtf(static_cast<float>(35.0 / (32.0 * kPi))) *
+             y * (3.0f * x * x - y * y);
+    out[1] = sqrtf(static_cast<float>(105.0 / (4.0 * kPi))) * x * y * z;
+    out[2] = sqrtf(static_cast<float>(21.0 / (32.0 * kPi))) *
+             y * (4.0f * z * z - rho2);
+    out[3] = sqrtf(static_cast<float>(7.0 / (16.0 * kPi))) *
+             z * (2.0f * z * z - 3.0f * rho2);
+    out[4] = sqrtf(static_cast<float>(21.0 / (32.0 * kPi))) *
+             x * (4.0f * z * z - rho2);
+    out[5] = sqrtf(static_cast<float>(105.0 / (16.0 * kPi))) *
+             z * (x * x - y * y);
+    out[6] = sqrtf(static_cast<float>(35.0 / (32.0 * kPi))) *
+             x * (x * x - 3.0f * y * y);
+    return 7;
+  }
+  const float x2 = x * x;
+  const float y2 = y * y;
+  const float z2 = z * z;
+  out[0] = 0.75f * sqrtf(static_cast<float>(35.0 / kPi)) *
+           x * y * (x2 - y2);
+  out[1] = 0.75f * sqrtf(static_cast<float>(35.0 / (2.0 * kPi))) *
+           y * z * (3.0f * x2 - y2);
+  out[2] = 0.75f * sqrtf(static_cast<float>(5.0 / kPi)) *
+           x * y * (7.0f * z2 - 1.0f);
+  out[3] = 0.75f * sqrtf(static_cast<float>(5.0 / (2.0 * kPi))) *
+           y * z * (7.0f * z2 - 3.0f);
+  out[4] = (3.0f / 16.0f) * sqrtf(static_cast<float>(1.0 / kPi)) *
+           (35.0f * z2 * z2 - 30.0f * z2 + 3.0f);
+  out[5] = 0.75f * sqrtf(static_cast<float>(5.0 / (2.0 * kPi))) *
+           x * z * (7.0f * z2 - 3.0f);
+  out[6] = 0.375f * sqrtf(static_cast<float>(5.0 / kPi)) *
+           (x2 - y2) * (7.0f * z2 - 1.0f);
+  out[7] = 0.75f * sqrtf(static_cast<float>(35.0 / (2.0 * kPi))) *
+           x * z * (x2 - 3.0f * y2);
+  out[8] = (3.0f / 16.0f) * sqrtf(static_cast<float>(35.0 / kPi)) *
+           (x2 * x2 - 6.0f * x2 * y2 + y2 * y2);
+  return 9;
+}
+
+__device__ void add_real_spherical_harmonics_gradientf(
+    const float* r,
+    int ell,
+    const float* grad_y,
+    float* grad_r) {
+  const float x = r[0];
+  const float y = r[1];
+  const float z = r[2];
+  if (ell == 2) {
+    const float a = sqrtf(static_cast<float>(15.0 / (4.0 * kPi)));
+    const float b = sqrtf(static_cast<float>(5.0 / (16.0 * kPi)));
+    const float c = sqrtf(static_cast<float>(15.0 / (16.0 * kPi)));
+    grad_r[0] += grad_y[0] * a * y - grad_y[2] * 2.0f * b * x +
+                 grad_y[3] * a * z + grad_y[4] * 2.0f * c * x;
+    grad_r[1] += grad_y[0] * a * x + grad_y[1] * a * z -
+                 grad_y[2] * 2.0f * b * y - grad_y[4] * 2.0f * c * y;
+    grad_r[2] += grad_y[1] * a * y + grad_y[2] * 4.0f * b * z +
+                 grad_y[3] * a * x;
+    return;
+  }
+  if (ell == 3) {
+    const float x2 = x * x;
+    const float y2 = y * y;
+    const float z2 = z * z;
+    const float rho2 = x2 + y2;
+    const float a = sqrtf(static_cast<float>(35.0 / (32.0 * kPi)));
+    const float b = sqrtf(static_cast<float>(105.0 / (4.0 * kPi)));
+    const float c = sqrtf(static_cast<float>(21.0 / (32.0 * kPi)));
+    const float d = sqrtf(static_cast<float>(7.0 / (16.0 * kPi)));
+    const float e = sqrtf(static_cast<float>(105.0 / (16.0 * kPi)));
+    grad_r[0] += grad_y[0] * 6.0f * a * x * y +
+                 grad_y[1] * b * y * z -
+                 grad_y[2] * 2.0f * c * x * y -
+                 grad_y[3] * 6.0f * d * x * z +
+                 grad_y[4] * c * (4.0f * z2 - 3.0f * x2 - y2) +
+                 grad_y[5] * 2.0f * e * x * z +
+                 grad_y[6] * 3.0f * a * (x2 - y2);
+    grad_r[1] += grad_y[0] * 3.0f * a * (x2 - y2) +
+                 grad_y[1] * b * x * z +
+                 grad_y[2] * c * (4.0f * z2 - x2 - 3.0f * y2) -
+                 grad_y[3] * 6.0f * d * y * z -
+                 grad_y[4] * 2.0f * c * x * y -
+                 grad_y[5] * 2.0f * e * y * z -
+                 grad_y[6] * 6.0f * a * x * y;
+    grad_r[2] += grad_y[1] * b * x * y +
+                 grad_y[2] * 8.0f * c * y * z +
+                 grad_y[3] * d * (6.0f * z2 - 3.0f * rho2) +
+                 grad_y[4] * 8.0f * c * x * z +
+                 grad_y[5] * e * (x2 - y2);
+    return;
+  }
+  const float x2 = x * x;
+  const float y2 = y * y;
+  const float z2 = z * z;
+  const float a = 0.75f * sqrtf(static_cast<float>(35.0 / kPi));
+  const float b = 0.75f * sqrtf(static_cast<float>(35.0 / (2.0 * kPi)));
+  const float c = 0.75f * sqrtf(static_cast<float>(5.0 / kPi));
+  const float d = 0.75f * sqrtf(static_cast<float>(5.0 / (2.0 * kPi)));
+  const float e = (3.0f / 16.0f) * sqrtf(static_cast<float>(1.0 / kPi));
+  const float f = 0.375f * sqrtf(static_cast<float>(5.0 / kPi));
+  const float g = (3.0f / 16.0f) * sqrtf(static_cast<float>(35.0 / kPi));
+  grad_r[0] += grad_y[0] * a * y * (3.0f * x2 - y2) +
+               grad_y[1] * b * 6.0f * x * y * z +
+               grad_y[2] * c * y * (7.0f * z2 - 1.0f) +
+               grad_y[5] * d * z * (7.0f * z2 - 3.0f) +
+               grad_y[6] * 2.0f * f * x * (7.0f * z2 - 1.0f) +
+               grad_y[7] * b * z * (3.0f * x2 - 3.0f * y2) +
+               grad_y[8] * g * (4.0f * x * x2 - 12.0f * x * y2);
+  grad_r[1] += grad_y[0] * a * x * (x2 - 3.0f * y2) +
+               grad_y[1] * b * z * (3.0f * x2 - 3.0f * y2) +
+               grad_y[2] * c * x * (7.0f * z2 - 1.0f) +
+               grad_y[3] * d * z * (7.0f * z2 - 3.0f) -
+               grad_y[6] * 2.0f * f * y * (7.0f * z2 - 1.0f) -
+               grad_y[7] * b * 6.0f * x * y * z +
+               grad_y[8] * g * (-12.0f * x2 * y + 4.0f * y * y2);
+  grad_r[2] += grad_y[1] * b * y * (3.0f * x2 - y2) +
+               grad_y[2] * c * 14.0f * x * y * z +
+               grad_y[3] * d * y * (21.0f * z2 - 3.0f) +
+               grad_y[4] * e * (140.0f * z2 * z - 60.0f * z) +
+               grad_y[5] * d * x * (21.0f * z2 - 3.0f) +
+               grad_y[6] * f * 14.0f * z * (x2 - y2) +
+               grad_y[7] * b * x * (x2 - 3.0f * y2);
+}
+
+__global__ void __launch_bounds__(32, 8)
+accumulate_spin_density_forces_c4_l4_block_f32(
+    int atom_count,
+    int atom_stride,
+    float spin_cutoff,
+    const double* __restrict__ spins_soa3,
+    const int* __restrict__ nn_radial,
+    const int* __restrict__ nl_radial,
+    const float* __restrict__ spin_edge_dx,
+    const float* __restrict__ spin_edge_dy,
+    const float* __restrict__ spin_edge_dz,
+    const float* __restrict__ spin_edge_dist,
+    const float* __restrict__ spin_edge_weights,
+    const float* __restrict__ spin_edge_weight_derivatives,
+    const float* __restrict__ density_rho0_pull_cache,
+    const float* __restrict__ density_l1_pull_cache,
+    const float* __restrict__ density_angular2_cache,
+    const float* __restrict__ density_angular3_cache,
+    const float* __restrict__ density_angular4_cache,
+    const float* __restrict__ density_geom_pull_cache,
+    const float* __restrict__ density_rho0_dot_pull_cache,
+    const float* __restrict__ density_l1_dot_pull_cache,
+    double* __restrict__ force_soa3,
+    double* __restrict__ mforce_soa3) {
+  constexpr int C = 4;
+  const int atom = blockIdx.x;
+  const int lane = threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+
+  float center_force[3] = {};
+  float center_mforce[3] = {};
+  const int radial_count = nn_radial[atom];
+  for (int slot = lane; slot < radial_count; slot += blockDim.x) {
+    const int neighbor = nl_radial[atom + atom_stride * slot];
+    float rhat[3];
+    float dist = 0.0f;
+    float si[3];
+    float sj[3];
+    load_spin_edge_cached_f32(
+        atom,
+        neighbor,
+        atom_stride,
+        slot,
+        spins_soa3,
+        spin_edge_dx,
+        spin_edge_dy,
+        spin_edge_dz,
+        spin_edge_dist,
+        rhat,
+        dist,
+        si,
+        sj);
+    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
+      continue;
+    }
+
+    float weights[C];
+    float weight_derivatives[C];
+    load_spin_edge_weight_derivative_cache_f32(
+        atom_stride,
+        slot,
+        atom,
+        spin_edge_weights,
+        spin_edge_weight_derivatives,
+        weights,
+        weight_derivatives);
+
+    const float dot = dot3f(si, sj);
+    float grad_weight[C] = {};
+    float grad_rhat[3] = {};
+    float grad_si[3] = {};
+    float grad_sj[3] = {};
+    float grad_dot = 0.0f;
+
+    for (int c = 0; c < C; ++c) {
+      const float b[3] = {
+          density_rho0_pull_cache[atom + atom_stride * (c * 3)],
+          density_rho0_pull_cache[atom + atom_stride * (c * 3 + 1)],
+          density_rho0_pull_cache[atom + atom_stride * (c * 3 + 2)]};
+      const float bd[3] = {
+          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3)],
+          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 1)],
+          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 2)]};
+      const float u[3] = {
+          b[0] + dot * bd[0],
+          b[1] + dot * bd[1],
+          b[2] + dot * bd[2]};
+      const float w = weights[c];
+      grad_weight[c] += dot3f(sj, u);
+      for (int d = 0; d < 3; ++d) {
+        grad_sj[d] += w * u[d];
+      }
+      grad_dot += w * dot3f(sj, bd);
+
+      const float* gbase = density_geom_pull_cache + atom + atom_stride * c * 9;
+      const float* mbase = density_l1_pull_cache + atom + atom_stride * c * 9;
+      const float* mdbase =
+          density_l1_dot_pull_cache + atom + atom_stride * c * 9;
+      const float kr[3] = {
+          gbase[0 * atom_stride] * rhat[0] +
+              gbase[1 * atom_stride] * rhat[1] +
+              gbase[2 * atom_stride] * rhat[2],
+          gbase[3 * atom_stride] * rhat[0] +
+              gbase[4 * atom_stride] * rhat[1] +
+              gbase[5 * atom_stride] * rhat[2],
+          gbase[6 * atom_stride] * rhat[0] +
+              gbase[7 * atom_stride] * rhat[1] +
+              gbase[8 * atom_stride] * rhat[2]};
+      const float v1[3] = {
+          mbase[0 * atom_stride] * sj[0] + mbase[1 * atom_stride] * sj[1] +
+              mbase[2 * atom_stride] * sj[2],
+          mbase[3 * atom_stride] * sj[0] + mbase[4 * atom_stride] * sj[1] +
+              mbase[5 * atom_stride] * sj[2],
+          mbase[6 * atom_stride] * sj[0] + mbase[7 * atom_stride] * sj[1] +
+              mbase[8 * atom_stride] * sj[2]};
+      const float v2[3] = {
+          mdbase[0 * atom_stride] * sj[0] + mdbase[1 * atom_stride] * sj[1] +
+              mdbase[2 * atom_stride] * sj[2],
+          mdbase[3 * atom_stride] * sj[0] + mdbase[4 * atom_stride] * sj[1] +
+              mdbase[5 * atom_stride] * sj[2],
+          mdbase[6 * atom_stride] * sj[0] + mdbase[7 * atom_stride] * sj[1] +
+              mdbase[8 * atom_stride] * sj[2]};
+      const float u1[3] = {
+          v1[0] + dot * v2[0],
+          v1[1] + dot * v2[1],
+          v1[2] + dot * v2[2]};
+      const float mt[3] = {
+          mbase[0 * atom_stride] * rhat[0] +
+              mbase[3 * atom_stride] * rhat[1] +
+              mbase[6 * atom_stride] * rhat[2] +
+              dot * (mdbase[0 * atom_stride] * rhat[0] +
+                     mdbase[3 * atom_stride] * rhat[1] +
+                     mdbase[6 * atom_stride] * rhat[2]),
+          mbase[1 * atom_stride] * rhat[0] +
+              mbase[4 * atom_stride] * rhat[1] +
+              mbase[7 * atom_stride] * rhat[2] +
+              dot * (mdbase[1 * atom_stride] * rhat[0] +
+                     mdbase[4 * atom_stride] * rhat[1] +
+                     mdbase[7 * atom_stride] * rhat[2]),
+          mbase[2 * atom_stride] * rhat[0] +
+              mbase[5 * atom_stride] * rhat[1] +
+              mbase[8 * atom_stride] * rhat[2] +
+              dot * (mdbase[2 * atom_stride] * rhat[0] +
+                     mdbase[5 * atom_stride] * rhat[1] +
+                     mdbase[8 * atom_stride] * rhat[2])};
+      for (int d = 0; d < 3; ++d) {
+        grad_weight[c] += rhat[d] * (u1[d] + kr[d]);
+        grad_rhat[d] += w * (u1[d] + 2.0f * kr[d]);
+        grad_sj[d] += w * mt[d];
+      }
+      grad_dot += w * dot3f(rhat, v2);
+    }
+
+    for (int ell = 2; ell <= 4; ++ell) {
+      const int width = (2 * ell + 1) * 3;
+      const float* angular =
+          ell == 2 ? density_angular2_cache :
+          ell == 3 ? density_angular3_cache : density_angular4_cache;
+      float ylm[9];
+      const int ylm_width = real_spherical_harmonics_spinf(rhat, ell, ylm);
+      float ge[27] = {};
+      for (int c = 0; c < C; ++c) {
+        for (int m = 0; m < ylm_width; ++m) {
+          for (int d = 0; d < 3; ++d) {
+            const int k = m * 3 + d;
+            const float gd = angular[atom + atom_stride * (c * width + k)];
+            grad_weight[c] += gd * ylm[m] * sj[d];
+            ge[k] += gd * weights[c];
+          }
+        }
+      }
+      float grad_ylm[9] = {};
+      for (int m = 0; m < ylm_width; ++m) {
+        for (int d = 0; d < 3; ++d) {
+          const float g = ge[m * 3 + d];
+          grad_sj[d] += g * ylm[m];
+          grad_ylm[m] += g * sj[d];
+        }
+      }
+      add_real_spherical_harmonics_gradientf(rhat, ell, grad_ylm, grad_rhat);
+    }
+
+    for (int d = 0; d < 3; ++d) {
+      grad_si[d] += grad_dot * sj[d];
+      grad_sj[d] += grad_dot * si[d];
+    }
+
+    float grad_dist = 0.0f;
+    for (int c = 0; c < C; ++c) {
+      grad_dist += grad_weight[c] * weight_derivatives[c];
+    }
+    float dot_r = 0.0f;
+    for (int d = 0; d < 3; ++d) {
+      dot_r += grad_rhat[d] * rhat[d];
+    }
+    for (int d = 0; d < 3; ++d) {
+      const float grad_rij =
+          grad_dist * rhat[d] + (grad_rhat[d] - dot_r * rhat[d]) / dist;
+      center_force[d] += grad_rij;
+      center_mforce[d] -= grad_si[d];
+      atomicAdd(force_soa3 + d * atom_stride + neighbor,
+                -static_cast<double>(grad_rij));
+      atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
+                -static_cast<double>(grad_sj[d]));
+    }
+  }
+
+  __shared__ float reduce[6][32];
+  for (int d = 0; d < 3; ++d) {
+    reduce[d][lane] = center_force[d];
+    reduce[d + 3][lane] = center_mforce[d];
+  }
+  __syncthreads();
+  for (int stride = 16; stride > 0; stride >>= 1) {
+    if (lane < stride) {
+      for (int d = 0; d < 6; ++d) {
+        reduce[d][lane] += reduce[d][lane + stride];
+      }
+    }
+    __syncthreads();
+  }
+  if (lane == 0) {
+    for (int d = 0; d < 3; ++d) {
+      atomicAdd(force_soa3 + d * atom_stride + atom,
+                static_cast<double>(reduce[d][0]));
+      atomicAdd(mforce_soa3 + d * atom_stride + atom,
+                static_cast<double>(reduce[d + 3][0]));
+    }
+  }
+}
+
 __global__ void build_spin_chiral_finalize_c4_l4_f32(
     int atom_count,
     int atom_stride,
@@ -4954,33 +5329,59 @@ void accumulate_spin_density_forces_on_device(
         view.spin_density_raw1,
         view.spin_density_raw1_dot,
         view.mforce_soa3);
-    accumulate_spin_density_forces_c4_l4_pull<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        view.spin_density_rho0,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_raw1,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1_dot,
-        view.force_soa3,
-        view.mforce_soa3,
-        accumulate_virial,
-        view.virial_soa9);
+    if (accumulate_virial) {
+      accumulate_spin_density_forces_c4_l4_pull<<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          static_cast<float>(protocol.spin_cutoff_radial),
+          view.spins_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          view.fp,
+          view.spin_edge_dx,
+          view.spin_edge_dy,
+          view.spin_edge_dz,
+          view.spin_edge_dist,
+          view.spin_edge_weights,
+          view.spin_edge_weight_derivatives,
+          view.spin_density_rho0,
+          view.spin_density_l1_stf,
+          view.spin_density_angular2,
+          view.spin_density_angular3,
+          view.spin_density_angular4,
+          view.spin_density_raw1,
+          view.spin_density_rho0_dot,
+          view.spin_density_raw1_dot,
+          view.force_soa3,
+          view.mforce_soa3,
+          accumulate_virial,
+          view.virial_soa9);
+    } else {
+      accumulate_spin_density_forces_c4_l4_block_f32<<<atom_count, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          static_cast<float>(protocol.spin_cutoff_radial),
+          view.spins_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          view.spin_edge_dx,
+          view.spin_edge_dy,
+          view.spin_edge_dz,
+          view.spin_edge_dist,
+          view.spin_edge_weights,
+          view.spin_edge_weight_derivatives,
+          view.spin_density_rho0,
+          view.spin_density_l1_stf,
+          view.spin_density_angular2,
+          view.spin_density_angular3,
+          view.spin_density_angular4,
+          view.spin_density_raw1,
+          view.spin_density_rho0_dot,
+          view.spin_density_raw1_dot,
+          view.force_soa3,
+          view.mforce_soa3);
+    }
   } else if (blocks > 0) {
     accumulate_spin_density_forces<<<blocks, threads>>>(
         atom_count,
