@@ -327,6 +327,14 @@ def run_ncu(profile, plan, gpu, args, run_dir):
   small.warmup = 1
   small.iterations = 1
   return {
+      "primitive": run_ncu_one(
+          profile,
+          plan,
+          gpu,
+          small,
+          run_dir,
+          "primitive",
+          "build_spin_primitive_cache_c4_l4_warp"),
       "chiral": run_ncu_one(
           profile,
           plan,

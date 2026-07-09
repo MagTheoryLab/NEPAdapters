@@ -1526,6 +1526,38 @@ __global__ void build_spin_descriptors_c4_l4_basic(
       static_cast<float>(value);
 }
 
+__device__ __forceinline__ void load_spin_edge_cached_f32(
+    int atom,
+    int neighbor,
+    int atom_stride,
+    int slot,
+    const double* spins_soa3,
+    const float* spin_edge_dx,
+    const float* spin_edge_dy,
+    const float* spin_edge_dz,
+    const float* spin_edge_dist,
+    float* rhat,
+    float& dist,
+    float* si,
+    float* sj);
+__device__ __forceinline__ void cross3f(
+    const float* a,
+    const float* b,
+    float* out);
+__device__ __forceinline__ float dot3f(const float* a, const float* b);
+__device__ __forceinline__ void stf_outer3f(
+    const float* a,
+    const float* b,
+    float* out);
+__device__ __forceinline__ void fill_spin_monomialsf(
+    const float* u,
+    float* m3,
+    float* m4);
+__device__ int real_spherical_harmonics_spinf(
+    const float* rhat,
+    int ell,
+    float* out);
+
 template <int SlotCapacity>
 __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
     int atom_count,
@@ -1566,25 +1598,25 @@ __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
     return;
   }
 
-  const double si[3] = {
-      spins_soa3[atom],
-      spins_soa3[atom_stride + atom],
-      spins_soa3[2 * atom_stride + atom]};
+  const float si[3] = {
+      static_cast<float>(spins_soa3[atom]),
+      static_cast<float>(spins_soa3[atom_stride + atom]),
+      static_cast<float>(spins_soa3[2 * atom_stride + atom])};
   if (lane == 0) {
-    const double s2 = dot3(si, si);
-    descriptors[atom + atom_stride * struct_dim] = static_cast<float>(s2);
+    const float s2 = dot3f(si, si);
+    descriptors[atom + atom_stride * struct_dim] = s2;
     descriptors[atom + atom_stride * (struct_dim + 1)] =
-        static_cast<float>(s2 * s2);
+        s2 * s2;
   }
 
   const int radial_count = nn_radial[atom];
   const int count = radial_count < SlotCapacity ? radial_count : SlotCapacity;
   for (int slot = lane; slot < count; slot += 32) {
-    double rhat[3];
-    double dist = 0.0;
-    double si_edge[3];
-    double sj[3];
-    load_spin_edge_cached(
+    float rhat[3];
+    float dist = 0.0f;
+    float si_edge[3];
+    float sj[3];
+    load_spin_edge_cached_f32(
         atom,
         nl_radial[atom + atom_stride * slot],
         atom_stride,
@@ -1605,76 +1637,72 @@ __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
     for (int c = 0; c < C; ++c) {
       weights[c][slot] = 0.0f;
     }
-    if (dist > 1.0e-12 && dist < spin_cutoff) {
+    if (dist > 1.0e-12f && dist < spin_cutoff) {
       for (int c = 0; c < C; ++c) {
         weights[c][slot] = spin_edge_weights[
             spin_edge_cache_index(atom_stride, slot, atom, c)];
       }
-      const double dot = dot3(si, sj);
-      const double sj2 = dot3(sj, sj);
-      const double ri_dot_si = dot3(rhat, si);
-      const double ri_dot_sj = dot3(rhat, sj);
-      prim[0][slot] = static_cast<float>(sj[0]);
-      prim[1][slot] = static_cast<float>(sj[1]);
-      prim[2][slot] = static_cast<float>(sj[2]);
-      prim[3][slot] = static_cast<float>(dot);
-      prim[4][slot] = static_cast<float>(sj2);
-      prim[5][slot] = static_cast<float>(ri_dot_si);
-      prim[6][slot] = static_cast<float>(ri_dot_sj);
+      const float dot = dot3f(si, sj);
+      const float sj2 = dot3f(sj, sj);
+      const float ri_dot_si = dot3f(rhat, si);
+      const float ri_dot_sj = dot3f(rhat, sj);
+      prim[0][slot] = sj[0];
+      prim[1][slot] = sj[1];
+      prim[2][slot] = sj[2];
+      prim[3][slot] = dot;
+      prim[4][slot] = sj2;
+      prim[5][slot] = ri_dot_si;
+      prim[6][slot] = ri_dot_sj;
       for (int a = 0; a < 3; ++a) {
         for (int b = 0; b < 3; ++b) {
-          prim[7 + 3 * a + b][slot] =
-              static_cast<float>(rhat[a] * sj[b]);
+          prim[7 + 3 * a + b][slot] = rhat[a] * sj[b];
         }
       }
-      double cross_value[3];
-      cross3(rhat, sj, cross_value);
+      float cross_value[3];
+      cross3f(rhat, sj, cross_value);
       for (int k = 0; k < 3; ++k) {
-        prim[16 + k][slot] = static_cast<float>(cross_value[k]);
+        prim[16 + k][slot] = cross_value[k];
       }
-      double stf[9];
-      stf_outer3(rhat, sj, stf);
+      float stf[9];
+      stf_outer3f(rhat, sj, stf);
       for (int k = 0; k < 9; ++k) {
-        prim[19 + k][slot] = static_cast<float>(stf[k]);
+        prim[19 + k][slot] = stf[k];
       }
-      double ylm[9];
-      int width = real_spherical_harmonics_spin(rhat, 2, ylm);
+      float ylm[9];
+      int width = real_spherical_harmonics_spinf(rhat, 2, ylm);
       for (int m = 0; m < width; ++m) {
         for (int d = 0; d < 3; ++d) {
-          prim[28 + m * 3 + d][slot] =
-              static_cast<float>(ylm[m] * sj[d]);
+          prim[28 + m * 3 + d][slot] = ylm[m] * sj[d];
         }
       }
-      width = real_spherical_harmonics_spin(rhat, 3, ylm);
+      width = real_spherical_harmonics_spinf(rhat, 3, ylm);
       for (int m = 0; m < width; ++m) {
         for (int d = 0; d < 3; ++d) {
-          prim[43 + m * 3 + d][slot] =
-              static_cast<float>(ylm[m] * sj[d]);
+          prim[43 + m * 3 + d][slot] = ylm[m] * sj[d];
         }
       }
-      width = real_spherical_harmonics_spin(rhat, 4, ylm);
+      width = real_spherical_harmonics_spinf(rhat, 4, ylm);
       for (int m = 0; m < width; ++m) {
         for (int d = 0; d < 3; ++d) {
-          prim[64 + m * 3 + d][slot] =
-              static_cast<float>(ylm[m] * sj[d]);
+          prim[64 + m * 3 + d][slot] = ylm[m] * sj[d];
         }
       }
-      double rr[9];
-      stf_outer3(rhat, rhat, rr);
+      float rr[9];
+      stf_outer3f(rhat, rhat, rr);
       for (int k = 0; k < 9; ++k) {
-        prim[91 + k][slot] = static_cast<float>(rr[k]);
+        prim[91 + k][slot] = rr[k];
       }
-      prim[100][slot] = static_cast<float>(rhat[0]);
-      prim[101][slot] = static_cast<float>(rhat[1]);
-      prim[102][slot] = static_cast<float>(rhat[2]);
-      double m3[kSpinDeg3Count];
-      double m4[kSpinDeg4Count];
-      fill_spin_monomials(rhat, m3, m4);
+      prim[100][slot] = rhat[0];
+      prim[101][slot] = rhat[1];
+      prim[102][slot] = rhat[2];
+      float m3[kSpinDeg3Count];
+      float m4[kSpinDeg4Count];
+      fill_spin_monomialsf(rhat, m3, m4);
       for (int k = 0; k < kSpinDeg3Count; ++k) {
-        prim[103 + k][slot] = static_cast<float>(m3[k]);
+        prim[103 + k][slot] = m3[k];
       }
       for (int k = 0; k < kSpinDeg4Count; ++k) {
-        prim[113 + k][slot] = static_cast<float>(m4[k]);
+        prim[113 + k][slot] = m4[k];
       }
     }
   }
