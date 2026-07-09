@@ -5110,6 +5110,69 @@ void add_spin_phase_breakdown(SpinPhaseBreakdown& dst, const SpinPhaseBreakdown&
   dst.gradient_chiral += src.gradient_chiral;
 }
 
+void resize_spin_center_cache(
+  SpinCache& cache,
+  std::vector<double>& octupoles_raw,
+  std::vector<double>& hexadecapoles_raw,
+  const int C,
+  const int chiC,
+  const bool chiral)
+{
+  cache.edge_offsets.resize(2);
+  cache.rho0.resize(static_cast<std::size_t>(C) * 3);
+  cache.raw1.resize(static_cast<std::size_t>(C) * 9);
+  cache.l1_rdot.resize(static_cast<std::size_t>(C));
+  cache.l1_cross.resize(static_cast<std::size_t>(C) * 3);
+  cache.l1_stf.resize(static_cast<std::size_t>(C) * 9);
+  cache.angular2.resize(static_cast<std::size_t>(C) * 15);
+  cache.angular3.resize(static_cast<std::size_t>(C) * 21);
+  cache.angular4.resize(static_cast<std::size_t>(C) * 27);
+  cache.geom.resize(static_cast<std::size_t>(C) * 9);
+  cache.rho0_dot.resize(static_cast<std::size_t>(C) * 3);
+  cache.raw1_dot.resize(static_cast<std::size_t>(C) * 9);
+  if (chiral) {
+    cache.polars.resize(static_cast<std::size_t>(C) * 3);
+    cache.octupoles.resize(static_cast<std::size_t>(chiC) * 27);
+    cache.hexadecapoles.resize(static_cast<std::size_t>(chiC) * 81);
+    cache.chirals.resize(static_cast<std::size_t>(chiC));
+    cache.pseudodevs.resize(static_cast<std::size_t>(C) * 9);
+    octupoles_raw.resize(static_cast<std::size_t>(chiC) * kSpinDeg3Count);
+    hexadecapoles_raw.resize(static_cast<std::size_t>(chiC) * kSpinDeg4Count);
+  }
+}
+
+void clear_spin_center_cache(
+  SpinCache& cache,
+  std::vector<double>& octupoles_raw,
+  std::vector<double>& hexadecapoles_raw,
+  const bool chiral,
+  const int edge_capacity)
+{
+  std::fill(cache.rho0.begin(), cache.rho0.end(), 0.0);
+  std::fill(cache.raw1.begin(), cache.raw1.end(), 0.0);
+  std::fill(cache.l1_rdot.begin(), cache.l1_rdot.end(), 0.0);
+  std::fill(cache.l1_cross.begin(), cache.l1_cross.end(), 0.0);
+  std::fill(cache.l1_stf.begin(), cache.l1_stf.end(), 0.0);
+  std::fill(cache.angular2.begin(), cache.angular2.end(), 0.0);
+  std::fill(cache.angular3.begin(), cache.angular3.end(), 0.0);
+  std::fill(cache.angular4.begin(), cache.angular4.end(), 0.0);
+  std::fill(cache.geom.begin(), cache.geom.end(), 0.0);
+  std::fill(cache.rho0_dot.begin(), cache.rho0_dot.end(), 0.0);
+  std::fill(cache.raw1_dot.begin(), cache.raw1_dot.end(), 0.0);
+  if (chiral) {
+    std::fill(cache.polars.begin(), cache.polars.end(), 0.0);
+    std::fill(cache.octupoles.begin(), cache.octupoles.end(), 0.0);
+    std::fill(cache.hexadecapoles.begin(), cache.hexadecapoles.end(), 0.0);
+    std::fill(cache.chirals.begin(), cache.chirals.end(), 0.0);
+    std::fill(cache.pseudodevs.begin(), cache.pseudodevs.end(), 0.0);
+    std::fill(octupoles_raw.begin(), octupoles_raw.end(), 0.0);
+    std::fill(hexadecapoles_raw.begin(), hexadecapoles_raw.end(), 0.0);
+  }
+  cache.edges.clear();
+  cache.edges.reserve(static_cast<std::size_t>(edge_capacity));
+  cache.edge_offsets[0] = 0;
+}
+
 void clear_spin_cache(SpinCache& cache)
 {
   cache.edge_offsets.clear();
@@ -8125,29 +8188,9 @@ bool compute_spin_lammps_fused_center(
       }
     };
     SpinCache cache;
-    cache.edge_offsets.resize(2);
-    cache.rho0.resize(static_cast<std::size_t>(C) * 3);
-    cache.raw1.resize(static_cast<std::size_t>(C) * 9);
-    cache.l1_rdot.resize(static_cast<std::size_t>(C));
-    cache.l1_cross.resize(static_cast<std::size_t>(C) * 3);
-    cache.l1_stf.resize(static_cast<std::size_t>(C) * 9);
-    cache.angular2.resize(static_cast<std::size_t>(C) * 15);
-    cache.angular3.resize(static_cast<std::size_t>(C) * 21);
-    cache.angular4.resize(static_cast<std::size_t>(C) * 27);
-    cache.geom.resize(static_cast<std::size_t>(C) * 9);
-    cache.rho0_dot.resize(static_cast<std::size_t>(C) * 3);
-    cache.raw1_dot.resize(static_cast<std::size_t>(C) * 9);
     std::vector<double> octupoles_raw;
     std::vector<double> hexadecapoles_raw;
-    if (paramb.spin_chiral) {
-      cache.polars.resize(static_cast<std::size_t>(C) * 3);
-      cache.octupoles.resize(static_cast<std::size_t>(chiC) * 27);
-      cache.hexadecapoles.resize(static_cast<std::size_t>(chiC) * 81);
-      cache.chirals.resize(static_cast<std::size_t>(chiC));
-      cache.pseudodevs.resize(static_cast<std::size_t>(C) * 9);
-      octupoles_raw.resize(static_cast<std::size_t>(chiC) * kSpinDeg3Count);
-      hexadecapoles_raw.resize(static_cast<std::size_t>(chiC) * kSpinDeg4Count);
-    }
+    resize_spin_center_cache(cache, octupoles_raw, hexadecapoles_raw, C, chiC, paramb.spin_chiral);
     std::vector<double> chiral_grad_weight;
     std::vector<double> chiral_grad_rhat;
     LammpsThreadLocalScratchView local_scratch = *lammps_scratch;
@@ -8185,29 +8228,7 @@ bool compute_spin_lammps_fused_center(
       q_spin[0] = dof ? s2 : 0.0;
       q_spin[1] = dof ? s2 * s2 : 0.0;
 
-      std::fill(cache.rho0.begin(), cache.rho0.end(), 0.0);
-      std::fill(cache.raw1.begin(), cache.raw1.end(), 0.0);
-      std::fill(cache.l1_rdot.begin(), cache.l1_rdot.end(), 0.0);
-      std::fill(cache.l1_cross.begin(), cache.l1_cross.end(), 0.0);
-      std::fill(cache.l1_stf.begin(), cache.l1_stf.end(), 0.0);
-      std::fill(cache.angular2.begin(), cache.angular2.end(), 0.0);
-      std::fill(cache.angular3.begin(), cache.angular3.end(), 0.0);
-      std::fill(cache.angular4.begin(), cache.angular4.end(), 0.0);
-      std::fill(cache.geom.begin(), cache.geom.end(), 0.0);
-      std::fill(cache.rho0_dot.begin(), cache.rho0_dot.end(), 0.0);
-      std::fill(cache.raw1_dot.begin(), cache.raw1_dot.end(), 0.0);
-      if (paramb.spin_chiral) {
-        std::fill(cache.polars.begin(), cache.polars.end(), 0.0);
-        std::fill(cache.octupoles.begin(), cache.octupoles.end(), 0.0);
-        std::fill(cache.hexadecapoles.begin(), cache.hexadecapoles.end(), 0.0);
-        std::fill(cache.chirals.begin(), cache.chirals.end(), 0.0);
-        std::fill(cache.pseudodevs.begin(), cache.pseudodevs.end(), 0.0);
-        std::fill(octupoles_raw.begin(), octupoles_raw.end(), 0.0);
-        std::fill(hexadecapoles_raw.begin(), hexadecapoles_raw.end(), 0.0);
-      }
-      cache.edges.clear();
-      cache.edges.reserve(static_cast<std::size_t>(NN[atom]));
-      cache.edge_offsets[0] = 0;
+      clear_spin_center_cache(cache, octupoles_raw, hexadecapoles_raw, paramb.spin_chiral, NN[atom]);
       add_thread_phase(&SpinPhaseBreakdown::setup);
 
       const int edge_offset = radial_cache->offsets[ii];
