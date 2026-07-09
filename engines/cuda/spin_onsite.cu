@@ -1559,7 +1559,7 @@ __device__ int real_spherical_harmonics_spinf(
     float* out);
 
 template <int SlotCapacity>
-__global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
+__global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     int atom_count,
     int atom_stride,
     int struct_dim,
@@ -1611,7 +1611,7 @@ __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
 
   const int radial_count = nn_radial[atom];
   const int count = radial_count < SlotCapacity ? radial_count : SlotCapacity;
-  for (int slot = lane; slot < count; slot += 32) {
+  for (int slot = lane; slot < count; slot += blockDim.x) {
     float rhat[3];
     float dist = 0.0f;
     float si_edge[3];
@@ -1706,7 +1706,7 @@ __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
       }
     }
   }
-  __syncwarp();
+  __syncthreads();
 
   constexpr int ScalarComponents = 16;
   constexpr int Rho0Base = ScalarComponents;
@@ -1725,7 +1725,7 @@ __global__ void __launch_bounds__(32, 2) build_spin_primitive_cache_c4_l4_warp(
   constexpr int HexBase = OctBase + ChiC * kSpinDeg3Count;
   constexpr int ComponentCount = HexBase + ChiC * kSpinDeg4Count;
 
-  for (int component = lane; component < ComponentCount; component += 32) {
+  for (int component = lane; component < ComponentCount; component += blockDim.x) {
     int c = 0;
     int k = 0;
     int p = 0;
@@ -4991,7 +4991,7 @@ void build_spin_descriptors_on_device(
     const int blocks = (work_items + threads - 1) / threads;
     if (blocks > 0) {
       if (protocol.neighbor_capacity_radial <= 32) {
-        build_spin_primitive_cache_c4_l4_warp<32><<<atom_count, 32>>>(
+        build_spin_primitive_cache_c4_l4_warp<32><<<atom_count, 128>>>(
             atom_count,
             static_cast<int>(view.atom_capacity),
             protocol.struct_descriptor_dim,
@@ -5020,7 +5020,7 @@ void build_spin_descriptors_on_device(
             view.spin_chiral_hexadecapoles_raw,
             view.descriptors);
       } else if (protocol.neighbor_capacity_radial <= kSpinPrimitiveSlots) {
-        build_spin_primitive_cache_c4_l4_warp<kSpinPrimitiveSlots><<<atom_count, 32>>>(
+        build_spin_primitive_cache_c4_l4_warp<kSpinPrimitiveSlots><<<atom_count, 128>>>(
             atom_count,
             static_cast<int>(view.atom_capacity),
             protocol.struct_descriptor_dim,
