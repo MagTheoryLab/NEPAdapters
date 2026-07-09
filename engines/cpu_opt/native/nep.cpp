@@ -5083,6 +5083,308 @@ bool add_spin_chiral_gradient_lammps_center(
     deferred_grad_weight, deferred_grad_rhat);
 }
 
+template <bool SpinsAos3>
+bool add_spin_chiral_gradient_lammps_single_center_deferred(
+  const NEP::ParaMB& paramb,
+  const NEP::ANN& annmb,
+  const int N,
+  const double* spins,
+  const SpinCache& cache,
+  const double* Fp,
+  LammpsThreadLocalScratchView* lammps_scratch,
+  std::vector<double>& edge_grad_weight,
+  std::vector<double>& edge_grad_rhat)
+{
+  if (!paramb.spin_chiral || cache.edges.empty() ||
+      !lammps_spin_scratch_active(lammps_scratch) ||
+      cache.edge_offsets.size() != 2) {
+    return false;
+  }
+
+  const int C = paramb.spin_compress;
+  const int chiC = std::min(2, C);
+  const int base_offset = spin_descriptor_dim(C, paramb.spin_l_max, false);
+  const int offset0 = paramb.struct_dim;
+  const int force_stride = lammps_scratch->force_rows;
+  const int begin = cache.edge_offsets[0];
+  const int end = cache.edge_offsets[1];
+  const int count = end - begin;
+  double* local_grad_spin = lammps_scratch->mforce_private;
+
+  auto fp = [&](const int atom, const int dim) {
+    return Fp[static_cast<std::size_t>(atom) * annmb.dim + offset0 + dim];
+  };
+  auto spin = [&](const int atom, const int d) {
+    if constexpr (SpinsAos3) {
+      (void)N;
+      return spins[static_cast<std::size_t>(atom) * 3 + d];
+    } else {
+      return spins[static_cast<std::size_t>(d) * N + atom];
+    }
+  };
+  auto blockC = [&](const std::vector<double>& v, const int c, const int width) {
+    return v.data() + static_cast<std::size_t>(c) * width;
+  };
+  auto blockChi = [&](const std::vector<double>& v, const int c, const int width) {
+    return v.data() + static_cast<std::size_t>(c) * width;
+  };
+  auto add_lammps_spin_pull = [&](const int atom, const std::array<double, 3>& g) {
+    for (int d = 0; d < 3; ++d) {
+      local_grad_spin[lammps_vector_index(atom, d, force_stride)] += g[d];
+    }
+  };
+
+  edge_grad_weight.resize(static_cast<std::size_t>(count) * C);
+  edge_grad_rhat.resize(static_cast<std::size_t>(count) * 3);
+  std::fill(edge_grad_weight.begin(), edge_grad_weight.end(), 0.0);
+  std::fill(edge_grad_rhat.begin(), edge_grad_rhat.end(), 0.0);
+
+  std::array<double, MAX_SPIN_COMPRESS> grad_chi;
+  std::array<double, MAX_SPIN_COMPRESS * 3> grad_polar;
+  std::array<double, MAX_SPIN_COMPRESS * 9> grad_pseudodev;
+  std::array<double, MAX_SPIN_COMPRESS * 9> grad_Q;
+  std::array<double, MAX_SPIN_COMPRESS * 27> grad_O;
+  std::array<double, MAX_SPIN_COMPRESS * 81> grad_H;
+  std::array<double, MAX_SPIN_COMPRESS * kSpinDeg2Count> grad_Q_terms;
+  std::array<double, MAX_SPIN_COMPRESS * kSpinDeg3Count> grad_O_terms;
+  std::array<double, MAX_SPIN_COMPRESS * 3 * kSpinDeg2Count> grad_O_derivatives;
+  std::array<double, MAX_SPIN_COMPRESS * kSpinDeg4Count> grad_H_terms;
+  std::array<double, MAX_SPIN_COMPRESS * 3 * kSpinDeg3Count> grad_H_derivatives;
+  grad_chi.fill(0.0);
+  grad_polar.fill(0.0);
+  grad_pseudodev.fill(0.0);
+  grad_Q.fill(0.0);
+  grad_O.fill(0.0);
+  grad_H.fill(0.0);
+
+  auto local_gw = [&](const int edge, const int c) -> double& {
+    return edge_grad_weight[static_cast<std::size_t>(edge) * C + c];
+  };
+  auto local_gr = [&](const int edge, const int d) -> double& {
+    return edge_grad_rhat[static_cast<std::size_t>(edge) * 3 + d];
+  };
+
+  for (int e = begin; e < end; ++e) {
+    const int le = e - begin;
+    const SpinEdge& edge = cache.edges[static_cast<std::size_t>(e)];
+    const std::array<double, 3> si = {spin(edge.i, 0), spin(edge.i, 1), spin(edge.i, 2)};
+    const std::array<double, 3> sj = {spin(edge.j, 0), spin(edge.j, 1), spin(edge.j, 2)};
+    const std::array<double, 3> x = cross3(si, sj);
+    std::array<double, 3> gx = {0.0, 0.0, 0.0};
+    std::array<double, 3> gu = {0.0, 0.0, 0.0};
+    const double xu = dot3(x, edge.rhat);
+    for (int c = 0; c < chiC; ++c) {
+      const double alpha = fp(edge.i, base_offset + c);
+      const double chi = cache.chirals[static_cast<std::size_t>(c)];
+      const double aw = alpha * edge.weights[c];
+      local_gw(le, c) += alpha * xu * chi;
+      grad_chi[c] += aw * xu;
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += aw * chi * edge.rhat[d];
+        gu[d] += aw * chi * x[d];
+      }
+    }
+    int chiral_offset = base_offset + chiC;
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(edge.i, chiral_offset + c);
+      const double aw = alpha * edge.weights[c];
+      const double* p = blockC(cache.polars, c, 3);
+      const std::array<double, 3> polar = {p[0], p[1], p[2]};
+      const std::array<double, 3> axis = cross3(polar, edge.rhat);
+      local_gw(le, c) += alpha * dot3(x, axis);
+      std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += aw * axis[d];
+        gaxis[d] = aw * x[d];
+      }
+      const std::array<double, 3> gp = cross3(edge.rhat, gaxis);
+      const std::array<double, 3> gu_part = cross3(gaxis, polar);
+      double* grad_p = grad_polar.data() + static_cast<std::size_t>(c) * 3;
+      for (int d = 0; d < 3; ++d) {
+        grad_p[d] += gp[d];
+        gu[d] += gu_part[d];
+      }
+    }
+    chiral_offset += C;
+    for (int c = 0; c < C; ++c) {
+      const double alpha = fp(edge.i, chiral_offset + c);
+      const double aw = alpha * edge.weights[c];
+      const double* P = blockC(cache.pseudodevs, c, 9);
+      std::array<double, 3> axis = {0.0, 0.0, 0.0};
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          axis[a] += P[3 * a + b] * edge.rhat[b];
+        }
+      }
+      local_gw(le, c) += alpha * dot3(x, axis);
+      std::array<double, 3> gaxis = {0.0, 0.0, 0.0};
+      for (int d = 0; d < 3; ++d) {
+        gx[d] += aw * axis[d];
+        gaxis[d] = aw * x[d];
+      }
+      double* gP = grad_pseudodev.data() + static_cast<std::size_t>(c) * 9;
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          gP[3 * a + b] += gaxis[a] * edge.rhat[b];
+          gu[b] += P[3 * a + b] * gaxis[a];
+        }
+      }
+    }
+    const std::array<double, 3> gsi = cross3(sj, gx);
+    const std::array<double, 3> gsj = cross3(gx, si);
+    add_lammps_spin_pull(edge.i, gsi);
+    add_lammps_spin_pull(edge.j, gsj);
+    for (int d = 0; d < 3; ++d) {
+      local_gr(le, d) += gu[d];
+    }
+  }
+
+  for (int c = 0; c < chiC; ++c) {
+    const double g = grad_chi[c];
+    if (g == 0.0) {
+      continue;
+    }
+    const double* Q = blockC(cache.geom, c, 9);
+    const double* O = blockChi(cache.octupoles, c, 27);
+    const double* H = blockChi(cache.hexadecapoles, c, 81);
+    double* gQ = grad_Q.data() + static_cast<std::size_t>(c) * 9;
+    double* gO = grad_O.data() + static_cast<std::size_t>(c) * 27;
+    double* gH = grad_H.data() + static_cast<std::size_t>(c) * 81;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        for (int cc = 0; cc < 3; ++cc) {
+          const int eps = levi_civita(a, b, cc);
+          if (eps == 0) {
+            continue;
+          }
+          const double geps = g * eps;
+          for (int d = 0; d < 3; ++d) {
+            for (int ee = 0; ee < 3; ++ee) {
+              for (int f = 0; f < 3; ++f) {
+                const int oidx = (b * 3 + ee) * 3 + f;
+                const int hidx = ((cc * 3 + d) * 3 + ee) * 3 + f;
+                gQ[3 * a + d] += geps * O[oidx] * H[hidx];
+                gO[oidx] += geps * Q[3 * a + d] * H[hidx];
+                gH[hidx] += geps * Q[3 * a + d] * O[oidx];
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (int e = begin; e < end; ++e) {
+    const int le = e - begin;
+    const SpinEdge& edge = cache.edges[static_cast<std::size_t>(e)];
+    for (int c = 0; c < C; ++c) {
+      const double* gp = grad_polar.data() + static_cast<std::size_t>(c) * 3;
+      local_gw(le, c) += gp[0] * edge.rhat[0] + gp[1] * edge.rhat[1] + gp[2] * edge.rhat[2];
+      for (int d = 0; d < 3; ++d) {
+        local_gr(le, d) += edge.weights[c] * gp[d];
+      }
+
+      const double* gPd = grad_pseudodev.data() + static_cast<std::size_t>(c) * 9;
+      const double* Q = blockC(cache.geom, c, 9);
+      std::array<double, 3> Qu = {0.0, 0.0, 0.0};
+      for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          Qu[a] += Q[3 * a + b] * edge.rhat[b];
+        }
+      }
+      const std::array<double, 3> pseudo_axis = cross3(edge.rhat, Qu);
+      const double pseudo00 = pseudo_axis[0] * edge.rhat[0];
+      const double pseudo01 =
+        0.5 * (pseudo_axis[0] * edge.rhat[1] + pseudo_axis[1] * edge.rhat[0]);
+      const double pseudo02 =
+        0.5 * (pseudo_axis[0] * edge.rhat[2] + pseudo_axis[2] * edge.rhat[0]);
+      const double pseudo10 = pseudo01;
+      const double pseudo11 = pseudo_axis[1] * edge.rhat[1];
+      const double pseudo12 =
+        0.5 * (pseudo_axis[1] * edge.rhat[2] + pseudo_axis[2] * edge.rhat[1]);
+      const double pseudo20 = pseudo02;
+      const double pseudo21 = pseudo12;
+      const double pseudo22 = pseudo_axis[2] * edge.rhat[2];
+      local_gw(le, c) +=
+        gPd[0] * pseudo00 + gPd[1] * pseudo01 + gPd[2] * pseudo02 +
+        gPd[3] * pseudo10 + gPd[4] * pseudo11 + gPd[5] * pseudo12 +
+        gPd[6] * pseudo20 + gPd[7] * pseudo21 + gPd[8] * pseudo22;
+      const double s01 = 0.5 * (gPd[1] + gPd[3]);
+      const double s02 = 0.5 * (gPd[2] + gPd[6]);
+      const double s12 = 0.5 * (gPd[5] + gPd[7]);
+      const double w = edge.weights[c];
+      const std::array<double, 3> g_axis = {
+        w * (gPd[0] * edge.rhat[0] + s01 * edge.rhat[1] + s02 * edge.rhat[2]),
+        w * (s01 * edge.rhat[0] + gPd[4] * edge.rhat[1] + s12 * edge.rhat[2]),
+        w * (s02 * edge.rhat[0] + s12 * edge.rhat[1] + gPd[8] * edge.rhat[2])};
+      const std::array<double, 3> gu2 = {
+        w * (gPd[0] * pseudo_axis[0] + s01 * pseudo_axis[1] + s02 * pseudo_axis[2]),
+        w * (s01 * pseudo_axis[0] + gPd[4] * pseudo_axis[1] + s12 * pseudo_axis[2]),
+        w * (s02 * pseudo_axis[0] + s12 * pseudo_axis[1] + gPd[8] * pseudo_axis[2])};
+      const std::array<double, 3> g_u_cross = cross3(Qu, g_axis);
+      const std::array<double, 3> g_Qu = cross3(g_axis, edge.rhat);
+      double* gQ = grad_Q.data() + static_cast<std::size_t>(c) * 9;
+      for (int a = 0; a < 3; ++a) {
+        local_gr(le, a) += gu2[a] + g_u_cross[a];
+        for (int b = 0; b < 3; ++b) {
+          gQ[3 * a + b] += g_Qu[a] * edge.rhat[b];
+          local_gr(le, b) += Q[3 * a + b] * g_Qu[a];
+        }
+      }
+    }
+  }
+
+  for (int c = 0; c < C; ++c) {
+    project_rank2_spin_gradient(
+      grad_Q.data() + static_cast<std::size_t>(c) * 9,
+      grad_Q_terms.data() + static_cast<std::size_t>(c) * kSpinDeg2Count);
+  }
+  for (int c = 0; c < chiC; ++c) {
+    project_rank3_spin_gradient(
+      grad_O.data() + static_cast<std::size_t>(c) * 27,
+      grad_O_terms.data() + static_cast<std::size_t>(c) * kSpinDeg3Count,
+      grad_O_derivatives.data() + static_cast<std::size_t>(c) * 3 * kSpinDeg2Count);
+    project_rank4_spin_gradient(
+      grad_H.data() + static_cast<std::size_t>(c) * 81,
+      grad_H_terms.data() + static_cast<std::size_t>(c) * kSpinDeg4Count,
+      grad_H_derivatives.data() + static_cast<std::size_t>(c) * 3 * kSpinDeg3Count);
+  }
+
+  for (int e = begin; e < end; ++e) {
+    const int le = e - begin;
+    const SpinEdge& edge = cache.edges[static_cast<std::size_t>(e)];
+    double m2[kSpinDeg2Count];
+    double m3[kSpinDeg3Count];
+    double m4[kSpinDeg4Count];
+    fill_spin_monomials(edge.rhat, m2, m3, m4);
+    for (int c = 0; c < C; ++c) {
+      const double* q_terms = grad_Q_terms.data() + static_cast<std::size_t>(c) * kSpinDeg2Count;
+      local_gw(le, c) += dot_spin_terms(q_terms, m2, kSpinDeg2Count);
+      const double w = edge.weights[c];
+      local_gr(le, 0) += w * (2.0 * q_terms[0] * edge.rhat[0] + q_terms[3] * edge.rhat[1] + q_terms[4] * edge.rhat[2]);
+      local_gr(le, 1) += w * (2.0 * q_terms[1] * edge.rhat[1] + q_terms[3] * edge.rhat[0] + q_terms[5] * edge.rhat[2]);
+      local_gr(le, 2) += w * (2.0 * q_terms[2] * edge.rhat[2] + q_terms[4] * edge.rhat[0] + q_terms[5] * edge.rhat[1]);
+    }
+    for (int c = 0; c < chiC; ++c) {
+      const double* o_terms = grad_O_terms.data() + static_cast<std::size_t>(c) * kSpinDeg3Count;
+      const double* o_derivatives =
+        grad_O_derivatives.data() + static_cast<std::size_t>(c) * 3 * kSpinDeg2Count;
+      const double* h_terms = grad_H_terms.data() + static_cast<std::size_t>(c) * kSpinDeg4Count;
+      const double* h_derivatives =
+        grad_H_derivatives.data() + static_cast<std::size_t>(c) * 3 * kSpinDeg3Count;
+      local_gw(le, c) += dot_spin_terms(o_terms, m3, kSpinDeg3Count) +
+                         dot_spin_terms(h_terms, m4, kSpinDeg4Count);
+      for (int d = 0; d < 3; ++d) {
+        local_gr(le, d) += edge.weights[c] * (
+          dot_spin_terms(o_derivatives + d * kSpinDeg2Count, m2, kSpinDeg2Count) +
+          dot_spin_terms(h_derivatives + d * kSpinDeg3Count, m3, kSpinDeg3Count));
+      }
+    }
+  }
+
+  return true;
+}
+
 struct SpinPhaseBreakdown {
   double setup = 0.0;
   double edges = 0.0;
@@ -7049,9 +7351,9 @@ void add_spin_gradient_lammps_single_center_nonchiral(
   std::vector<double>& chiral_grad_rhat =
     chiral_grad_rhat_work ? *chiral_grad_rhat_work : local_chiral_grad_rhat;
   const bool fuse_chiral = paramb.spin_chiral &&
-    add_spin_chiral_gradient_lammps_center_impl<SpinsAos3>(
+    add_spin_chiral_gradient_lammps_single_center_deferred<SpinsAos3>(
       paramb, annmb, N, spins, cache, Fp, lammps_scratch,
-      &chiral_grad_weight, &chiral_grad_rhat);
+      chiral_grad_weight, chiral_grad_rhat);
 
   const std::array<double, 3> s = {spin(atom, 0), spin(atom, 1), spin(atom, 2)};
   const int row = 0;
