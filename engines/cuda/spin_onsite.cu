@@ -134,6 +134,38 @@ __device__ __forceinline__ int idx2(int c, int k, int width) {
   return c * width + k;
 }
 
+template <bool AtomMajor, int ComponentCount>
+__device__ __forceinline__ int spin_component_cache_index(
+    int atom_stride,
+    int atom,
+    int component) {
+  static_assert(ComponentCount > 0, "spin cache component count must be positive");
+  if constexpr (AtomMajor) {
+    return atom * ComponentCount + component;
+  }
+  return atom + atom_stride * component;
+}
+
+template <bool AtomMajor>
+__device__ __forceinline__ int spin_component_cache_index(
+    int atom_stride,
+    int component_count,
+    int atom,
+    int component) {
+  if constexpr (AtomMajor) {
+    return atom * component_count + component;
+  }
+  return atom + atom_stride * component;
+}
+
+template <bool AtomMajor>
+__device__ __forceinline__ int spin_component_cache_stride(int atom_stride) {
+  if constexpr (AtomMajor) {
+    return 1;
+  }
+  return atom_stride;
+}
+
 __device__ __forceinline__ int tensor3(int a, int b, int c) {
   return (a * 3 + b) * 3 + c;
 }
@@ -1558,7 +1590,7 @@ __device__ int real_spherical_harmonics_spinf(
     int ell,
     float* out);
 
-template <int SlotCapacity>
+template <int SlotCapacity, bool AtomMajor>
 __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     int atom_count,
     int atom_stride,
@@ -1589,8 +1621,26 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     float* __restrict__ descriptors) {
   constexpr int C = 4;
   constexpr int ChiC = 2;
+  constexpr int ScalarComponents = 16;
+  constexpr int Rho0Base = ScalarComponents;
+  constexpr int Raw1Base = Rho0Base + C * 3;
+  constexpr int L1RdotBase = Raw1Base + C * 9;
+  constexpr int L1CrossBase = L1RdotBase + C;
+  constexpr int L1StfBase = L1CrossBase + C * 3;
+  constexpr int Angular2Base = L1StfBase + C * 9;
+  constexpr int Angular3Base = Angular2Base + C * 15;
+  constexpr int Angular4Base = Angular3Base + C * 21;
+  constexpr int GeomBase = Angular4Base + C * 27;
+  constexpr int Rho0DotBase = GeomBase + C * 9;
+  constexpr int Raw1DotBase = Rho0DotBase + C * 3;
+  constexpr int PolarBase = Raw1DotBase + C * 9;
+  constexpr int OctBase = PolarBase + C * 3;
+  constexpr int HexBase = OctBase + ChiC * kSpinDeg3Count;
+  constexpr int ComponentCount = HexBase + ChiC * kSpinDeg4Count;
+  constexpr int DensityComponentCount = PolarBase - Rho0Base;
   __shared__ float prim[kSpinPrimitiveCount][SlotCapacity];
   __shared__ float weights[C][SlotCapacity];
+  __shared__ float density_components[DensityComponentCount];
 
   const int lane = threadIdx.x;
   const int atom = blockIdx.x;
@@ -1708,23 +1758,6 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
   }
   __syncthreads();
 
-  constexpr int ScalarComponents = 16;
-  constexpr int Rho0Base = ScalarComponents;
-  constexpr int Raw1Base = Rho0Base + C * 3;
-  constexpr int L1RdotBase = Raw1Base + C * 9;
-  constexpr int L1CrossBase = L1RdotBase + C;
-  constexpr int L1StfBase = L1CrossBase + C * 3;
-  constexpr int Angular2Base = L1StfBase + C * 9;
-  constexpr int Angular3Base = Angular2Base + C * 15;
-  constexpr int Angular4Base = Angular3Base + C * 21;
-  constexpr int GeomBase = Angular4Base + C * 27;
-  constexpr int Rho0DotBase = GeomBase + C * 9;
-  constexpr int Raw1DotBase = Rho0DotBase + C * 3;
-  constexpr int PolarBase = Raw1DotBase + C * 9;
-  constexpr int OctBase = PolarBase + C * 3;
-  constexpr int HexBase = OctBase + ChiC * kSpinDeg3Count;
-  constexpr int ComponentCount = HexBase + ChiC * kSpinDeg4Count;
-
   for (int component = lane; component < ComponentCount; component += blockDim.x) {
     int c = 0;
     int k = 0;
@@ -1748,62 +1781,80 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       c = k / 3;
       p = k - c * 3;
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_rho0_cache[atom + atom_stride * k] = acc;
+      density_rho0_cache[
+          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < L1RdotBase) {
       k = component - Raw1Base;
       c = k / 9;
       p = 7 + (k - c * 9);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_raw1_cache[atom + atom_stride * k] = acc;
+      density_raw1_cache[
+          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < L1CrossBase) {
       k = component - L1RdotBase;
       c = k;
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[6][slot];
-      density_l1_rdot_cache[atom + atom_stride * c] = acc;
+      density_l1_rdot_cache[
+          spin_component_cache_index<AtomMajor, C>(atom_stride, atom, c)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < L1StfBase) {
       k = component - L1CrossBase;
       c = k / 3;
       p = 16 + (k - c * 3);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_l1_cross_cache[atom + atom_stride * k] = acc;
+      density_l1_cross_cache[
+          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < Angular2Base) {
       k = component - L1StfBase;
       c = k / 9;
       p = 19 + (k - c * 9);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_l1_stf_cache[atom + atom_stride * k] = acc;
+      density_l1_stf_cache[
+          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < Angular3Base) {
       k = component - Angular2Base;
       c = k / 15;
       p = 28 + (k - c * 15);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular2_cache[atom + atom_stride * k] = acc;
+      density_angular2_cache[
+          spin_component_cache_index<AtomMajor, C * 15>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < Angular4Base) {
       k = component - Angular3Base;
       c = k / 21;
       p = 43 + (k - c * 21);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular3_cache[atom + atom_stride * k] = acc;
+      density_angular3_cache[
+          spin_component_cache_index<AtomMajor, C * 21>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < GeomBase) {
       k = component - Angular4Base;
       c = k / 27;
       p = 64 + (k - c * 27);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular4_cache[atom + atom_stride * k] = acc;
+      density_angular4_cache[
+          spin_component_cache_index<AtomMajor, C * 27>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < Rho0DotBase) {
       k = component - GeomBase;
       c = k / 9;
       p = 91 + (k - c * 9);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_geom_cache[atom + atom_stride * k] = acc;
+      density_geom_cache[
+          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < Raw1DotBase) {
       k = component - Rho0DotBase;
@@ -1812,7 +1863,9 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       for (int slot = 0; slot < count; ++slot) {
         acc += weights[c][slot] * prim[3][slot] * prim[p][slot];
       }
-      density_rho0_dot_cache[atom + atom_stride * k] = acc;
+      density_rho0_dot_cache[
+          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < PolarBase) {
       k = component - Raw1DotBase;
@@ -1821,135 +1874,132 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       for (int slot = 0; slot < count; ++slot) {
         acc += weights[c][slot] * prim[3][slot] * prim[p][slot];
       }
-      density_raw1_dot_cache[atom + atom_stride * k] = acc;
+      density_raw1_dot_cache[
+          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
+      density_components[component - Rho0Base] = acc;
       continue;
     } else if (component < OctBase) {
       k = component - PolarBase;
       c = k / 3;
       p = 100 + (k - c * 3);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_polar_cache[atom + atom_stride * k] = acc;
+      chiral_polar_cache[
+          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
       continue;
     } else if (component < HexBase) {
       k = component - OctBase;
       c = k / kSpinDeg3Count;
       p = 103 + (k - c * kSpinDeg3Count);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_octupoles_raw_cache[atom + atom_stride * k] = acc;
+      chiral_octupoles_raw_cache[
+          spin_component_cache_index<AtomMajor, ChiC * kSpinDeg3Count>(
+              atom_stride, atom, k)] = acc;
       continue;
     } else {
       k = component - HexBase;
       c = k / kSpinDeg4Count;
       p = 113 + (k - c * kSpinDeg4Count);
       for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_hexadecapoles_raw_cache[atom + atom_stride * k] = acc;
+      chiral_hexadecapoles_raw_cache[
+          spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
+              atom_stride, atom, k)] = acc;
     }
   }
-}
 
-__global__ void finish_spin_density_descriptors_c4_l4_from_cache(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    const double* __restrict__ spins_soa3,
-    const float* __restrict__ density_rho0_cache,
-    const float* __restrict__ density_l1_rdot_cache,
-    const float* __restrict__ density_l1_cross_cache,
-    const float* __restrict__ density_l1_stf_cache,
-    const float* __restrict__ density_angular2_cache,
-    const float* __restrict__ density_angular3_cache,
-    const float* __restrict__ density_angular4_cache,
-    const float* __restrict__ density_geom_cache,
-    const float* __restrict__ density_rho0_dot_cache,
-    const float* __restrict__ density_raw1_cache,
-    const float* __restrict__ density_raw1_dot_cache,
-    float* __restrict__ descriptors) {
-  constexpr int C = 4;
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int atom = tid / C;
-  const int c = tid - atom * C;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  int offset = 2 + 4 * C;
-  double value = 0.0;
-  for (int k = 0; k < 3; ++k) {
-    const double rho0 =
-        density_rho0_cache[atom + atom_stride * (c * 3 + k)];
-    value += rho0 * rho0;
-  }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
-  offset += C;
-  const double rdot = density_l1_rdot_cache[atom + atom_stride * c];
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(rdot * rdot);
-  offset += C;
-  value = 0.0;
-  for (int k = 0; k < 3; ++k) {
-    const double x =
-        density_l1_cross_cache[atom + atom_stride * (c * 3 + k)];
-    value += x * x;
-  }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
-  offset += C;
-  value = 0.0;
-  for (int k = 0; k < 9; ++k) {
-    const double x =
-        density_l1_stf_cache[atom + atom_stride * (c * 9 + k)];
-    value += x * x;
-  }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
-  offset += C;
-  const float* angular[3] = {
-      density_angular2_cache,
-      density_angular3_cache,
-      density_angular4_cache};
-  const int widths[3] = {15, 21, 27};
-  for (int ell_index = 0; ell_index < 3; ++ell_index) {
-    value = 0.0;
-    for (int k = 0; k < widths[ell_index]; ++k) {
-      const double x = angular[ell_index][
-          atom + atom_stride * (c * widths[ell_index] + k)];
-      value += x * x;
+  __syncthreads();
+  if (lane < C) {
+    const int channel = lane;
+    int offset = 2 + 4 * C;
+    double value = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      const double rho0 = density_components[
+          Rho0Base - Rho0Base + channel * 3 + k];
+      value += rho0 * rho0;
     }
-    descriptors[atom + atom_stride * (struct_dim + offset + c)] =
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
         static_cast<float>(value);
     offset += C;
-  }
-  const double spin_i[3] = {
-      spins_soa3[atom],
-      spins_soa3[atom_stride + atom],
-      spins_soa3[2 * atom_stride + atom]};
-  value = 0.0;
-  for (int a = 0; a < 3; ++a) {
-    for (int b = 0; b < 3; ++b) {
-      value += spin_i[a] *
-          density_geom_cache[atom + atom_stride * (c * 9 + 3 * a + b)] *
-          spin_i[b];
+
+    const double rdot = density_components[
+        L1RdotBase - Rho0Base + channel];
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(rdot * rdot);
+    offset += C;
+
+    value = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      const double x = density_components[
+          L1CrossBase - Rho0Base + channel * 3 + k];
+      value += x * x;
     }
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(value);
+    offset += C;
+
+    value = 0.0;
+    for (int k = 0; k < 9; ++k) {
+      const double x = density_components[
+          L1StfBase - Rho0Base + channel * 9 + k];
+      value += x * x;
+    }
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(value);
+    offset += C;
+
+    constexpr int AngularBases[3] = {
+        Angular2Base,
+        Angular3Base,
+        Angular4Base};
+    constexpr int AngularWidths[3] = {15, 21, 27};
+    for (int ell_index = 0; ell_index < 3; ++ell_index) {
+      value = 0.0;
+      for (int k = 0; k < AngularWidths[ell_index]; ++k) {
+        const double x = density_components[
+            AngularBases[ell_index] - Rho0Base +
+            channel * AngularWidths[ell_index] + k];
+        value += x * x;
+      }
+      descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+          static_cast<float>(value);
+      offset += C;
+    }
+
+    const double spin_i[3] = {
+        spins_soa3[atom],
+        spins_soa3[atom_stride + atom],
+        spins_soa3[2 * atom_stride + atom]};
+    value = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        value += spin_i[a] * density_components[
+            GeomBase - Rho0Base + channel * 9 + 3 * a + b] * spin_i[b];
+      }
+    }
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(value);
+    offset += C;
+
+    value = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      value += density_components[
+                   Rho0Base - Rho0Base + channel * 3 + k] *
+               density_components[
+                   Rho0DotBase - Rho0Base + channel * 3 + k];
+    }
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(value);
+    offset += C;
+
+    value = 0.0;
+    for (int k = 0; k < 9; ++k) {
+      value += density_components[
+                   Raw1Base - Rho0Base + channel * 9 + k] *
+               density_components[
+                   Raw1DotBase - Rho0Base + channel * 9 + k];
+    }
+    descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
+        static_cast<float>(value);
   }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
-  offset += C;
-  value = 0.0;
-  for (int k = 0; k < 3; ++k) {
-    value += density_rho0_cache[atom + atom_stride * (c * 3 + k)] *
-             density_rho0_dot_cache[atom + atom_stride * (c * 3 + k)];
-  }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
-  offset += C;
-  value = 0.0;
-  for (int k = 0; k < 9; ++k) {
-    value += density_raw1_cache[atom + atom_stride * (c * 9 + k)] *
-             density_raw1_dot_cache[atom + atom_stride * (c * 9 + k)];
-  }
-  descriptors[atom + atom_stride * (struct_dim + offset + c)] =
-      static_cast<float>(value);
 }
 
 __global__ void build_spin_chiral_finalize_c4_l4(
@@ -2738,6 +2788,7 @@ __global__ void accumulate_spin_density_forces(
   }
 }
 
+template <bool AtomMajor>
 __global__ void prepare_spin_density_pulls_c4_l4(
     int atom_count,
     int atom_stride,
@@ -2786,7 +2837,8 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     const double alpha0_dot = static_cast<double>(
         fp[atom + atom_stride * (struct_dim + Rho0DotOffset + c)]);
     for (int d = 0; d < 3; ++d) {
-      const int idx = atom + atom_stride * (c * 3 + d);
+      const int idx = spin_component_cache_index<AtomMajor, C * 3>(
+          atom_stride, atom, c * 3 + d);
       const double rho0 = static_cast<double>(density_rho0_cache[idx]);
       const double rho0_dot = static_cast<double>(density_rho0_dot_cache[idx]);
       density_rho0_cache[idx] =
@@ -2799,7 +2851,9 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     double geom[9];
     for (int k = 0; k < 9; ++k) {
       geom[k] = static_cast<double>(
-          density_geom_cache[atom + atom_stride * (c * 9 + k)]);
+          density_geom_cache[
+              spin_component_cache_index<AtomMajor, C * 9>(
+                  atom_stride, atom, c * 9 + k)]);
     }
     for (int a = 0; a < 3; ++a) {
       double gs = 0.0;
@@ -2819,13 +2873,20 @@ __global__ void prepare_spin_density_pulls_c4_l4(
         fp[atom + atom_stride * (struct_dim + Raw1DotOffset + c)]);
     double mat[9] = {};
     const double rdot = static_cast<double>(
-        density_l1_rdot_cache[atom + atom_stride * c]);
+        density_l1_rdot_cache[
+            spin_component_cache_index<AtomMajor, C>(atom_stride, atom, c)]);
     const double cross[3] = {
-        static_cast<double>(density_l1_cross_cache[atom + atom_stride * (c * 3)]),
+        static_cast<double>(density_l1_cross_cache[
+            spin_component_cache_index<AtomMajor, C * 3>(
+                atom_stride, atom, c * 3)]),
         static_cast<double>(
-            density_l1_cross_cache[atom + atom_stride * (c * 3 + 1)]),
+            density_l1_cross_cache[
+                spin_component_cache_index<AtomMajor, C * 3>(
+                    atom_stride, atom, c * 3 + 1)]),
         static_cast<double>(
-            density_l1_cross_cache[atom + atom_stride * (c * 3 + 2)])};
+            density_l1_cross_cache[
+                spin_component_cache_index<AtomMajor, C * 3>(
+                    atom_stride, atom, c * 3 + 2)])};
     const double g_cross[3] = {
         2.0 * alpha_cross * cross[0],
         2.0 * alpha_cross * cross[1],
@@ -2840,7 +2901,8 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     mat[6] += g_cross[1];
     mat[7] -= g_cross[0];
     for (int k = 0; k < 9; ++k) {
-      const int idx = atom + atom_stride * (c * 9 + k);
+      const int idx = spin_component_cache_index<AtomMajor, C * 9>(
+          atom_stride, atom, c * 9 + k);
       const double stf = static_cast<double>(density_l1_stf_cache[idx]);
       const double raw = static_cast<double>(density_raw1_cache[idx]);
       const double raw_dot = static_cast<double>(density_raw1_dot_cache[idx]);
@@ -2854,7 +2916,8 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     const double alpha_l2 = static_cast<double>(
         fp[atom + atom_stride * (struct_dim + Angular2Offset + c)]);
     for (int k = 0; k < 15; ++k) {
-      const int idx = atom + atom_stride * (c * 15 + k);
+      const int idx = spin_component_cache_index<AtomMajor, C * 15>(
+          atom_stride, atom, c * 15 + k);
       density_angular2_cache[idx] =
           static_cast<float>(2.0 * alpha_l2 *
                              static_cast<double>(density_angular2_cache[idx]));
@@ -2862,7 +2925,8 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     const double alpha_l3 = static_cast<double>(
         fp[atom + atom_stride * (struct_dim + Angular3Offset + c)]);
     for (int k = 0; k < 21; ++k) {
-      const int idx = atom + atom_stride * (c * 21 + k);
+      const int idx = spin_component_cache_index<AtomMajor, C * 21>(
+          atom_stride, atom, c * 21 + k);
       density_angular3_cache[idx] =
           static_cast<float>(2.0 * alpha_l3 *
                              static_cast<double>(density_angular3_cache[idx]));
@@ -2870,7 +2934,8 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     const double alpha_l4 = static_cast<double>(
         fp[atom + atom_stride * (struct_dim + Angular4Offset + c)]);
     for (int k = 0; k < 27; ++k) {
-      const int idx = atom + atom_stride * (c * 27 + k);
+      const int idx = spin_component_cache_index<AtomMajor, C * 27>(
+          atom_stride, atom, c * 27 + k);
       density_angular4_cache[idx] =
           static_cast<float>(2.0 * alpha_l4 *
                              static_cast<double>(density_angular4_cache[idx]));
@@ -2882,6 +2947,7 @@ __global__ void prepare_spin_density_pulls_c4_l4(
   }
 }
 
+template <bool AtomMajor>
 __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_pull(
     int atom_count,
     int atom_stride,
@@ -2914,6 +2980,7 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
   if (atom >= atom_count) {
     return;
   }
+  const int cache_stride = spin_component_cache_stride<AtomMajor>(atom_stride);
 
   const int radial_count = nn_radial[atom];
   for (int slot = 0; slot < radial_count; ++slot) {
@@ -2961,18 +3028,30 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
     for (int c = 0; c < C; ++c) {
       const double b[3] = {
           static_cast<double>(
-              density_rho0_pull_cache[atom + atom_stride * (c * 3)]),
+              density_rho0_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3)]),
           static_cast<double>(
-              density_rho0_pull_cache[atom + atom_stride * (c * 3 + 1)]),
+              density_rho0_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3 + 1)]),
           static_cast<double>(
-              density_rho0_pull_cache[atom + atom_stride * (c * 3 + 2)])};
+              density_rho0_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3 + 2)])};
       const double bd[3] = {
           static_cast<double>(
-              density_rho0_dot_pull_cache[atom + atom_stride * (c * 3)]),
+              density_rho0_dot_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3)]),
           static_cast<double>(
-              density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 1)]),
+              density_rho0_dot_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3 + 1)]),
           static_cast<double>(
-              density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 2)])};
+              density_rho0_dot_pull_cache[
+                  spin_component_cache_index<AtomMajor, C * 3>(
+                      atom_stride, atom, c * 3 + 2)])};
       const double u[3] = {
           b[0] + dot * bd[0],
           b[1] + dot * bd[1],
@@ -2984,63 +3063,69 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
       }
       grad_dot += w * dot3(sj, bd);
 
-      const float* gbase = density_geom_pull_cache + atom + atom_stride * c * 9;
-      const float* mbase = density_l1_pull_cache + atom + atom_stride * c * 9;
+      const float* gbase = density_geom_pull_cache +
+          spin_component_cache_index<AtomMajor, C * 9>(
+              atom_stride, atom, c * 9);
+      const float* mbase = density_l1_pull_cache +
+          spin_component_cache_index<AtomMajor, C * 9>(
+              atom_stride, atom, c * 9);
       const float* mdbase =
-          density_l1_dot_pull_cache + atom + atom_stride * c * 9;
+          density_l1_dot_pull_cache +
+          spin_component_cache_index<AtomMajor, C * 9>(
+              atom_stride, atom, c * 9);
       const double kr[3] = {
-          static_cast<double>(gbase[0 * atom_stride]) * rhat[0] +
-              static_cast<double>(gbase[1 * atom_stride]) * rhat[1] +
-              static_cast<double>(gbase[2 * atom_stride]) * rhat[2],
-          static_cast<double>(gbase[3 * atom_stride]) * rhat[0] +
-              static_cast<double>(gbase[4 * atom_stride]) * rhat[1] +
-              static_cast<double>(gbase[5 * atom_stride]) * rhat[2],
-          static_cast<double>(gbase[6 * atom_stride]) * rhat[0] +
-              static_cast<double>(gbase[7 * atom_stride]) * rhat[1] +
-              static_cast<double>(gbase[8 * atom_stride]) * rhat[2]};
+          static_cast<double>(gbase[0 * cache_stride]) * rhat[0] +
+              static_cast<double>(gbase[1 * cache_stride]) * rhat[1] +
+              static_cast<double>(gbase[2 * cache_stride]) * rhat[2],
+          static_cast<double>(gbase[3 * cache_stride]) * rhat[0] +
+              static_cast<double>(gbase[4 * cache_stride]) * rhat[1] +
+              static_cast<double>(gbase[5 * cache_stride]) * rhat[2],
+          static_cast<double>(gbase[6 * cache_stride]) * rhat[0] +
+              static_cast<double>(gbase[7 * cache_stride]) * rhat[1] +
+              static_cast<double>(gbase[8 * cache_stride]) * rhat[2]};
       const double v1[3] = {
-          static_cast<double>(mbase[0 * atom_stride]) * sj[0] +
-              static_cast<double>(mbase[1 * atom_stride]) * sj[1] +
-              static_cast<double>(mbase[2 * atom_stride]) * sj[2],
-          static_cast<double>(mbase[3 * atom_stride]) * sj[0] +
-              static_cast<double>(mbase[4 * atom_stride]) * sj[1] +
-              static_cast<double>(mbase[5 * atom_stride]) * sj[2],
-          static_cast<double>(mbase[6 * atom_stride]) * sj[0] +
-              static_cast<double>(mbase[7 * atom_stride]) * sj[1] +
-              static_cast<double>(mbase[8 * atom_stride]) * sj[2]};
+          static_cast<double>(mbase[0 * cache_stride]) * sj[0] +
+              static_cast<double>(mbase[1 * cache_stride]) * sj[1] +
+              static_cast<double>(mbase[2 * cache_stride]) * sj[2],
+          static_cast<double>(mbase[3 * cache_stride]) * sj[0] +
+              static_cast<double>(mbase[4 * cache_stride]) * sj[1] +
+              static_cast<double>(mbase[5 * cache_stride]) * sj[2],
+          static_cast<double>(mbase[6 * cache_stride]) * sj[0] +
+              static_cast<double>(mbase[7 * cache_stride]) * sj[1] +
+              static_cast<double>(mbase[8 * cache_stride]) * sj[2]};
       const double v2[3] = {
-          static_cast<double>(mdbase[0 * atom_stride]) * sj[0] +
-              static_cast<double>(mdbase[1 * atom_stride]) * sj[1] +
-              static_cast<double>(mdbase[2 * atom_stride]) * sj[2],
-          static_cast<double>(mdbase[3 * atom_stride]) * sj[0] +
-              static_cast<double>(mdbase[4 * atom_stride]) * sj[1] +
-              static_cast<double>(mdbase[5 * atom_stride]) * sj[2],
-          static_cast<double>(mdbase[6 * atom_stride]) * sj[0] +
-              static_cast<double>(mdbase[7 * atom_stride]) * sj[1] +
-              static_cast<double>(mdbase[8 * atom_stride]) * sj[2]};
+          static_cast<double>(mdbase[0 * cache_stride]) * sj[0] +
+              static_cast<double>(mdbase[1 * cache_stride]) * sj[1] +
+              static_cast<double>(mdbase[2 * cache_stride]) * sj[2],
+          static_cast<double>(mdbase[3 * cache_stride]) * sj[0] +
+              static_cast<double>(mdbase[4 * cache_stride]) * sj[1] +
+              static_cast<double>(mdbase[5 * cache_stride]) * sj[2],
+          static_cast<double>(mdbase[6 * cache_stride]) * sj[0] +
+              static_cast<double>(mdbase[7 * cache_stride]) * sj[1] +
+              static_cast<double>(mdbase[8 * cache_stride]) * sj[2]};
       const double u1[3] = {
           v1[0] + dot * v2[0],
           v1[1] + dot * v2[1],
           v1[2] + dot * v2[2]};
       const double mt[3] = {
-          static_cast<double>(mbase[0 * atom_stride]) * rhat[0] +
-              static_cast<double>(mbase[3 * atom_stride]) * rhat[1] +
-              static_cast<double>(mbase[6 * atom_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[0 * atom_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[3 * atom_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[6 * atom_stride]) * rhat[2]),
-          static_cast<double>(mbase[1 * atom_stride]) * rhat[0] +
-              static_cast<double>(mbase[4 * atom_stride]) * rhat[1] +
-              static_cast<double>(mbase[7 * atom_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[1 * atom_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[4 * atom_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[7 * atom_stride]) * rhat[2]),
-          static_cast<double>(mbase[2 * atom_stride]) * rhat[0] +
-              static_cast<double>(mbase[5 * atom_stride]) * rhat[1] +
-              static_cast<double>(mbase[8 * atom_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[2 * atom_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[5 * atom_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[8 * atom_stride]) * rhat[2])};
+          static_cast<double>(mbase[0 * cache_stride]) * rhat[0] +
+              static_cast<double>(mbase[3 * cache_stride]) * rhat[1] +
+              static_cast<double>(mbase[6 * cache_stride]) * rhat[2] +
+              dot * (static_cast<double>(mdbase[0 * cache_stride]) * rhat[0] +
+                     static_cast<double>(mdbase[3 * cache_stride]) * rhat[1] +
+                     static_cast<double>(mdbase[6 * cache_stride]) * rhat[2]),
+          static_cast<double>(mbase[1 * cache_stride]) * rhat[0] +
+              static_cast<double>(mbase[4 * cache_stride]) * rhat[1] +
+              static_cast<double>(mbase[7 * cache_stride]) * rhat[2] +
+              dot * (static_cast<double>(mdbase[1 * cache_stride]) * rhat[0] +
+                     static_cast<double>(mdbase[4 * cache_stride]) * rhat[1] +
+                     static_cast<double>(mdbase[7 * cache_stride]) * rhat[2]),
+          static_cast<double>(mbase[2 * cache_stride]) * rhat[0] +
+              static_cast<double>(mbase[5 * cache_stride]) * rhat[1] +
+              static_cast<double>(mbase[8 * cache_stride]) * rhat[2] +
+              dot * (static_cast<double>(mdbase[2 * cache_stride]) * rhat[0] +
+                     static_cast<double>(mdbase[5 * cache_stride]) * rhat[1] +
+                     static_cast<double>(mdbase[8 * cache_stride]) * rhat[2])};
       for (int d = 0; d < 3; ++d) {
         grad_weight[c] += rhat[d] * (u1[d] + kr[d]);
         grad_rhat[d] += w * (u1[d] + 2.0 * kr[d]);
@@ -3062,7 +3147,8 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
           for (int d = 0; d < 3; ++d) {
             const int k = m * 3 + d;
             const double gd = static_cast<double>(
-                angular[atom + atom_stride * (c * width + k)]);
+                angular[spin_component_cache_index<AtomMajor>(
+                    atom_stride, C * width, atom, c * width + k)]);
             grad_weight[c] += gd * ylm[m] * sj[d];
             ge[k] += gd * weights[c];
           }
@@ -3587,6 +3673,34 @@ __device__ void add_real_spherical_harmonics_gradientf(
                grad_y[7] * b * x * (x2 - 3.0f * y2);
 }
 
+struct SpinDensityPullSharedC4L4 {
+  float rho0[12];
+  float l1[36];
+  float angular2[60];
+  float angular3[84];
+  float angular4[108];
+  float geom[36];
+  float rho0_dot[12];
+  float l1_dot[36];
+};
+
+static_assert(
+    sizeof(SpinDensityPullSharedC4L4) == 384 * sizeof(float),
+    "c4/l4 fused density pulls must remain tightly packed");
+
+template <bool AtomMajor>
+struct SpinDensityForceSharedC4L4 {
+  float reduce[6][32];
+};
+
+template <>
+struct SpinDensityForceSharedC4L4<true> {
+  SpinDensityPullSharedC4L4 pulls;
+  float reduce[6][32];
+  double direct_center_mforce[3];
+};
+
+template <bool AtomMajor>
 __global__ void __launch_bounds__(32, 8)
 accumulate_spin_density_forces_c4_l4_block_f32(
     int atom_count,
@@ -3603,21 +3717,221 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     const float* __restrict__ spin_edge_dist,
     const float* __restrict__ spin_edge_weights,
     const float* __restrict__ spin_edge_weight_derivatives,
-    const float* __restrict__ density_rho0_pull_cache,
-    const float* __restrict__ density_l1_pull_cache,
+    const float* __restrict__ density_rho0_cache,
+    const float* __restrict__ density_l1_rdot_cache,
+    const float* __restrict__ density_l1_cross_cache,
+    const float* __restrict__ density_l1_stf_cache,
     const float* __restrict__ density_angular2_cache,
     const float* __restrict__ density_angular3_cache,
     const float* __restrict__ density_angular4_cache,
-    const float* __restrict__ density_geom_pull_cache,
-    const float* __restrict__ density_rho0_dot_pull_cache,
-    const float* __restrict__ density_l1_dot_pull_cache,
+    const float* __restrict__ density_geom_cache,
+    const float* __restrict__ density_rho0_dot_cache,
+    const float* __restrict__ density_raw1_cache,
+    const float* __restrict__ density_raw1_dot_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3) {
   constexpr int C = 4;
+  constexpr int Rho0Offset = 18;
+  constexpr int L1RdotOffset = 22;
+  constexpr int L1CrossOffset = 26;
+  constexpr int L1StfOffset = 30;
+  constexpr int Angular2Offset = 34;
+  constexpr int Angular3Offset = 38;
+  constexpr int Angular4Offset = 42;
+  constexpr int GeomOffset = 46;
+  constexpr int Rho0DotOffset = 50;
+  constexpr int Raw1DotOffset = 54;
   const int atom = blockIdx.x;
   const int lane = threadIdx.x;
   if (atom >= atom_count) {
     return;
+  }
+  __shared__ SpinDensityForceSharedC4L4<AtomMajor> shared;
+  const int cache_stride = spin_component_cache_stride<AtomMajor>(atom_stride);
+
+  const float* rho0_pull_base;
+  const float* l1_pull_base;
+  const float* angular2_pull_base;
+  const float* angular3_pull_base;
+  const float* angular4_pull_base;
+  const float* geom_pull_base;
+  const float* rho0_dot_pull_base;
+  const float* l1_dot_pull_base;
+  if constexpr (AtomMajor) {
+    constexpr unsigned int FullWarpMask = 0xffffffffu;
+    const double spin_lane = lane < 3
+        ? spins_soa3[lane * atom_stride + atom]
+        : 0.0;
+    const double si0[3] = {
+        __shfl_sync(FullWarpMask, spin_lane, 0),
+        __shfl_sync(FullWarpMask, spin_lane, 1),
+        __shfl_sync(FullWarpMask, spin_lane, 2)};
+    const double spin_trace =
+        (si0[0] * si0[0] + si0[1] * si0[1] + si0[2] * si0[2]) / 3.0;
+
+    for (int component = lane; component < C * 3; component += blockDim.x) {
+      const int c = component / 3;
+      const double alpha0 = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Rho0Offset + c)]);
+      const double alpha0_dot = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Rho0DotOffset + c)]);
+      const int index = spin_component_cache_index<true, C * 3>(
+          atom_stride, atom, component);
+      const double rho0 = static_cast<double>(density_rho0_cache[index]);
+      const double rho0_dot =
+          static_cast<double>(density_rho0_dot_cache[index]);
+      shared.pulls.rho0[component] =
+          static_cast<float>(2.0 * alpha0 * rho0 + alpha0_dot * rho0_dot);
+      shared.pulls.rho0_dot[component] =
+          static_cast<float>(alpha0_dot * rho0);
+    }
+
+    for (int component = lane; component < C * 9; component += blockDim.x) {
+      const int c = component / 9;
+      const int k = component - c * 9;
+      const double alpha_rdot = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + L1RdotOffset + c)]);
+      const double alpha_cross = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + L1CrossOffset + c)]);
+      const double alpha_stf = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + L1StfOffset + c)]);
+      const double alpha_raw1 = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Raw1DotOffset + c)]);
+      const double rdot = static_cast<double>(
+          density_l1_rdot_cache[
+              spin_component_cache_index<true, C>(atom_stride, atom, c)]);
+      const double cross[3] = {
+          static_cast<double>(
+              density_l1_cross_cache[
+                  spin_component_cache_index<true, C * 3>(
+                      atom_stride, atom, c * 3)]),
+          static_cast<double>(
+              density_l1_cross_cache[
+                  spin_component_cache_index<true, C * 3>(
+                      atom_stride, atom, c * 3 + 1)]),
+          static_cast<double>(
+              density_l1_cross_cache[
+                  spin_component_cache_index<true, C * 3>(
+                      atom_stride, atom, c * 3 + 2)])};
+      const double g_cross[3] = {
+          2.0 * alpha_cross * cross[0],
+          2.0 * alpha_cross * cross[1],
+          2.0 * alpha_cross * cross[2]};
+      double mat = 0.0;
+      if (k == 0 || k == 4 || k == 8) {
+        mat += 2.0 * alpha_rdot * rdot;
+      } else if (k == 1) {
+        mat += g_cross[2];
+      } else if (k == 2) {
+        mat -= g_cross[1];
+      } else if (k == 3) {
+        mat -= g_cross[2];
+      } else if (k == 5) {
+        mat += g_cross[0];
+      } else if (k == 6) {
+        mat += g_cross[1];
+      } else if (k == 7) {
+        mat -= g_cross[0];
+      }
+      const int index = spin_component_cache_index<true, C * 9>(
+          atom_stride, atom, component);
+      const double stf = static_cast<double>(density_l1_stf_cache[index]);
+      const double raw = static_cast<double>(density_raw1_cache[index]);
+      const double raw_dot =
+          static_cast<double>(density_raw1_dot_cache[index]);
+      shared.pulls.l1[component] = static_cast<float>(
+          mat + 2.0 * alpha_stf * stf + alpha_raw1 * raw_dot);
+      shared.pulls.l1_dot[component] =
+          static_cast<float>(alpha_raw1 * raw);
+
+      const double alpha_geom = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + GeomOffset + c)]);
+      const int a = k / 3;
+      const int b = k % 3;
+      double ss = 0.5 * (si0[a] * si0[b] + si0[b] * si0[a]);
+      if (a == b) {
+        ss -= spin_trace;
+      }
+      shared.pulls.geom[component] =
+          static_cast<float>(alpha_geom * ss);
+    }
+
+    for (int component = lane; component < C * 15; component += blockDim.x) {
+      const int c = component / 15;
+      const double alpha = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Angular2Offset + c)]);
+      const int index = spin_component_cache_index<true, C * 15>(
+          atom_stride, atom, component);
+      shared.pulls.angular2[component] = static_cast<float>(
+          2.0 * alpha * static_cast<double>(density_angular2_cache[index]));
+    }
+    for (int component = lane; component < C * 21; component += blockDim.x) {
+      const int c = component / 21;
+      const double alpha = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Angular3Offset + c)]);
+      const int index = spin_component_cache_index<true, C * 21>(
+          atom_stride, atom, component);
+      shared.pulls.angular3[component] = static_cast<float>(
+          2.0 * alpha * static_cast<double>(density_angular3_cache[index]));
+    }
+    for (int component = lane; component < C * 27; component += blockDim.x) {
+      const int c = component / 27;
+      const double alpha = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Angular4Offset + c)]);
+      const int index = spin_component_cache_index<true, C * 27>(
+          atom_stride, atom, component);
+      shared.pulls.angular4[component] = static_cast<float>(
+          2.0 * alpha * static_cast<double>(density_angular4_cache[index]));
+    }
+
+    if (lane < 3) {
+      double grad_spin_i_direct = 0.0;
+      for (int c = 0; c < C; ++c) {
+        const double alpha_geom = static_cast<double>(
+            fp[atom + atom_stride * (struct_dim + GeomOffset + c)]);
+        double gs = 0.0;
+        for (int b = 0; b < 3; ++b) {
+          const double geom_ab = static_cast<double>(
+              density_geom_cache[
+                  spin_component_cache_index<true, C * 9>(
+                      atom_stride, atom, c * 9 + 3 * lane + b)]);
+          const double geom_ba = static_cast<double>(
+              density_geom_cache[
+                  spin_component_cache_index<true, C * 9>(
+                      atom_stride, atom, c * 9 + 3 * b + lane)]);
+          gs += (geom_ab + geom_ba) * si0[b];
+        }
+        grad_spin_i_direct += alpha_geom * gs;
+      }
+      shared.direct_center_mforce[lane] = -grad_spin_i_direct;
+    }
+    __syncthreads();
+
+    rho0_pull_base = shared.pulls.rho0;
+    l1_pull_base = shared.pulls.l1;
+    angular2_pull_base = shared.pulls.angular2;
+    angular3_pull_base = shared.pulls.angular3;
+    angular4_pull_base = shared.pulls.angular4;
+    geom_pull_base = shared.pulls.geom;
+    rho0_dot_pull_base = shared.pulls.rho0_dot;
+    l1_dot_pull_base = shared.pulls.l1_dot;
+  } else {
+    rho0_pull_base = density_rho0_cache +
+        spin_component_cache_index<false, C * 3>(atom_stride, atom, 0);
+    l1_pull_base = density_l1_stf_cache +
+        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
+    angular2_pull_base = density_angular2_cache +
+        spin_component_cache_index<false, C * 15>(atom_stride, atom, 0);
+    angular3_pull_base = density_angular3_cache +
+        spin_component_cache_index<false, C * 21>(atom_stride, atom, 0);
+    angular4_pull_base = density_angular4_cache +
+        spin_component_cache_index<false, C * 27>(atom_stride, atom, 0);
+    geom_pull_base = density_raw1_cache +
+        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
+    rho0_dot_pull_base = density_rho0_dot_cache +
+        spin_component_cache_index<false, C * 3>(atom_stride, atom, 0);
+    l1_dot_pull_base = density_raw1_dot_cache +
+        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
   }
 
   float center_force[3] = {};
@@ -3707,13 +4021,13 @@ accumulate_spin_density_forces_c4_l4_block_f32(
 
     for (int c = 0; c < C; ++c) {
       const float b[3] = {
-          density_rho0_pull_cache[atom + atom_stride * (c * 3)],
-          density_rho0_pull_cache[atom + atom_stride * (c * 3 + 1)],
-          density_rho0_pull_cache[atom + atom_stride * (c * 3 + 2)]};
+          rho0_pull_base[(c * 3) * cache_stride],
+          rho0_pull_base[(c * 3 + 1) * cache_stride],
+          rho0_pull_base[(c * 3 + 2) * cache_stride]};
       const float bd[3] = {
-          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3)],
-          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 1)],
-          density_rho0_dot_pull_cache[atom + atom_stride * (c * 3 + 2)]};
+          rho0_dot_pull_base[(c * 3) * cache_stride],
+          rho0_dot_pull_base[(c * 3 + 1) * cache_stride],
+          rho0_dot_pull_base[(c * 3 + 2) * cache_stride]};
       const float u[3] = {
           b[0] + dot * bd[0],
           b[1] + dot * bd[1],
@@ -3725,57 +4039,59 @@ accumulate_spin_density_forces_c4_l4_block_f32(
       }
       grad_dot += w * dot3f(sj, bd);
 
-      const float* gbase = density_geom_pull_cache + atom + atom_stride * c * 9;
-      const float* mbase = density_l1_pull_cache + atom + atom_stride * c * 9;
-      const float* mdbase =
-          density_l1_dot_pull_cache + atom + atom_stride * c * 9;
+      const float* gbase = geom_pull_base + c * 9 * cache_stride;
+      const float* mbase = l1_pull_base + c * 9 * cache_stride;
+      const float* mdbase = l1_dot_pull_base + c * 9 * cache_stride;
       const float kr[3] = {
-          gbase[0 * atom_stride] * rhat[0] +
-              gbase[1 * atom_stride] * rhat[1] +
-              gbase[2 * atom_stride] * rhat[2],
-          gbase[3 * atom_stride] * rhat[0] +
-              gbase[4 * atom_stride] * rhat[1] +
-              gbase[5 * atom_stride] * rhat[2],
-          gbase[6 * atom_stride] * rhat[0] +
-              gbase[7 * atom_stride] * rhat[1] +
-              gbase[8 * atom_stride] * rhat[2]};
+          gbase[0 * cache_stride] * rhat[0] +
+              gbase[1 * cache_stride] * rhat[1] +
+              gbase[2 * cache_stride] * rhat[2],
+          gbase[3 * cache_stride] * rhat[0] +
+              gbase[4 * cache_stride] * rhat[1] +
+              gbase[5 * cache_stride] * rhat[2],
+          gbase[6 * cache_stride] * rhat[0] +
+              gbase[7 * cache_stride] * rhat[1] +
+              gbase[8 * cache_stride] * rhat[2]};
       const float v1[3] = {
-          mbase[0 * atom_stride] * sj[0] + mbase[1 * atom_stride] * sj[1] +
-              mbase[2 * atom_stride] * sj[2],
-          mbase[3 * atom_stride] * sj[0] + mbase[4 * atom_stride] * sj[1] +
-              mbase[5 * atom_stride] * sj[2],
-          mbase[6 * atom_stride] * sj[0] + mbase[7 * atom_stride] * sj[1] +
-              mbase[8 * atom_stride] * sj[2]};
+          mbase[0 * cache_stride] * sj[0] + mbase[1 * cache_stride] * sj[1] +
+              mbase[2 * cache_stride] * sj[2],
+          mbase[3 * cache_stride] * sj[0] + mbase[4 * cache_stride] * sj[1] +
+              mbase[5 * cache_stride] * sj[2],
+          mbase[6 * cache_stride] * sj[0] + mbase[7 * cache_stride] * sj[1] +
+              mbase[8 * cache_stride] * sj[2]};
       const float v2[3] = {
-          mdbase[0 * atom_stride] * sj[0] + mdbase[1 * atom_stride] * sj[1] +
-              mdbase[2 * atom_stride] * sj[2],
-          mdbase[3 * atom_stride] * sj[0] + mdbase[4 * atom_stride] * sj[1] +
-              mdbase[5 * atom_stride] * sj[2],
-          mdbase[6 * atom_stride] * sj[0] + mdbase[7 * atom_stride] * sj[1] +
-              mdbase[8 * atom_stride] * sj[2]};
+          mdbase[0 * cache_stride] * sj[0] +
+              mdbase[1 * cache_stride] * sj[1] +
+              mdbase[2 * cache_stride] * sj[2],
+          mdbase[3 * cache_stride] * sj[0] +
+              mdbase[4 * cache_stride] * sj[1] +
+              mdbase[5 * cache_stride] * sj[2],
+          mdbase[6 * cache_stride] * sj[0] +
+              mdbase[7 * cache_stride] * sj[1] +
+              mdbase[8 * cache_stride] * sj[2]};
       const float u1[3] = {
           v1[0] + dot * v2[0],
           v1[1] + dot * v2[1],
           v1[2] + dot * v2[2]};
       const float mt[3] = {
-          mbase[0 * atom_stride] * rhat[0] +
-              mbase[3 * atom_stride] * rhat[1] +
-              mbase[6 * atom_stride] * rhat[2] +
-              dot * (mdbase[0 * atom_stride] * rhat[0] +
-                     mdbase[3 * atom_stride] * rhat[1] +
-                     mdbase[6 * atom_stride] * rhat[2]),
-          mbase[1 * atom_stride] * rhat[0] +
-              mbase[4 * atom_stride] * rhat[1] +
-              mbase[7 * atom_stride] * rhat[2] +
-              dot * (mdbase[1 * atom_stride] * rhat[0] +
-                     mdbase[4 * atom_stride] * rhat[1] +
-                     mdbase[7 * atom_stride] * rhat[2]),
-          mbase[2 * atom_stride] * rhat[0] +
-              mbase[5 * atom_stride] * rhat[1] +
-              mbase[8 * atom_stride] * rhat[2] +
-              dot * (mdbase[2 * atom_stride] * rhat[0] +
-                     mdbase[5 * atom_stride] * rhat[1] +
-                     mdbase[8 * atom_stride] * rhat[2])};
+          mbase[0 * cache_stride] * rhat[0] +
+              mbase[3 * cache_stride] * rhat[1] +
+              mbase[6 * cache_stride] * rhat[2] +
+              dot * (mdbase[0 * cache_stride] * rhat[0] +
+                     mdbase[3 * cache_stride] * rhat[1] +
+                     mdbase[6 * cache_stride] * rhat[2]),
+          mbase[1 * cache_stride] * rhat[0] +
+              mbase[4 * cache_stride] * rhat[1] +
+              mbase[7 * cache_stride] * rhat[2] +
+              dot * (mdbase[1 * cache_stride] * rhat[0] +
+                     mdbase[4 * cache_stride] * rhat[1] +
+                     mdbase[7 * cache_stride] * rhat[2]),
+          mbase[2 * cache_stride] * rhat[0] +
+              mbase[5 * cache_stride] * rhat[1] +
+              mbase[8 * cache_stride] * rhat[2] +
+              dot * (mdbase[2 * cache_stride] * rhat[0] +
+                     mdbase[5 * cache_stride] * rhat[1] +
+                     mdbase[8 * cache_stride] * rhat[2])};
       for (int d = 0; d < 3; ++d) {
         grad_weight[c] += rhat[d] * (u1[d] + kr[d]);
         grad_rhat[d] += w * (u1[d] + 2.0f * kr[d]);
@@ -3787,8 +4103,8 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     for (int ell = 2; ell <= 4; ++ell) {
       const int width = (2 * ell + 1) * 3;
       const float* angular =
-          ell == 2 ? density_angular2_cache :
-          ell == 3 ? density_angular3_cache : density_angular4_cache;
+          ell == 2 ? angular2_pull_base :
+          ell == 3 ? angular3_pull_base : angular4_pull_base;
       float ylm[9];
       const int ylm_width = real_spherical_harmonics_spinf(rhat, ell, ylm);
       float ge[27] = {};
@@ -3796,7 +4112,7 @@ accumulate_spin_density_forces_c4_l4_block_f32(
         for (int m = 0; m < ylm_width; ++m) {
           for (int d = 0; d < 3; ++d) {
             const int k = m * 3 + d;
-            const float gd = angular[atom + atom_stride * (c * width + k)];
+            const float gd = angular[(c * width + k) * cache_stride];
             grad_weight[c] += gd * ylm[m] * sj[d];
             ge[k] += gd * weights[c];
           }
@@ -3838,7 +4154,7 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     }
   }
 
-  __shared__ float reduce[6][32];
+  float (*reduce)[32] = shared.reduce;
   for (int d = 0; d < 3; ++d) {
     reduce[d][lane] = center_force[d];
     reduce[d + 3][lane] = center_mforce[d];
@@ -3856,12 +4172,17 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     for (int d = 0; d < 3; ++d) {
       atomicAdd(force_soa3 + d * atom_stride + atom,
                 static_cast<double>(reduce[d][0]));
+      double center_mforce_total = static_cast<double>(reduce[d + 3][0]);
+      if constexpr (AtomMajor) {
+        center_mforce_total += shared.direct_center_mforce[d];
+      }
       atomicAdd(mforce_soa3 + d * atom_stride + atom,
-                static_cast<double>(reduce[d + 3][0]));
+                center_mforce_total);
     }
   }
 }
 
+template <bool AtomMajor>
 __global__ void build_spin_chiral_finalize_c4_l4_f32(
     int atom_count,
     int atom_stride,
@@ -3895,10 +4216,14 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
   float geom[9];
   float polar[3];
   for (int k = 0; k < 9; ++k) {
-    geom[k] = density_geom_cache[atom + atom_stride * (c * 9 + k)];
+    geom[k] = density_geom_cache[
+        spin_component_cache_index<AtomMajor, C * 9>(
+            atom_stride, atom, c * 9 + k)];
   }
   for (int k = 0; k < 3; ++k) {
-    polar[k] = chiral_polar_cache[atom + atom_stride * (c * 3 + k)];
+    polar[k] = chiral_polar_cache[
+        spin_component_cache_index<AtomMajor, C * 3>(
+            atom_stride, atom, c * 3 + k)];
   }
 
   float chiral_value = 0.0f;
@@ -3908,12 +4233,14 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
     for (int k = 0; k < kSpinDeg3Count; ++k) {
       octupoles_raw[k] =
           chiral_octupoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg3Count + k)];
+              spin_component_cache_index<AtomMajor, ChiC * kSpinDeg3Count>(
+                  atom_stride, atom, c * kSpinDeg3Count + k)];
     }
     for (int k = 0; k < kSpinDeg4Count; ++k) {
       hexadecapoles_raw[k] =
           chiral_hexadecapoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg4Count + k)];
+              spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
+                  atom_stride, atom, c * kSpinDeg4Count + k)];
     }
     for (int term = 0; term < kSpinChiralQohCount; ++term) {
       const unsigned short packed = kSpinChiralQohPacked[term];
@@ -3923,7 +4250,9 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
       chiral_value += static_cast<float>(kSpinChiralQohCoeff[term]) *
                       geom[q] * octupoles_raw[o] * hexadecapoles_raw[h];
     }
-    chiral_chirals_cache[atom + atom_stride * c] = chiral_value;
+    chiral_chirals_cache[
+        spin_component_cache_index<AtomMajor, ChiC>(atom_stride, atom, c)] =
+        chiral_value;
   }
 
   float pseudodevs[9] = {};
@@ -3968,7 +4297,9 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
     }
   }
   for (int k = 0; k < 9; ++k) {
-    chiral_pseudodevs_cache[atom + atom_stride * (c * 9 + k)] = pseudodevs[k];
+    chiral_pseudodevs_cache[
+        spin_component_cache_index<AtomMajor, C * 9>(
+            atom_stride, atom, c * 9 + k)] = pseudodevs[k];
   }
 
   float chiral_q0 = 0.0f;
@@ -4025,6 +4356,7 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
       chiral_q2;
 }
 
+template <bool AtomMajor>
 __global__ void __launch_bounds__(32, 16)
 accumulate_spin_chiral_forces_c4_l4_cached_f32(
     int atom_count,
@@ -4084,26 +4416,35 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
   float pseudodevs[C * 9] = {};
   for (int c = 0; c < C; ++c) {
     for (int k = 0; k < 3; ++k) {
-      polar[c * 3 + k] = chiral_polar_cache[atom + atom_stride * (c * 3 + k)];
+      polar[c * 3 + k] = chiral_polar_cache[
+          spin_component_cache_index<AtomMajor, C * 3>(
+              atom_stride, atom, c * 3 + k)];
     }
     for (int k = 0; k < 9; ++k) {
-      geom[c * 9 + k] = density_geom_cache[atom + atom_stride * (c * 9 + k)];
+      geom[c * 9 + k] = density_geom_cache[
+          spin_component_cache_index<AtomMajor, C * 9>(
+              atom_stride, atom, c * 9 + k)];
       pseudodevs[c * 9 + k] =
-          chiral_pseudodevs_cache[atom + atom_stride * (c * 9 + k)];
+          chiral_pseudodevs_cache[
+              spin_component_cache_index<AtomMajor, C * 9>(
+                  atom_stride, atom, c * 9 + k)];
     }
   }
   for (int c = 0; c < ChiC; ++c) {
     for (int k = 0; k < kSpinDeg3Count; ++k) {
       octupoles_raw[c * kSpinDeg3Count + k] =
           chiral_octupoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg3Count + k)];
+              spin_component_cache_index<AtomMajor, ChiC * kSpinDeg3Count>(
+                  atom_stride, atom, c * kSpinDeg3Count + k)];
     }
     for (int k = 0; k < kSpinDeg4Count; ++k) {
       hexadecapoles_raw[c * kSpinDeg4Count + k] =
           chiral_hexadecapoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg4Count + k)];
+              spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
+                  atom_stride, atom, c * kSpinDeg4Count + k)];
     }
-    chirals[c] = chiral_chirals_cache[atom + atom_stride * c];
+    chirals[c] = chiral_chirals_cache[
+        spin_component_cache_index<AtomMajor, ChiC>(atom_stride, atom, c)];
   }
 
   float grad_chi[ChiC] = {};
@@ -4926,6 +5267,151 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
   }
 }
 
+template <bool AtomMajor>
+void launch_spin_density_forces_c4_l4(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceWorkspaceView& view,
+    bool accumulate_virial,
+    int blocks,
+    int threads) {
+  if constexpr (AtomMajor) {
+    if (accumulate_virial) {
+      prepare_spin_density_pulls_c4_l4<true><<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          view.spins_soa3,
+          view.fp,
+          view.spin_density_rho0,
+          view.spin_density_l1_rdot,
+          view.spin_density_l1_cross,
+          view.spin_density_l1_stf,
+          view.spin_density_angular2,
+          view.spin_density_angular3,
+          view.spin_density_angular4,
+          view.spin_density_geom,
+          view.spin_density_rho0_dot,
+          view.spin_density_raw1,
+          view.spin_density_raw1_dot,
+          view.mforce_soa3);
+    }
+  } else {
+    prepare_spin_density_pulls_c4_l4<AtomMajor><<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        view.spins_soa3,
+        view.fp,
+        view.spin_density_rho0,
+        view.spin_density_l1_rdot,
+        view.spin_density_l1_cross,
+        view.spin_density_l1_stf,
+        view.spin_density_angular2,
+        view.spin_density_angular3,
+        view.spin_density_angular4,
+        view.spin_density_geom,
+        view.spin_density_rho0_dot,
+        view.spin_density_raw1,
+        view.spin_density_raw1_dot,
+        view.mforce_soa3);
+  }
+  if (accumulate_virial) {
+    accumulate_spin_density_forces_c4_l4_pull<AtomMajor><<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        static_cast<float>(protocol.spin_cutoff_radial),
+        view.spins_soa3,
+        view.nn_radial,
+        view.nl_radial_slot_major,
+        view.fp,
+        view.spin_edge_dx,
+        view.spin_edge_dy,
+        view.spin_edge_dz,
+        view.spin_edge_dist,
+        view.spin_edge_weights,
+        view.spin_edge_weight_derivatives,
+        view.spin_density_rho0,
+        view.spin_density_l1_stf,
+        view.spin_density_angular2,
+        view.spin_density_angular3,
+        view.spin_density_angular4,
+        view.spin_density_raw1,
+        view.spin_density_rho0_dot,
+        view.spin_density_raw1_dot,
+        view.force_soa3,
+        view.mforce_soa3,
+        accumulate_virial,
+        view.virial_soa9);
+  } else {
+    accumulate_spin_density_forces_c4_l4_block_f32<AtomMajor>
+        <<<atom_count, threads>>>(
+            atom_count,
+            static_cast<int>(view.atom_capacity),
+            protocol.struct_descriptor_dim,
+            static_cast<float>(protocol.spin_cutoff_radial),
+            view.spins_soa3,
+            view.nn_radial,
+            view.nl_radial_slot_major,
+            view.fp,
+            view.spin_edge_dx,
+            view.spin_edge_dy,
+            view.spin_edge_dz,
+            view.spin_edge_dist,
+            view.spin_edge_weights,
+            view.spin_edge_weight_derivatives,
+            view.spin_density_rho0,
+            view.spin_density_l1_rdot,
+            view.spin_density_l1_cross,
+            view.spin_density_l1_stf,
+            view.spin_density_angular2,
+            view.spin_density_angular3,
+            view.spin_density_angular4,
+            view.spin_density_geom,
+            view.spin_density_rho0_dot,
+            view.spin_density_raw1,
+            view.spin_density_raw1_dot,
+            view.force_soa3,
+            view.mforce_soa3);
+  }
+}
+
+template <bool AtomMajor>
+void launch_spin_chiral_forces_c4_l4(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceWorkspaceView& view,
+    bool accumulate_virial,
+    int blocks,
+    int threads) {
+  accumulate_spin_chiral_forces_c4_l4_cached_f32<AtomMajor><<<blocks, threads>>>(
+      atom_count,
+      static_cast<int>(view.atom_capacity),
+      protocol.struct_descriptor_dim,
+      static_cast<float>(protocol.spin_cutoff_radial),
+      view.spins_soa3,
+      view.nn_radial,
+      view.nl_radial_slot_major,
+      view.fp,
+      view.spin_edge_dx,
+      view.spin_edge_dy,
+      view.spin_edge_dz,
+      view.spin_edge_dist,
+      view.spin_edge_weights,
+      view.spin_edge_weight_derivatives,
+      view.spin_density_geom,
+      view.spin_chiral_polar,
+      view.spin_chiral_octupoles_raw,
+      view.spin_chiral_hexadecapoles_raw,
+      view.spin_chiral_chirals,
+      view.spin_chiral_pseudodevs,
+      view.force_soa3,
+      view.mforce_soa3,
+      accumulate_virial,
+      view.virial_soa9);
+}
+
 }  // namespace
 
 void build_spin_descriptors_on_device(
@@ -5032,7 +5518,7 @@ void build_spin_descriptors_on_device(
     const int blocks = (work_items + threads - 1) / threads;
     if (blocks > 0) {
       if (protocol.neighbor_capacity_radial <= 32) {
-        build_spin_primitive_cache_c4_l4_warp<32><<<atom_count, 128>>>(
+        build_spin_primitive_cache_c4_l4_warp<32, true><<<atom_count, 128>>>(
             atom_count,
             static_cast<int>(view.atom_capacity),
             protocol.struct_descriptor_dim,
@@ -5061,7 +5547,8 @@ void build_spin_descriptors_on_device(
             view.spin_chiral_hexadecapoles_raw,
             view.descriptors);
       } else if (protocol.neighbor_capacity_radial <= kSpinPrimitiveSlots) {
-        build_spin_primitive_cache_c4_l4_warp<kSpinPrimitiveSlots><<<atom_count, 128>>>(
+        build_spin_primitive_cache_c4_l4_warp<kSpinPrimitiveSlots, false>
+            <<<atom_count, 128>>>(
             atom_count,
             static_cast<int>(view.atom_capacity),
             protocol.struct_descriptor_dim,
@@ -5119,45 +5606,49 @@ void build_spin_descriptors_on_device(
             view.spin_chiral_hexadecapoles_raw,
             view.descriptors);
       }
-      if (protocol.neighbor_capacity_radial <= kSpinPrimitiveSlots) {
-        finish_spin_density_descriptors_c4_l4_from_cache<<<blocks, threads>>>(
+      if (protocol.neighbor_capacity_radial <= 32) {
+        build_spin_chiral_finalize_c4_l4_f32<true><<<blocks, threads>>>(
             atom_count,
             static_cast<int>(view.atom_capacity),
             protocol.struct_descriptor_dim,
+            static_cast<float>(protocol.spin_cutoff_radial),
             view.spins_soa3,
-            view.spin_density_rho0,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
+            view.nn_radial,
+            view.nl_radial_slot_major,
+            view.spin_edge_dx,
+            view.spin_edge_dy,
+            view.spin_edge_dz,
+            view.spin_edge_dist,
+            view.spin_edge_weights,
             view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1,
-            view.spin_density_raw1_dot,
+            view.spin_chiral_polar,
+            view.spin_chiral_octupoles_raw,
+            view.spin_chiral_hexadecapoles_raw,
+            view.spin_chiral_chirals,
+            view.spin_chiral_pseudodevs,
+            view.descriptors);
+      } else {
+        build_spin_chiral_finalize_c4_l4_f32<false><<<blocks, threads>>>(
+            atom_count,
+            static_cast<int>(view.atom_capacity),
+            protocol.struct_descriptor_dim,
+            static_cast<float>(protocol.spin_cutoff_radial),
+            view.spins_soa3,
+            view.nn_radial,
+            view.nl_radial_slot_major,
+            view.spin_edge_dx,
+            view.spin_edge_dy,
+            view.spin_edge_dz,
+            view.spin_edge_dist,
+            view.spin_edge_weights,
+            view.spin_density_geom,
+            view.spin_chiral_polar,
+            view.spin_chiral_octupoles_raw,
+            view.spin_chiral_hexadecapoles_raw,
+            view.spin_chiral_chirals,
+            view.spin_chiral_pseudodevs,
             view.descriptors);
       }
-      build_spin_chiral_finalize_c4_l4_f32<<<blocks, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.struct_descriptor_dim,
-          static_cast<float>(protocol.spin_cutoff_radial),
-          view.spins_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          view.spin_edge_dx,
-          view.spin_edge_dy,
-          view.spin_edge_dz,
-          view.spin_edge_dist,
-          view.spin_edge_weights,
-          view.spin_density_geom,
-          view.spin_chiral_polar,
-          view.spin_chiral_octupoles_raw,
-          view.spin_chiral_hexadecapoles_raw,
-          view.spin_chiral_chirals,
-          view.spin_chiral_pseudodevs,
-          view.descriptors);
     }
   } else {
     const int threads = 32;
@@ -5385,78 +5876,12 @@ void accumulate_spin_density_forces_on_device(
   const int threads = 32;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0 && use_cached_geometry) {
-    prepare_spin_density_pulls_c4_l4<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        view.spins_soa3,
-        view.fp,
-        view.spin_density_rho0,
-        view.spin_density_l1_rdot,
-        view.spin_density_l1_cross,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_geom,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1,
-        view.spin_density_raw1_dot,
-        view.mforce_soa3);
-    if (accumulate_virial) {
-      accumulate_spin_density_forces_c4_l4_pull<<<blocks, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.struct_descriptor_dim,
-          static_cast<float>(protocol.spin_cutoff_radial),
-          view.spins_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          view.fp,
-          view.spin_edge_dx,
-          view.spin_edge_dy,
-          view.spin_edge_dz,
-          view.spin_edge_dist,
-          view.spin_edge_weights,
-          view.spin_edge_weight_derivatives,
-          view.spin_density_rho0,
-          view.spin_density_l1_stf,
-          view.spin_density_angular2,
-          view.spin_density_angular3,
-          view.spin_density_angular4,
-          view.spin_density_raw1,
-          view.spin_density_rho0_dot,
-          view.spin_density_raw1_dot,
-          view.force_soa3,
-          view.mforce_soa3,
-          accumulate_virial,
-          view.virial_soa9);
+    if (protocol.neighbor_capacity_radial <= 32) {
+      launch_spin_density_forces_c4_l4<true>(
+          protocol, atom_count, view, accumulate_virial, blocks, threads);
     } else {
-      accumulate_spin_density_forces_c4_l4_block_f32<<<atom_count, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.struct_descriptor_dim,
-          static_cast<float>(protocol.spin_cutoff_radial),
-          view.spins_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          view.fp,
-          view.spin_edge_dx,
-          view.spin_edge_dy,
-          view.spin_edge_dz,
-          view.spin_edge_dist,
-          view.spin_edge_weights,
-          view.spin_edge_weight_derivatives,
-          view.spin_density_rho0,
-          view.spin_density_l1_stf,
-          view.spin_density_angular2,
-          view.spin_density_angular3,
-          view.spin_density_angular4,
-          view.spin_density_raw1,
-          view.spin_density_rho0_dot,
-          view.spin_density_raw1_dot,
-          view.force_soa3,
-          view.mforce_soa3);
+      launch_spin_density_forces_c4_l4<false>(
+          protocol, atom_count, view, accumulate_virial, blocks, threads);
     }
   } else if (blocks > 0) {
     accumulate_spin_density_forces<<<blocks, threads>>>(
@@ -5566,31 +5991,13 @@ void accumulate_spin_chiral_polar_forces_on_device(
   const int threads = 32;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0 && use_cached_geometry) {
-    accumulate_spin_chiral_forces_c4_l4_cached_f32<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        view.spin_density_geom,
-        view.spin_chiral_polar,
-        view.spin_chiral_octupoles_raw,
-        view.spin_chiral_hexadecapoles_raw,
-        view.spin_chiral_chirals,
-        view.spin_chiral_pseudodevs,
-        view.force_soa3,
-        view.mforce_soa3,
-        accumulate_virial,
-        view.virial_soa9);
+    if (protocol.neighbor_capacity_radial <= 32) {
+      launch_spin_chiral_forces_c4_l4<true>(
+          protocol, atom_count, view, accumulate_virial, blocks, threads);
+    } else {
+      launch_spin_chiral_forces_c4_l4<false>(
+          protocol, atom_count, view, accumulate_virial, blocks, threads);
+    }
   } else if (blocks > 0) {
     accumulate_spin_chiral_forces<<<blocks, threads>>>(
         atom_count,
