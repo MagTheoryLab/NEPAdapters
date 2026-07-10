@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@ namespace {
 
 constexpr int kAtomCount = 2;
 constexpr int kDescriptorDim = 17;
+constexpr int kC4L4DescriptorDim = 69;
+constexpr int kFirstDensityDescriptor = 19;
+constexpr int kRaw1DotDescriptor = 55;
 
 std::string write_model(int active_dim) {
   const std::string path =
@@ -48,15 +52,83 @@ std::string write_model(int active_dim) {
   return path;
 }
 
+std::string write_c4_l4_model(
+    const std::string& label,
+    int max_neighbors,
+    int active_descriptor) {
+  const std::string path =
+      (std::filesystem::temp_directory_path() /
+       ("cuda_spin_density_c4_l4_" + label + ".nep")).string();
+  std::ofstream out(path);
+  out << "nep4_spin1 1 Fe\n";
+  out << "spin_mode 1 10\n";
+  out << "spin_baseline -2\n";
+  out << "spin_n_max 2 1\n";
+  out << "spin_basis_size 3 3\n";
+  out << "spin_l_max 4 0 0\n";
+  out << "spin_compress 4\n";
+  out << "spin_cutoff 4 4\n";
+  out << "spin_chiral 1\n";
+  out << "spin_scaler 1\n";
+  out << "spin_dof_type Fe\n";
+  out << "spin_env_type Fe\n";
+  out << "cutoff 4 4 " << max_neighbors << " " << max_neighbors << "\n";
+  out << "n_max 0 0\n";
+  out << "basis_size 0 0\n";
+  out << "l_max 0 0 0\n";
+  out << "ANN 1 0\n";
+  for (int dim = 0; dim < kC4L4DescriptorDim; ++dim) {
+    out << (dim == active_descriptor ? 0.25 : 0.0) << "\n";
+  }
+  out << "0\n1\n0\n";
+  out << "0\n0\n";
+  for (int coefficient = 0; coefficient < 16; ++coefficient) {
+    out << "1\n";
+  }
+  for (int dim = 0; dim < kC4L4DescriptorDim; ++dim) {
+    out << "1\n";
+  }
+  return path;
+}
+
+std::string write_c4_l4_raw1_dot_model() {
+  // Max-neighbor 64 maps to capacity 80, isolating the raw1 overwrite order.
+  return write_c4_l4_model("raw1_dot_capacity80", 64, kRaw1DotDescriptor);
+}
+
+std::string write_c4_l4_capacity32_density_model() {
+  // Max-neighbor 25 maps to the upper boundary of the <=32 cache variant.
+  return write_c4_l4_model(
+      "density_capacity32", 25, kFirstDensityDescriptor);
+}
+
 double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& rhs) {
+  const double infinity = std::numeric_limits<double>::infinity();
   if (lhs.size() != rhs.size()) {
-    return INFINITY;
+    return infinity;
   }
   double diff = 0.0;
   for (std::size_t i = 0; i < lhs.size(); ++i) {
-    diff = std::max(diff, std::abs(lhs[i] - rhs[i]));
+    if (!std::isfinite(lhs[i]) || !std::isfinite(rhs[i])) {
+      return infinity;
+    }
+    const double delta = std::abs(lhs[i] - rhs[i]);
+    if (!std::isfinite(delta)) {
+      return infinity;
+    }
+    diff = std::max(diff, delta);
   }
   return diff;
+}
+
+bool check_max_abs_diff_rejects_non_finite() {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double max = std::numeric_limits<double>::max();
+  return std::isinf(max_abs_diff({nan}, {0.0})) &&
+         std::isinf(max_abs_diff({0.0}, {nan})) &&
+         std::isinf(max_abs_diff({infinity}, {infinity})) &&
+         std::isinf(max_abs_diff({max}, {-max}));
 }
 
 struct BatchResult {
@@ -65,6 +137,7 @@ struct BatchResult {
   std::vector<double> force;
   std::vector<double> virial;
   std::vector<double> mforce;
+  std::vector<double> descriptor;
 };
 
 BatchResult run_batch(NepaModel* model) {
@@ -92,6 +165,13 @@ BatchResult run_batch(NepaModel* model) {
   out.force.assign(3 * kAtomCount, 0.0);
   out.virial.assign(9, 0.0);
   out.mforce.assign(3 * kAtomCount, 0.0);
+  NepaModelInfo info{};
+  if (nepa_model_info(model, &info) != NEPA_STATUS_OK) {
+    std::cerr << "model info failed: " << nepa_last_error_message() << "\n";
+    std::exit(EXIT_FAILURE);
+  }
+  out.descriptor.assign(
+      static_cast<std::size_t>(kAtomCount) * info.descriptor_dim, 0.0);
   NepaFindForceResult result{};
   result.energy_per_structure = &out.energy;
   result.potential_per_atom = out.potential.data();
@@ -100,6 +180,12 @@ BatchResult run_batch(NepaModel* model) {
   result.mforces_aos3 = out.mforce.data();
   if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
     std::cerr << "batch failed: " << nepa_last_error_message() << "\n";
+    std::exit(EXIT_FAILURE);
+  }
+  NepaFindDescriptorResult descriptor_result{};
+  descriptor_result.descriptors = out.descriptor.data();
+  if (nepa_find_descriptors(model, &batch, &descriptor_result) != NEPA_STATUS_OK) {
+    std::cerr << "descriptor failed: " << nepa_last_error_message() << "\n";
     std::exit(EXIT_FAILURE);
   }
   return out;
@@ -184,9 +270,73 @@ bool check_dim(int active_dim) {
   return ok;
 }
 
+bool check_c4_l4_raw1_dot() {
+  const std::string model_path = write_c4_l4_raw1_dot_model();
+  NepaModel* cpu = nullptr;
+  NepaModel* gpu = nullptr;
+  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+      nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
+    std::cerr << "raw1-dot model load failed: " << nepa_last_error_message() << "\n";
+    return false;
+  }
+  const BatchResult cpu_oracle = run_batch(cpu);
+  const BatchResult optimized = run_batch(gpu);
+  const double force_diff = max_abs_diff(cpu_oracle.force, optimized.force);
+  const double mforce_diff = max_abs_diff(cpu_oracle.mforce, optimized.mforce);
+  const bool ok = force_diff < 2.0e-4 && mforce_diff < 2.0e-4;
+  if (!ok) {
+    std::cerr << "optimized c4/l4 raw1-dot derivative mismatch"
+              << " force=" << force_diff
+              << " mforce=" << mforce_diff << "\n";
+  }
+  nepa_free_model(cpu);
+  nepa_free_model(gpu);
+  return ok;
+}
+
+bool check_c4_l4_capacity32_density_finalize() {
+  const std::string model_path = write_c4_l4_capacity32_density_model();
+  NepaModel* cpu = nullptr;
+  NepaModel* gpu = nullptr;
+  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+      nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
+    std::cerr << "capacity-32 model load failed: "
+              << nepa_last_error_message() << "\n";
+    return false;
+  }
+  const BatchResult cpu_oracle = run_batch(cpu);
+  const BatchResult optimized = run_batch(gpu);
+  const double descriptor_diff =
+      max_abs_diff(cpu_oracle.descriptor, optimized.descriptor);
+  const double energy_diff = std::abs(cpu_oracle.energy - optimized.energy);
+  const double force_diff = max_abs_diff(cpu_oracle.force, optimized.force);
+  const double mforce_diff = max_abs_diff(cpu_oracle.mforce, optimized.mforce);
+  std::cout << "c4_l4_capacity32_density_oracle"
+            << " descriptor=" << descriptor_diff
+            << " energy=" << energy_diff
+            << " force=" << force_diff
+            << " mforce=" << mforce_diff << "\n";
+  const bool ok = descriptor_diff < 2.0e-4 && energy_diff < 2.0e-4 &&
+                  force_diff < 2.0e-4 && mforce_diff < 2.0e-4;
+  if (!ok) {
+    std::cerr << "optimized c4/l4 capacity-32 density mismatch"
+              << " descriptor=" << descriptor_diff
+              << " energy=" << energy_diff
+              << " force=" << force_diff
+              << " mforce=" << mforce_diff << "\n";
+  }
+  nepa_free_model(cpu);
+  nepa_free_model(gpu);
+  return ok;
+}
+
 }  // namespace
 
 int main() {
+  if (!check_max_abs_diff_rejects_non_finite()) {
+    std::cerr << "max_abs_diff accepted a non-finite comparison\n";
+    return EXIT_FAILURE;
+  }
   if (!nep_adapters::register_cpu_opt_engine() ||
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
@@ -195,6 +345,12 @@ int main() {
     if (!check_dim(active_dim)) {
       return EXIT_FAILURE;
     }
+  }
+  if (!check_c4_l4_raw1_dot()) {
+    return EXIT_FAILURE;
+  }
+  if (!check_c4_l4_capacity32_density_finalize()) {
+    return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;
 }

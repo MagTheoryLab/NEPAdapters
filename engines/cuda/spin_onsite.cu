@@ -2800,8 +2800,6 @@ __global__ void prepare_spin_density_pulls_c4_l4(
     for (int k = 0; k < 9; ++k) {
       geom[k] = static_cast<double>(
           density_geom_cache[atom + atom_stride * (c * 9 + k)]);
-      density_raw1_cache[atom + atom_stride * (c * 9 + k)] =
-          static_cast<float>(alpha_geom * ss[k]);
     }
     for (int a = 0; a < 3; ++a) {
       double gs = 0.0;
@@ -2850,6 +2848,7 @@ __global__ void prepare_spin_density_pulls_c4_l4(
           static_cast<float>(mat[k] + 2.0 * alpha_stf * stf +
                              alpha_raw1 * raw_dot);
       density_raw1_dot_cache[idx] = static_cast<float>(alpha_raw1 * raw);
+      density_raw1_cache[idx] = static_cast<float>(alpha_geom * ss[k]);
     }
 
     const double alpha_l2 = static_cast<double>(
@@ -5090,23 +5089,6 @@ void build_spin_descriptors_on_device(
             view.spin_chiral_octupoles_raw,
             view.spin_chiral_hexadecapoles_raw,
             view.descriptors);
-        finish_spin_density_descriptors_c4_l4_from_cache<<<blocks, threads>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            view.spins_soa3,
-            view.spin_density_rho0,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
-            view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1,
-            view.spin_density_raw1_dot,
-            view.descriptors);
       } else {
         build_spin_descriptors_c4_l4_basic<<<blocks, threads>>>(
             atom_count,
@@ -5135,6 +5117,25 @@ void build_spin_descriptors_on_device(
             view.spin_chiral_polar,
             view.spin_chiral_octupoles_raw,
             view.spin_chiral_hexadecapoles_raw,
+            view.descriptors);
+      }
+      if (protocol.neighbor_capacity_radial <= kSpinPrimitiveSlots) {
+        finish_spin_density_descriptors_c4_l4_from_cache<<<blocks, threads>>>(
+            atom_count,
+            static_cast<int>(view.atom_capacity),
+            protocol.struct_descriptor_dim,
+            view.spins_soa3,
+            view.spin_density_rho0,
+            view.spin_density_l1_rdot,
+            view.spin_density_l1_cross,
+            view.spin_density_l1_stf,
+            view.spin_density_angular2,
+            view.spin_density_angular3,
+            view.spin_density_angular4,
+            view.spin_density_geom,
+            view.spin_density_rho0_dot,
+            view.spin_density_raw1,
+            view.spin_density_raw1_dot,
             view.descriptors);
       }
       build_spin_chiral_finalize_c4_l4_f32<<<blocks, threads>>>(
