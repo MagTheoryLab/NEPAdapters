@@ -1638,8 +1638,8 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
   constexpr int HexBase = OctBase + ChiC * kSpinDeg3Count;
   constexpr int ComponentCount = HexBase + ChiC * kSpinDeg4Count;
   constexpr int DensityComponentCount = PolarBase - Rho0Base;
-  __shared__ float prim[kSpinPrimitiveCount][SlotCapacity];
-  __shared__ float weights[C][SlotCapacity];
+  __shared__ float prim[kSpinPrimitiveCount][SlotCapacity + 1];
+  __shared__ float weights[C][SlotCapacity + 1];
   __shared__ float density_components[DensityComponentCount];
 
   const int lane = threadIdx.x;
