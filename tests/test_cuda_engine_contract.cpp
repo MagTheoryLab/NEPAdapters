@@ -4,7 +4,6 @@
 
 #include "host_staging.hpp"
 #include "model_parameters.hpp"
-#include "nonspin_pipeline.hpp"
 #include "workspace_plan.hpp"
 
 #include <cmath>
@@ -139,57 +138,6 @@ int main() {
       protocol.q_scaler_count != 14 ||
       protocol.neighbor_capacity_radial != 10 ||
       protocol.neighbor_capacity_angular != 8) {
-    return EXIT_FAILURE;
-  }
-
-  using nep_adapters::cuda_backend::NonSpinDescriptorMode;
-  using nep_adapters::cuda_backend::NonSpinNeighborTopology;
-  using nep_adapters::cuda_backend::NonSpinPipelineRequest;
-  using nep_adapters::cuda_backend::NonSpinRadialForceMode;
-  using nep_adapters::cuda_backend::make_nonspin_execution_plan;
-
-  NonSpinPipelineRequest request{};
-  request.topology = NonSpinNeighborTopology::external_full;
-  request.has_angular = true;
-  request.store_potential = false;
-  const auto lammps_plan = make_nonspin_execution_plan(protocol, request);
-  if (lammps_plan.descriptor_mode != NonSpinDescriptorMode::fused_positions ||
-      lammps_plan.radial_force_mode != NonSpinRadialForceMode::external_full) {
-    std::cerr << "external-neighbor execution plan mismatch\n";
-    return EXIT_FAILURE;
-  }
-
-  request = {};
-  request.topology = NonSpinNeighborTopology::batched_multi_box;
-  request.has_angular = true;
-  request.orthorhombic_batched = true;
-  const auto batched_plan = make_nonspin_execution_plan(protocol, request);
-  if (batched_plan.descriptor_mode != NonSpinDescriptorMode::batched_cached ||
-      batched_plan.radial_force_mode != NonSpinRadialForceMode::batched) {
-    std::cerr << "batched execution plan mismatch\n";
-    return EXIT_FAILURE;
-  }
-
-  request = {};
-  request.topology = NonSpinNeighborTopology::single_box_symmetric;
-  request.has_angular = true;
-  const auto single_plan = make_nonspin_execution_plan(protocol, request);
-  if (single_plan.descriptor_mode != NonSpinDescriptorMode::fused_positions ||
-      single_plan.radial_force_mode != NonSpinRadialForceMode::symmetric) {
-    std::cerr << "single-box execution plan mismatch\n";
-    return EXIT_FAILURE;
-  }
-
-  auto charge_protocol = protocol;
-  charge_protocol.charge_mode = 1;
-  bool rejected_charge_model = false;
-  try {
-    (void)make_nonspin_execution_plan(charge_protocol, request);
-  } catch (const std::invalid_argument&) {
-    rejected_charge_model = true;
-  }
-  if (!rejected_charge_model) {
-    std::cerr << "ordinary non-spin pipeline accepted a charge model\n";
     return EXIT_FAILURE;
   }
 

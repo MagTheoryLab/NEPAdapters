@@ -145,6 +145,14 @@ class LammpsDevicePairProfiler {
     cudaEventRecord(mark_);
   }
 
+  bool enabled() const { return enabled_; }
+
+  void reset() {
+    if (enabled_) {
+      cudaEventRecord(mark_);
+    }
+  }
+
   void print(
       float stage_ms,
       float clear_ms,
@@ -576,18 +584,13 @@ class CudaModel : public nep_adapters::Model {
             batch.total_atoms,
             workspace,
             orthorhombic_fast_path);
-        const bool has_angular = needs_angular_terms(protocol_);
-        nep_adapters::cuda_backend::NonSpinPipelineRequest pipeline_request;
-        pipeline_request.topology = nep_adapters::cuda_backend::
+        nep_adapters::cuda_backend::NonSpinPipelineOptions pipeline_options;
+        pipeline_options.topology = nep_adapters::cuda_backend::
             NonSpinNeighborTopology::batched_multi_box;
-        pipeline_request.has_angular = has_angular;
-        pipeline_request.orthorhombic_batched = orthorhombic_fast_path;
-        const auto pipeline_plan =
-            nep_adapters::cuda_backend::make_nonspin_execution_plan(
-                protocol_, pipeline_request);
+        pipeline_options.orthorhombic_batched = orthorhombic_fast_path;
         nep_adapters::cuda_backend::run_nonspin_pipeline(
             protocol_,
-            pipeline_plan,
+            pipeline_options,
             batch.total_atoms,
             nep_adapters::cuda_backend::SimulationBox{},
             device_,
@@ -1282,48 +1285,26 @@ class CudaModel : public nep_adapters::Model {
           result.total_potential != nullptr || result.potential_per_atom != nullptr ||
           result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
       if (external_protocol.spin_mode == 0 && external_protocol.charge_mode == 0) {
-        nep_adapters::cuda_backend::NonSpinPipelineRequest pipeline_request;
-        pipeline_request.topology =
+        nep_adapters::cuda_backend::NonSpinPipelineOptions pipeline_options;
+        pipeline_options.topology =
             nep_adapters::cuda_backend::NonSpinNeighborTopology::external_full;
-        pipeline_request.has_angular = has_angular;
-        pipeline_request.store_potential = store_potential;
-        pipeline_request.accumulate_virial = accumulate_virial;
-        pipeline_request.zbl_outputs = zbl_outputs;
-        const auto pipeline_plan =
-            nep_adapters::cuda_backend::make_nonspin_execution_plan(
-                external_protocol, pipeline_request);
-        nep_adapters::cuda_backend::prepare_nonspin_descriptors(
+        pipeline_options.store_potential = store_potential;
+        pipeline_options.accumulate_virial = accumulate_virial;
+        pipeline_options.zbl_outputs = zbl_outputs;
+        nep_adapters::cuda_backend::NonSpinPipelineTimings pipeline_timings;
+        nep_adapters::cuda_backend::run_nonspin_pipeline(
             external_protocol,
-            pipeline_plan,
+            pipeline_options,
             input.nlocal,
             box,
             device_,
-            workspace);
-        profiler.split(descriptor_ann_ms);
-        nep_adapters::cuda_backend::accumulate_nonspin_radial_forces(
-            external_protocol,
-            pipeline_plan,
-            input.nlocal,
-            box,
-            device_,
-            workspace);
-        profiler.split(radial_force_ms);
-        nep_adapters::cuda_backend::accumulate_nonspin_angular_forces(
-            external_protocol,
-            pipeline_plan,
-            input.nlocal,
-            box,
-            device_,
-            workspace);
-        profiler.split(angular_force_ms);
-        nep_adapters::cuda_backend::accumulate_nonspin_zbl_forces(
-            external_protocol,
-            pipeline_plan,
-            input.nlocal,
-            box,
-            device_,
-            workspace);
-        profiler.split(zbl_force_ms);
+            workspace,
+            profiler.enabled() ? &pipeline_timings : nullptr);
+        descriptor_ann_ms = pipeline_timings.descriptor_ann_ms;
+        radial_force_ms = pipeline_timings.radial_force_ms;
+        angular_force_ms = pipeline_timings.angular_force_ms;
+        zbl_force_ms = pipeline_timings.zbl_force_ms;
+        profiler.reset();
       } else {
         bool descriptor_done = false;
         if (has_angular && view.f12x == nullptr) {
