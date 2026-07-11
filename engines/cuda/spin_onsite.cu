@@ -4208,7 +4208,7 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
 }
 
 template <bool AtomMajor>
-__global__ void __launch_bounds__(32, 16)
+__global__ void __launch_bounds__(32, 8)
 accumulate_spin_chiral_forces_c4_l4_cached_f32(
     int atom_count,
     int atom_stride,
