@@ -12,6 +12,7 @@
 #include "internal_neighbor_builder.hpp"
 #include "lammps_device_output.hpp"
 #include "model_parameters.hpp"
+#include "nonspin_pipeline.hpp"
 #include "pair_geometry_cache.hpp"
 #include "qnep_charge.hpp"
 #include "radial_basis_cache.hpp"
@@ -576,56 +577,21 @@ class CudaModel : public nep_adapters::Model {
             workspace,
             orthorhombic_fast_path);
         const bool has_angular = needs_angular_terms(protocol_);
-        if (!orthorhombic_fast_path && has_angular) {
-          nep_adapters::cuda_backend::build_pair_geometry_cache_batched(
-              protocol_,
-              batch.total_atoms,
-              workspace);
-          nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-              protocol_,
-              batch.total_atoms,
-              workspace);
-        } else if (!orthorhombic_fast_path) {
-          nep_adapters::cuda_backend::build_radial_geometry_basis_cache_batched(
-              protocol_,
-              batch.total_atoms,
-              workspace);
-        } else {
-          nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-              protocol_,
-              batch.total_atoms,
-              workspace);
-        }
-        nep_adapters::cuda_backend::build_radial_descriptors_on_device(
+        nep_adapters::cuda_backend::NonSpinPipelineRequest pipeline_request;
+        pipeline_request.topology = nep_adapters::cuda_backend::
+            NonSpinNeighborTopology::batched_multi_box;
+        pipeline_request.has_angular = has_angular;
+        pipeline_request.orthorhombic_batched = orthorhombic_fast_path;
+        const auto pipeline_plan =
+            nep_adapters::cuda_backend::make_nonspin_execution_plan(
+                protocol_, pipeline_request);
+        nep_adapters::cuda_backend::run_nonspin_pipeline(
             protocol_,
+            pipeline_plan,
             batch.total_atoms,
+            nep_adapters::cuda_backend::SimulationBox{},
             device_,
             workspace);
-        build_angular_descriptors_and_ann_stage(
-            protocol_,
-            batch.total_atoms,
-            device_,
-            workspace,
-            has_angular);
-        nep_adapters::cuda_backend::accumulate_radial_forces_batched(
-            protocol_,
-            batch.total_atoms,
-            device_,
-            workspace);
-        if (has_angular) {
-          nep_adapters::cuda_backend::accumulate_l2_angular_forces_batched(
-              protocol_,
-              batch.total_atoms,
-              device_,
-              workspace);
-        }
-        if (protocol_.has_zbl) {
-          nep_adapters::cuda_backend::accumulate_zbl_forces_batched(
-              protocol_,
-              batch.total_atoms,
-              device_,
-              workspace);
-        }
 
         nep_adapters::cuda_backend::prepare_batched_outputs(
             batch.num_structures,
@@ -1312,60 +1278,105 @@ class CudaModel : public nep_adapters::Model {
       }
       profiler.split(clear_ms);
       const bool has_angular = needs_angular_terms(external_protocol);
-      bool descriptor_done = false;
-      if (has_angular && view.f12x == nullptr) {
-        descriptor_done =
-            nep_adapters::cuda_backend::
-                try_build_descriptors_and_ann_from_positions_on_device(
-                    external_protocol,
-                    input.nlocal,
-                    box,
-                    device_,
-                    workspace,
-                    store_potential);
-      }
-      if (!descriptor_done) {
-        build_descriptors_and_ann_stage(
-            external_protocol,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            has_angular,
-            store_potential);
-      }
-      profiler.split(descriptor_ann_ms);
       const bool zbl_outputs =
           result.total_potential != nullptr || result.potential_per_atom != nullptr ||
           result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
-      nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
-          external_protocol,
-          input.nlocal,
-          box,
-          device_,
-          workspace,
-          accumulate_virial);
-      profiler.split(radial_force_ms);
-      if (has_angular) {
-        nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
+      if (external_protocol.spin_mode == 0 && external_protocol.charge_mode == 0) {
+        nep_adapters::cuda_backend::NonSpinPipelineRequest pipeline_request;
+        pipeline_request.topology =
+            nep_adapters::cuda_backend::NonSpinNeighborTopology::external_full;
+        pipeline_request.has_angular = has_angular;
+        pipeline_request.store_potential = store_potential;
+        pipeline_request.accumulate_virial = accumulate_virial;
+        pipeline_request.zbl_outputs = zbl_outputs;
+        const auto pipeline_plan =
+            nep_adapters::cuda_backend::make_nonspin_execution_plan(
+                external_protocol, pipeline_request);
+        nep_adapters::cuda_backend::prepare_nonspin_descriptors(
+            external_protocol,
+            pipeline_plan,
+            input.nlocal,
+            box,
+            device_,
+            workspace);
+        profiler.split(descriptor_ann_ms);
+        nep_adapters::cuda_backend::accumulate_nonspin_radial_forces(
+            external_protocol,
+            pipeline_plan,
+            input.nlocal,
+            box,
+            device_,
+            workspace);
+        profiler.split(radial_force_ms);
+        nep_adapters::cuda_backend::accumulate_nonspin_angular_forces(
+            external_protocol,
+            pipeline_plan,
+            input.nlocal,
+            box,
+            device_,
+            workspace);
+        profiler.split(angular_force_ms);
+        nep_adapters::cuda_backend::accumulate_nonspin_zbl_forces(
+            external_protocol,
+            pipeline_plan,
+            input.nlocal,
+            box,
+            device_,
+            workspace);
+        profiler.split(zbl_force_ms);
+      } else {
+        bool descriptor_done = false;
+        if (has_angular && view.f12x == nullptr) {
+          descriptor_done =
+              nep_adapters::cuda_backend::
+                  try_build_descriptors_and_ann_from_positions_on_device(
+                      external_protocol,
+                      input.nlocal,
+                      box,
+                      device_,
+                      workspace,
+                      store_potential);
+        }
+        if (!descriptor_done) {
+          build_descriptors_and_ann_stage(
+              external_protocol,
+              input.nlocal,
+              box,
+              device_,
+              workspace,
+              has_angular,
+              store_potential);
+        }
+        profiler.split(descriptor_ann_ms);
+        nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
             external_protocol,
             input.nlocal,
             box,
             device_,
             workspace,
             accumulate_virial);
+        profiler.split(radial_force_ms);
+        if (has_angular) {
+          nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
+              external_protocol,
+              input.nlocal,
+              box,
+              device_,
+              workspace,
+              accumulate_virial);
+        }
+        profiler.split(angular_force_ms);
+        if (external_protocol.has_zbl) {
+          nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
+              external_protocol,
+              input.nlocal,
+              box,
+              device_,
+              workspace,
+              zbl_outputs);
+        }
+        profiler.split(zbl_force_ms);
       }
-      profiler.split(angular_force_ms);
-      if (external_protocol.has_zbl) {
-        nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
-            external_protocol,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            zbl_outputs);
-      }
-      profiler.split(zbl_force_ms);
       if (external_protocol.spin_mode != 0) {
         nep_adapters::cuda_backend::accumulate_spin_onsite_mforces_on_device(
             external_protocol,
