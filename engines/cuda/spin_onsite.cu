@@ -3345,37 +3345,54 @@ __device__ __forceinline__ void project_rank2_spin_gradientf(
   terms[5] = grad[5] + grad[7];
 }
 
-__device__ void fill_spin_term_derivativesf(
+__device__ __forceinline__ void evaluate_spin_polynomial_gradientf(
     int degree,
-    int count,
     const float* terms,
-    float* derivatives) {
-  const int lower_count = degree == 3 ? kSpinDeg2Count : kSpinDeg3Count;
-  for (int k = 0; k < 3 * lower_count; ++k) {
-    derivatives[k] = 0.0f;
+    const float* u,
+    float* grad) {
+  const float x = u[0];
+  const float y = u[1];
+  const float z = u[2];
+  const float x2 = x * x;
+  const float y2 = y * y;
+  const float z2 = z * z;
+  if (degree == 3) {
+    grad[0] = 3.0f * terms[0] * x2 +
+              2.0f * terms[3] * x * y +
+              2.0f * terms[4] * x * z +
+              terms[5] * y2 + terms[7] * z2 + terms[9] * y * z;
+    grad[1] = 3.0f * terms[1] * y2 + terms[3] * x2 +
+              2.0f * terms[5] * x * y +
+              2.0f * terms[6] * y * z +
+              terms[8] * z2 + terms[9] * x * z;
+    grad[2] = 3.0f * terms[2] * z2 + terms[4] * x2 +
+              terms[6] * y2 + 2.0f * terms[7] * x * z +
+              2.0f * terms[8] * y * z + terms[9] * x * y;
+    return;
   }
-  const int exp3[kSpinDeg3Count][3] = {
-      {3, 0, 0}, {0, 3, 0}, {0, 0, 3}, {2, 1, 0}, {2, 0, 1},
-      {1, 2, 0}, {0, 2, 1}, {1, 0, 2}, {0, 1, 2}, {1, 1, 1}};
-  const int exp4[kSpinDeg4Count][3] = {
-      {4, 0, 0}, {0, 4, 0}, {0, 0, 4}, {3, 1, 0}, {3, 0, 1},
-      {1, 3, 0}, {0, 3, 1}, {1, 0, 3}, {0, 1, 3}, {2, 2, 0},
-      {2, 0, 2}, {0, 2, 2}, {2, 1, 1}, {1, 2, 1}, {1, 1, 2}};
-  for (int k = 0; k < count; ++k) {
-    const int* exps = degree == 3 ? exp3[k] : exp4[k];
-    for (int axis = 0; axis < 3; ++axis) {
-      const int power = exps[axis];
-      if (power == 0) {
-        continue;
-      }
-      int lower[3] = {exps[0], exps[1], exps[2]};
-      --lower[axis];
-      const int lower_index =
-          spin_monomial_index(degree - 1, lower[0], lower[1], lower[2]);
-      derivatives[axis * lower_count + lower_index] +=
-          static_cast<float>(power) * terms[k];
-    }
-  }
+
+  const float x3 = x2 * x;
+  const float y3 = y2 * y;
+  const float z3 = z2 * z;
+  grad[0] = 4.0f * terms[0] * x3 +
+            3.0f * terms[3] * x2 * y +
+            3.0f * terms[4] * x2 * z + terms[5] * y3 +
+            terms[7] * z3 + 2.0f * terms[9] * x * y2 +
+            2.0f * terms[10] * x * z2 +
+            2.0f * terms[12] * x * y * z +
+            terms[13] * y2 * z + terms[14] * y * z2;
+  grad[1] = 4.0f * terms[1] * y3 + terms[3] * x3 +
+            3.0f * terms[5] * x * y2 +
+            3.0f * terms[6] * y2 * z + terms[8] * z3 +
+            2.0f * terms[9] * x2 * y +
+            2.0f * terms[11] * y * z2 + terms[12] * x2 * z +
+            2.0f * terms[13] * x * y * z + terms[14] * x * z2;
+  grad[2] = 4.0f * terms[2] * z3 + terms[4] * x3 +
+            terms[6] * y3 + 3.0f * terms[7] * x * z2 +
+            3.0f * terms[8] * y * z2 +
+            2.0f * terms[10] * x2 * z +
+            2.0f * terms[11] * y2 * z + terms[12] * x2 * y +
+            terms[13] * x * y2 + 2.0f * terms[14] * x * y * z;
 }
 
 __device__ __forceinline__ void add_stf_outer_gradientf(
@@ -4500,23 +4517,9 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
   }
 
   float grad_Q_terms[C * kSpinDeg2Count] = {};
-  float grad_O_derivatives[ChiC * 3 * kSpinDeg2Count] = {};
-  float grad_H_derivatives[ChiC * 3 * kSpinDeg3Count] = {};
   for (int c = 0; c < C; ++c) {
     project_rank2_spin_gradientf(
         grad_Q + c * 9, grad_Q_terms + c * kSpinDeg2Count);
-  }
-  for (int c = 0; c < ChiC; ++c) {
-    fill_spin_term_derivativesf(
-        3,
-        kSpinDeg3Count,
-        grad_O_terms + c * kSpinDeg3Count,
-        grad_O_derivatives + c * 3 * kSpinDeg2Count);
-    fill_spin_term_derivativesf(
-        4,
-        kSpinDeg4Count,
-        grad_H_terms + c * kSpinDeg4Count,
-        grad_H_derivatives + c * 3 * kSpinDeg3Count);
   }
 
   for (int slot = 0; slot < radial_count; ++slot) {
@@ -4669,24 +4672,20 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
            q_terms[5] * rhat[1]);
     }
 
-    float m2[kSpinDeg2Count];
     float m3[kSpinDeg3Count];
     float m4[kSpinDeg4Count];
-    fill_spin_monomials2f(rhat, m2);
     fill_spin_monomialsf(rhat, m3, m4);
     for (int c = 0; c < ChiC; ++c) {
       const float* o_terms = grad_O_terms + c * kSpinDeg3Count;
-      const float* o_derivatives = grad_O_derivatives + c * 3 * kSpinDeg2Count;
       const float* h_terms = grad_H_terms + c * kSpinDeg4Count;
-      const float* h_derivatives = grad_H_derivatives + c * 3 * kSpinDeg3Count;
       grad_weight[c] += dot_spin_termsf(o_terms, m3, kSpinDeg3Count) +
                         dot_spin_termsf(h_terms, m4, kSpinDeg4Count);
+      float o_gradient[3];
+      float h_gradient[3];
+      evaluate_spin_polynomial_gradientf(3, o_terms, rhat, o_gradient);
+      evaluate_spin_polynomial_gradientf(4, h_terms, rhat, h_gradient);
       for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += weights[c] *
-            (dot_spin_termsf(
-                 o_derivatives + d * kSpinDeg2Count, m2, kSpinDeg2Count) +
-             dot_spin_termsf(
-                 h_derivatives + d * kSpinDeg3Count, m3, kSpinDeg3Count));
+        grad_rhat[d] += weights[c] * (o_gradient[d] + h_gradient[d]);
       }
     }
 
