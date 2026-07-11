@@ -795,41 +795,60 @@ __global__ void precompute_spin_edge_weights_c4(
       dx,
       dy,
       dz);
-  const double dist =
-      sqrt(static_cast<double>(dx) * dx + static_cast<double>(dy) * dy +
-           static_cast<double>(dz) * dz);
+  const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
   const int edge_offset = atom + atom_stride * slot;
   spin_edge_dx[edge_offset] = dx;
   spin_edge_dy[edge_offset] = dy;
   spin_edge_dz[edge_offset] = dz;
-  spin_edge_dist[edge_offset] = static_cast<float>(dist);
-  if (dist <= 1.0e-12 || dist >= static_cast<double>(spin_cutoff)) {
+  spin_edge_dist[edge_offset] = dist;
+  if (dist <= 1.0e-12f || dist >= spin_cutoff) {
     return;
   }
 
-  double fc = 0.0;
-  double fcp = 0.0;
-  double fn[kMaxSpinBasis] = {};
-  double fnp[kMaxSpinBasis] = {};
-  const double rcinv = 1.0 / static_cast<double>(spin_cutoff);
-  find_fc_and_fcp(static_cast<double>(spin_cutoff), rcinv, dist, fc, fcp);
-  find_fn_and_fnp(BasisCount - 1, rcinv, dist, fc, fcp, fn, fnp);
+  constexpr float Pi = 3.14159265358979323846f;
+  const float rcinv = 1.0f / spin_cutoff;
+  const float r_scaled = dist * rcinv;
+  const float cutoff_phase = Pi * r_scaled;
+  const float fc = 0.5f * cosf(cutoff_phase) + 0.5f;
+  const float fcp = -0.5f * Pi * sinf(cutoff_phase) * rcinv;
+  const float shifted = r_scaled - 1.0f;
+  const float x = 2.0f * shifted * shifted - 1.0f;
+  const float radial_derivative = 2.0f * shifted * rcinv;
+  const float t2 = 2.0f * x * x - 1.0f;
+  const float t3 = 2.0f * x * t2 - x;
+  const float fn_raw[BasisCount] = {
+      1.0f,
+      0.5f * (x + 1.0f),
+      0.5f * (t2 + 1.0f),
+      0.5f * (t3 + 1.0f)};
+  const float u1 = 2.0f * x;
+  const float u2 = 2.0f * x * u1 - 1.0f;
+  const float fn[BasisCount] = {
+      fc,
+      fn_raw[1] * fc,
+      fn_raw[2] * fc,
+      fn_raw[3] * fc};
+  const float fnp[BasisCount] = {
+      fcp,
+      radial_derivative * fc + fn_raw[1] * fcp,
+      2.0f * u1 * radial_derivative * fc + fn_raw[2] * fcp,
+      3.0f * u2 * radial_derivative * fc + fn_raw[3] * fcp};
 
   const int type_pair = types[atom] * num_types + types[neighbor];
   for (int c = 0; c < C; ++c) {
-    double weight = 0.0;
-    double derivative = 0.0;
+    float weight = 0.0f;
+    float derivative = 0.0f;
+    #pragma unroll
     for (int k = 0; k < BasisCount; ++k) {
       const int coefficient_index = spin_coefficient_offset +
           ((c * BasisCount + k) * num_types * num_types + type_pair);
-      const double coefficient =
-          static_cast<double>(descriptor_coefficients[coefficient_index]);
+      const float coefficient = descriptor_coefficients[coefficient_index];
       weight += fn[k] * coefficient;
       derivative += fnp[k] * coefficient;
     }
     const int cache_index = spin_edge_cache_index(atom_stride, slot, atom, c);
-    spin_edge_weights[cache_index] = static_cast<float>(weight);
-    spin_edge_weight_derivatives[cache_index] = static_cast<float>(derivative);
+    spin_edge_weights[cache_index] = weight;
+    spin_edge_weight_derivatives[cache_index] = derivative;
   }
 }
 
@@ -2000,174 +2019,6 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     descriptors[atom + atom_stride * (struct_dim + offset + channel)] =
         static_cast<float>(value);
   }
-}
-
-__global__ void build_spin_chiral_finalize_c4_l4(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    float spin_cutoff,
-    const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ density_geom_cache,
-    const float* __restrict__ chiral_polar_cache,
-    const float* __restrict__ chiral_octupoles_raw_cache,
-    const float* __restrict__ chiral_hexadecapoles_raw_cache,
-    float* __restrict__ chiral_chirals_cache,
-    float* __restrict__ chiral_pseudodevs_cache,
-    float* __restrict__ descriptors) {
-  constexpr int C = 4;
-  constexpr int ChiC = 2;
-  constexpr int ChiralOffset = 58;
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int atom = tid / C;
-  const int c = tid - atom * C;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  double geom[9];
-  double polar[3];
-  for (int k = 0; k < 9; ++k) {
-    geom[k] =
-        static_cast<double>(density_geom_cache[atom + atom_stride * (c * 9 + k)]);
-  }
-  for (int k = 0; k < 3; ++k) {
-    polar[k] =
-        static_cast<double>(chiral_polar_cache[atom + atom_stride * (c * 3 + k)]);
-  }
-
-  double chiral_value = 0.0;
-  if (c < ChiC) {
-    double octupoles_raw[kSpinDeg3Count];
-    double hexadecapoles_raw[kSpinDeg4Count];
-    for (int k = 0; k < kSpinDeg3Count; ++k) {
-      octupoles_raw[k] = static_cast<double>(
-          chiral_octupoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg3Count + k)]);
-    }
-    for (int k = 0; k < kSpinDeg4Count; ++k) {
-      hexadecapoles_raw[k] = static_cast<double>(
-          chiral_hexadecapoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg4Count + k)]);
-    }
-    for (int term = 0; term < kSpinChiralQohCount; ++term) {
-      const unsigned short packed = kSpinChiralQohPacked[term];
-      const int q = packed >> 8;
-      const int o = (packed >> 4) & 0x0f;
-      const int h = packed & 0x0f;
-      chiral_value +=
-          kSpinChiralQohCoeff[term] * geom[q] * octupoles_raw[o] *
-          hexadecapoles_raw[h];
-    }
-    chiral_chirals_cache[atom + atom_stride * c] =
-        static_cast<float>(chiral_value);
-  }
-
-  double pseudodevs[9] = {};
-  const int radial_count = nn_radial[atom];
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge_cached(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    const double weight = static_cast<double>(
-        spin_edge_weights[spin_edge_cache_index(atom_stride, slot, atom, c)]);
-    double qu[3] = {0.0, 0.0, 0.0};
-    for (int a = 0; a < 3; ++a) {
-      for (int b = 0; b < 3; ++b) {
-        qu[a] += geom[3 * a + b] * rhat[b];
-      }
-    }
-    double axis[3];
-    cross3(rhat, qu, axis);
-    double pseudo[9];
-    stf_outer3(axis, rhat, pseudo);
-    for (int k = 0; k < 9; ++k) {
-      pseudodevs[k] += weight * pseudo[k];
-    }
-  }
-  for (int k = 0; k < 9; ++k) {
-    chiral_pseudodevs_cache[atom + atom_stride * (c * 9 + k)] =
-        static_cast<float>(pseudodevs[k]);
-  }
-
-  double chiral_q0 = 0.0;
-  double chiral_q1 = 0.0;
-  double chiral_q2 = 0.0;
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge_cached(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    const double weight = static_cast<double>(
-        spin_edge_weights[spin_edge_cache_index(atom_stride, slot, atom, c)]);
-    double spin_cross[3];
-    cross3(si, sj, spin_cross);
-    if (c < ChiC) {
-      chiral_q0 += weight * dot3(spin_cross, rhat) * chiral_value;
-    }
-    double axis[3];
-    cross3(polar, rhat, axis);
-    chiral_q1 += weight * dot3(spin_cross, axis);
-    double pseudo_axis[3] = {0.0, 0.0, 0.0};
-    for (int a = 0; a < 3; ++a) {
-      for (int b = 0; b < 3; ++b) {
-        pseudo_axis[a] += pseudodevs[3 * a + b] * rhat[b];
-      }
-    }
-    chiral_q2 += weight * dot3(spin_cross, pseudo_axis);
-  }
-  if (c < ChiC) {
-    descriptors[atom + atom_stride * (struct_dim + ChiralOffset + c)] =
-        static_cast<float>(chiral_q0);
-  }
-  descriptors[atom + atom_stride * (struct_dim + ChiralOffset + ChiC + c)] =
-      static_cast<float>(chiral_q1);
-  descriptors[atom + atom_stride * (struct_dim + ChiralOffset + ChiC + C + c)] =
-      static_cast<float>(chiral_q2);
 }
 
 __global__ void accumulate_spin_onsite_mforces(

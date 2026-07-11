@@ -1464,14 +1464,22 @@ __global__ void accumulate_l2_angular_forces(
       BlockParallel && !Batched && !AccumulateVirial && LMax == 4 &&
       HasQ222 == 1 && HasQ1111 == 0 && HasQ112 == 0 && HasQ123 == 0 &&
       HasQ233 == 0 && HasQ134 == 0 && NMaxAngular == 4;
+  constexpr bool UseBlockCompactQ222Cache =
+      BlockParallel && !Batched && !AccumulateVirial && LMax == 4 &&
+      HasQ222 == 1 && HasQ1111 == 0 && HasQ112 == 0 && HasQ123 == 0 &&
+      HasQ233 == 0 && HasQ134 == 0 && NMaxAngular == 2 &&
+      BasisSizeAngular == 4;
+  constexpr bool UseBlockInputCache =
+      UseBlockQ222Cache || UseBlockCompactQ222Cache;
+  constexpr int BlockNCount = NMaxAngular >= 0 ? NMaxAngular + 1 : 0;
   __shared__ float block_sum_cache[5 * 24];
   __shared__ float block_fp_cache[5 * 5];
-  if constexpr (UseBlockQ222Cache) {
-    for (int i = threadIdx.x; i < 5 * 24; i += blockDim.x) {
+  if constexpr (UseBlockInputCache) {
+    for (int i = threadIdx.x; i < BlockNCount * 24; i += blockDim.x) {
       block_sum_cache[i] =
           sum_fxyz[atom + atom_stride * i];
     }
-    for (int i = threadIdx.x; i < 5 * 5; i += blockDim.x) {
+    for (int i = threadIdx.x; i < BlockNCount * 5; i += blockDim.x) {
       const int n = i / 5;
       const int channel = i - n * 5;
       block_fp_cache[i] =
@@ -1589,21 +1597,23 @@ __global__ void accumulate_l2_angular_forces(
         gnp += fnp * coefficient;
       }
 
-      float local_sum[24] = {0.0f};
-      for (int abc = 0; abc < abc_count && abc < 24; ++abc) {
-        if constexpr (UseBlockQ222Cache) {
-          local_sum[abc] = block_sum_cache[n * 24 + abc];
-        } else {
-          local_sum[abc] = sum_fxyz[atom + atom_stride * (n * abc_count + abc)];
+      float local_sum_storage[24] = {0.0f};
+      const float* local_sum = local_sum_storage;
+      if constexpr (UseBlockCompactQ222Cache) {
+        local_sum = block_sum_cache + n * 24;
+      } else {
+        for (int abc = 0; abc < abc_count && abc < 24; ++abc) {
+          local_sum_storage[abc] =
+              sum_fxyz[atom + atom_stride * (n * abc_count + abc)];
         }
       }
-      const float fp_l1 = UseBlockQ222Cache
+      const float fp_l1 = UseBlockInputCache
           ? block_fp_cache[n * 5]
           : fp[atom + atom_stride * (radial_dim + n)];
       accumulate_l1_force(fp_l1, local_sum, gn, gnp, rinv, unit, f12);
       if constexpr (LMax >= 0) {
         if constexpr (LMax >= 2) {
-          const float fp_l2 = UseBlockQ222Cache
+          const float fp_l2 = UseBlockInputCache
               ? block_fp_cache[n * 5 + 1]
               : fp[atom + atom_stride *
                                 (radial_dim + angular_descriptor_stride + n)];
@@ -1617,7 +1627,7 @@ __global__ void accumulate_l2_angular_forces(
       }
       if constexpr (LMax >= 0) {
         if constexpr (LMax >= 3) {
-          const float fp_l3 = UseBlockQ222Cache
+          const float fp_l3 = UseBlockInputCache
               ? block_fp_cache[n * 5 + 2]
               : fp[atom + atom_stride *
                                 (radial_dim + 2 * angular_descriptor_stride + n)];
@@ -1631,7 +1641,7 @@ __global__ void accumulate_l2_angular_forces(
       }
       if constexpr (LMax >= 0) {
         if constexpr (LMax >= 4) {
-          const float fp_l4 = UseBlockQ222Cache
+          const float fp_l4 = UseBlockInputCache
               ? block_fp_cache[n * 5 + 3]
               : fp[atom + atom_stride *
                                 (radial_dim + 3 * angular_descriptor_stride + n)];
@@ -1647,7 +1657,7 @@ __global__ void accumulate_l2_angular_forces(
       if constexpr (HasQ222 == 1) {
         const int q222_descriptor =
             radial_dim + high_body_channel * angular_descriptor_stride + n;
-        const float fp_q222 = UseBlockQ222Cache
+        const float fp_q222 = UseBlockInputCache
             ? block_fp_cache[n * 5 + 4]
             : fp[atom + atom_stride * q222_descriptor];
         accumulate_q222_force(fp_q222, local_sum, gn, gnp, r, rinv, unit, f12);
@@ -1902,6 +1912,16 @@ void accumulate_l2_angular_forces_on_device(
         !protocol.body_channels.has_q_134 &&
         protocol.n_max_angular == 4 &&
         protocol.basis_size_angular == 8;
+    const bool l4_compact_q222_only =
+        protocol.body_channels.l_max_3body == 4 &&
+        protocol.body_channels.has_q_222 &&
+        !protocol.body_channels.has_q_1111 &&
+        !protocol.body_channels.has_q_112 &&
+        !protocol.body_channels.has_q_123 &&
+        !protocol.body_channels.has_q_233 &&
+        !protocol.body_channels.has_q_134 &&
+        protocol.n_max_angular == 2 &&
+        protocol.basis_size_angular == 4;
     if (l4_q222_q1111 && accumulate_virial) {
       accumulate_l2_angular_forces<false, false, false, true, 4, 1, 1, 0, 0, 0, 0, 4, 8><<<blocks, threads>>>(
           atom_count,
@@ -2102,6 +2122,47 @@ void accumulate_l2_angular_forces_on_device(
           view.virial_soa9,
           virial_to_neighbor ? 1 : 0);
       }
+    } else if (l4_compact_q222_only && block_parallel) {
+      accumulate_l2_angular_forces<
+          false, true, false, false, 4, 1, 0, 0, 0, 0, 0, 2, 4>
+          <<<atom_count, threads>>>(
+              atom_count,
+              static_cast<int>(view.atom_capacity),
+              protocol.num_types,
+              protocol.num_types * protocol.num_types,
+              protocol.n_max_radial,
+              protocol.basis_size_radial,
+              protocol.n_max_angular,
+              protocol.basis_size_angular,
+              protocol.body_channels.l_max_3body,
+              protocol.body_channels.has_q_222 ? 1 : 0,
+              protocol.body_channels.has_q_1111 ? 1 : 0,
+              protocol.body_channels.has_q_112 ? 1 : 0,
+              protocol.body_channels.has_q_123 ? 1 : 0,
+              protocol.body_channels.has_q_233 ? 1 : 0,
+              protocol.body_channels.has_q_134 ? 1 : 0,
+              protocol.neighbor_capacity_angular,
+              protocol.body_channels.abc_count(),
+              static_cast<float>(protocol.cutoff_angular),
+              box,
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+              view.types,
+              view.positions_soa3,
+              view.nn_angular,
+              view.nl_angular_slot_major,
+              view.r12_angular,
+              view.f12x,
+              view.f12y,
+              view.f12z,
+              view.fp,
+              view.sum_fxyz,
+              model_view.descriptor_coefficients_type_pair_major,
+              view.force_soa3,
+              view.virial_soa9,
+              virial_to_neighbor ? 1 : 0);
     } else if (accumulate_virial) {
       accumulate_l2_angular_forces<false, false, false, true, -1, -1, -1, -1, -1, -1, -1, -1, -1>
           <<<blocks, threads>>>(
