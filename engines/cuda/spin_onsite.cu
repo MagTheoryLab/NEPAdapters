@@ -17,7 +17,7 @@ constexpr int kMaxSpinBasis = 8;
 constexpr int kSpinDeg2Count = 6;
 constexpr int kSpinDeg3Count = 10;
 constexpr int kSpinDeg4Count = 15;
-constexpr int kSpinPrimitiveCount = 128;
+constexpr int kSpinPrimitiveCount = 86;
 constexpr int kSpinPrimitiveSlots = 88;
 constexpr int kSpinChiralQohCount = 300;
 
@@ -1797,38 +1797,32 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       float ylm[9];
       int width = real_spherical_harmonics_spinf(rhat, 2, ylm);
       for (int m = 0; m < width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          prim[28 + m * 3 + d][slot] = ylm[m] * sj[d];
-        }
+        prim[28 + m][slot] = ylm[m];
       }
       width = real_spherical_harmonics_spinf(rhat, 3, ylm);
       for (int m = 0; m < width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          prim[43 + m * 3 + d][slot] = ylm[m] * sj[d];
-        }
+        prim[33 + m][slot] = ylm[m];
       }
       width = real_spherical_harmonics_spinf(rhat, 4, ylm);
       for (int m = 0; m < width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          prim[64 + m * 3 + d][slot] = ylm[m] * sj[d];
-        }
+        prim[40 + m][slot] = ylm[m];
       }
       float rr[9];
       stf_outer3f(rhat, rhat, rr);
       for (int k = 0; k < 9; ++k) {
-        prim[91 + k][slot] = rr[k];
+        prim[49 + k][slot] = rr[k];
       }
-      prim[100][slot] = rhat[0];
-      prim[101][slot] = rhat[1];
-      prim[102][slot] = rhat[2];
+      prim[58][slot] = rhat[0];
+      prim[59][slot] = rhat[1];
+      prim[60][slot] = rhat[2];
       float m3[kSpinDeg3Count];
       float m4[kSpinDeg4Count];
       fill_spin_monomialsf(rhat, m3, m4);
       for (int k = 0; k < kSpinDeg3Count; ++k) {
-        prim[103 + k][slot] = m3[k];
+        prim[61 + k][slot] = m3[k];
       }
       for (int k = 0; k < kSpinDeg4Count; ++k) {
-        prim[113 + k][slot] = m4[k];
+        prim[71 + k][slot] = m4[k];
       }
     }
   }
@@ -1875,6 +1869,7 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     int component_base = 0;
     int component_count = 0;
     int primitive_base = 0;
+    int angular_ylm_base = -1;
     int k = 0;
     bool multiply_dot = false;
     float* output = nullptr;
@@ -1918,27 +1913,30 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       component_base = Angular2Base;
       component_count = C * 15;
       primitive_base = 28;
+      angular_ylm_base = 28;
       k = task - Angular2TaskBase;
       output = density_angular2_cache;
     } else if (task < Angular4TaskBase) {
       width = 21;
       component_base = Angular3Base;
       component_count = C * 21;
-      primitive_base = 43;
+      primitive_base = 33;
+      angular_ylm_base = 33;
       k = task - Angular3TaskBase;
       output = density_angular3_cache;
     } else if (task < GeomTaskBase) {
       width = 27;
       component_base = Angular4Base;
       component_count = C * 27;
-      primitive_base = 64;
+      primitive_base = 40;
+      angular_ylm_base = 40;
       k = task - Angular4TaskBase;
       output = density_angular4_cache;
     } else if (task < Rho0DotTaskBase) {
       width = 9;
       component_base = GeomBase;
       component_count = C * 9;
-      primitive_base = 91;
+      primitive_base = 49;
       k = task - GeomTaskBase;
       output = density_geom_cache;
     } else if (task < Raw1DotTaskBase) {
@@ -1961,13 +1959,20 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
       width = 3;
       component_base = PolarBase;
       component_count = C * 3;
-      primitive_base = 100;
+      primitive_base = 58;
       k = task - PolarTaskBase;
       output = chiral_polar_cache;
     }
 
     for (int slot = 0; slot < count; ++slot) {
-      float value = prim[primitive_base + k][slot];
+      float value;
+      if (angular_ylm_base >= 0) {
+        const int m = k / 3;
+        const int d = k - 3 * m;
+        value = prim[angular_ylm_base + m][slot] * prim[d][slot];
+      } else {
+        value = prim[primitive_base + k][slot];
+      }
       if (multiply_dot) {
         value *= prim[3][slot];
       }
@@ -1993,7 +1998,7 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
     const bool is_octupole = task < HexTaskBase;
     const int width = is_octupole ? kSpinDeg3Count : kSpinDeg4Count;
     const int k = is_octupole ? task - OctTaskBase : task - HexTaskBase;
-    const int primitive_base = is_octupole ? 103 : 113;
+    const int primitive_base = is_octupole ? 61 : 71;
     const int component_count = ChiC * width;
     float channel_acc[ChiC] = {};
     for (int slot = 0; slot < count; ++slot) {
