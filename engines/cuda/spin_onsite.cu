@@ -4797,13 +4797,8 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     const float* __restrict__ fp,
     const float* __restrict__ descriptor_coefficients,
     int spin_coefficient_offset,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
     const float* __restrict__ spin_edge_weights,
     const float* __restrict__ spin_edge_weight_derivatives,
-    bool use_cached_geometry,
     const float* __restrict__ density_geom_cache,
     const float* __restrict__ chiral_polar_cache,
     const float* __restrict__ chiral_octupoles_raw_cache,
@@ -4885,25 +4880,8 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     double dist = 0.0;
     double si[3];
     double sj[3];
-    if (use_cached_geometry) {
-      load_spin_edge_cached(
-          atom,
-          neighbor,
-          atom_stride,
-          slot,
-          spins_soa3,
-          spin_edge_dx,
-          spin_edge_dy,
-          spin_edge_dz,
-          spin_edge_dist,
-          rhat,
-          dist,
-          si,
-          sj);
-    } else {
-      load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                     rhat, dist, si, sj);
-    }
+    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
+                   rhat, dist, si, sj);
     if (dist <= 1.0e-12 || dist >= spin_cutoff) {
       continue;
     }
@@ -4975,25 +4953,8 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     double dist = 0.0;
     double si[3];
     double sj[3];
-    if (use_cached_geometry) {
-      load_spin_edge_cached(
-          atom,
-          neighbor,
-          atom_stride,
-          slot,
-          spins_soa3,
-          spin_edge_dx,
-          spin_edge_dy,
-          spin_edge_dz,
-          spin_edge_dist,
-          rhat,
-          dist,
-          si,
-          sj);
-    } else {
-      load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                     rhat, dist, si, sj);
-    }
+    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
+                   rhat, dist, si, sj);
     if (dist <= 1.0e-12 || dist >= spin_cutoff) {
       continue;
     }
@@ -5051,25 +5012,8 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     double dist = 0.0;
     double si[3];
     double sj[3];
-    if (use_cached_geometry) {
-      load_spin_edge_cached(
-          atom,
-          neighbor,
-          atom_stride,
-          slot,
-          spins_soa3,
-          spin_edge_dx,
-          spin_edge_dy,
-          spin_edge_dz,
-          spin_edge_dist,
-          rhat,
-          dist,
-          si,
-          sj);
-    } else {
-      load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                     rhat, dist, si, sj);
-    }
+    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
+                   rhat, dist, si, sj);
     if (dist <= 1.0e-12 || dist >= spin_cutoff) {
       continue;
     }
@@ -5995,13 +5939,8 @@ static void accumulate_spin_chiral_polar_forces_impl(
         view.fp,
         model_view.descriptor_coefficients,
         static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
         view.spin_edge_weights,
         view.spin_edge_weight_derivatives,
-        use_cached_geometry,
         view.spin_density_geom,
         view.spin_chiral_polar,
         view.spin_chiral_octupoles_raw,
