@@ -82,6 +82,25 @@ void write_model(
   }
 }
 
+void write_expanded_lmax_model(const std::string& path) {
+  constexpr int descriptor_dim = 10;
+  std::ofstream out(path);
+  out << "nep4 1 Fe\n"
+      << "cutoff 4 4 64 64\n"
+      << "n_max 0 0\n"
+      << "basis_size 0 0\n"
+      << "l_max 4 2 0 1 1 1 1\n"
+      << "ANN 1 0\n";
+  for (int d = 0; d < descriptor_dim; ++d) {
+    out << "0\n";
+  }
+  out << "0\n1\n0\n";
+  out << "0\n0\n";
+  for (int d = 0; d < descriptor_dim; ++d) {
+    out << "1\n";
+  }
+}
+
 double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& rhs) {
   if (lhs.size() != rhs.size()) {
     return INFINITY;
@@ -616,6 +635,7 @@ int main() {
   const std::string chiral_bulk_path = "spin_chiral_bulk_generated.nep";
   const std::string chiral_polar_path = "spin_chiral_polar_generated.nep";
   const std::string chiral_pseudo_path = "spin_chiral_pseudo_generated.nep";
+  const std::string expanded_lmax_path = "expanded_lmax_generated.nep";
   write_model(model_path);
   write_model(chiral_path, true);
   write_model(edge_path, false, 3);
@@ -623,6 +643,17 @@ int main() {
   write_model(chiral_bulk_path, true, 1 + kSpinDim);
   write_model(chiral_polar_path, true, 1 + kSpinDim + 1);
   write_model(chiral_pseudo_path, true, 1 + kSpinDim + 2);
+  write_expanded_lmax_model(expanded_lmax_path);
+
+  NepaModel* expanded_lmax_model = nullptr;
+  NepaModelInfo expanded_lmax_info{};
+  const bool expanded_lmax_ok =
+      nepa_load_model("cpu_opt", expanded_lmax_path.c_str(), &expanded_lmax_model) ==
+          NEPA_STATUS_OK &&
+      expanded_lmax_model != nullptr &&
+      nepa_model_info(expanded_lmax_model, &expanded_lmax_info) == NEPA_STATUS_OK &&
+      expanded_lmax_info.descriptor_dim == 10;
+  nepa_free_model(expanded_lmax_model);
 
   NepaModel* chiral_model = nullptr;
   if (nepa_load_model("cpu_opt", chiral_path.c_str(), &chiral_model) != NEPA_STATUS_OK ||
@@ -746,8 +777,10 @@ int main() {
   std::remove(chiral_bulk_path.c_str());
   std::remove(chiral_polar_path.c_str());
   std::remove(chiral_pseudo_path.c_str());
+  std::remove(expanded_lmax_path.c_str());
 
-  if (!ok || !edge_ok || !baseline_ok || !chiral_numeric_ok || !fixture_numeric_ok) {
+  if (!ok || !edge_ok || !baseline_ok || !chiral_numeric_ok || !fixture_numeric_ok ||
+      !expanded_lmax_ok) {
     std::cerr << "descriptor invariance diffs: flip=" << flip_diff
               << " rotate=" << rotate_diff << '\n';
     return EXIT_FAILURE;
