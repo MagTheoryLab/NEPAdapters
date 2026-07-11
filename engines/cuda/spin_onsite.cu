@@ -102,6 +102,66 @@ __device__ __constant__ double kSpinChiralQohCoeff[kSpinChiralQohCount] = {
     -4.0 / 7.0, 3.0 / 7.0, 2.0 / 7.0, -2.0 / 7.0, -12.0 / 7.0, 12.0 / 7.0,
 };
 
+// The c4/l4 fast path contracts symmetric rank-2 moments. Merge Q_ab and
+// Q_ba coefficients once so the hot Q-O-H loops do not repeat equivalent terms.
+// The retained representatives are xx, xy, xz, yy, yz, zz; off-diagonal
+// coefficients are C_xy + C_yx, C_xz + C_zx, and C_yz + C_zy.
+constexpr int kSpinChiralQohSymCount = 192;
+__device__ __constant__ unsigned short
+kSpinChiralQohSymPacked[kSpinChiralQohSymCount] = {
+    20, 23, 29, 35, 37, 46, 52, 55, 61, 67, 69, 78,
+    86, 88, 92, 99, 101, 110, 118, 120, 124, 132, 135, 141,
+    145, 146, 153, 154, 260, 263, 269, 278, 280, 284, 288, 289,
+    298, 299, 310, 312, 316, 320, 321, 322, 329, 330, 331, 340,
+    343, 349, 352, 353, 354, 361, 362, 363, 372, 375, 381, 390,
+    392, 396, 403, 405, 515, 517, 526, 528, 530, 537, 539, 550,
+    552, 556, 560, 561, 562, 569, 570, 571, 582, 584, 588, 595,
+    597, 606, 614, 616, 620, 627, 629, 638, 640, 641, 642, 649,
+    650, 651, 660, 663, 1030, 1032, 1036, 1059, 1061, 1070, 1076, 1079,
+    1085, 1091, 1093, 1102, 1110, 1112, 1116, 1123, 1125, 1134, 1142, 1144,
+    1148, 1156, 1159, 1165, 1168, 1170, 1177, 1179, 1281, 1282, 1289, 1290,
+    1299, 1301, 1310, 1316, 1319, 1325, 1331, 1333, 1342, 1348, 1351, 1357,
+    1360, 1361, 1362, 1369, 1370, 1371, 1380, 1383, 1389, 1392, 1393, 1394,
+    1401, 1402, 1403, 1411, 1413, 1422, 1430, 1432, 2054, 2056, 2060, 2068,
+    2071, 2077, 2100, 2103, 2109, 2115, 2117, 2126, 2134, 2136, 2140, 2147,
+    2149, 2158, 2166, 2168, 2172, 2180, 2183, 2189, 2192, 2193, 2202, 2203,
+};
+__device__ __constant__ float
+kSpinChiralQohSymCoeff[kSpinChiralQohSymCount] = {
+    -1.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f, 1.0f / 7.0f, 1.0f / 7.0f, -6.0f / 7.0f,
+    4.0f / 7.0f, -3.0f / 7.0f, -3.0f / 7.0f, -4.0f / 7.0f, 3.0f / 7.0f, 3.0f / 7.0f,
+    -2.0f / 7.0f, -2.0f / 7.0f, 12.0f / 7.0f, 1.0f / 7.0f, -6.0f / 7.0f, 15.0f / 7.0f,
+    2.0f / 7.0f, 2.0f / 7.0f, -12.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f, -15.0f / 7.0f,
+    2.0f / 7.0f, -2.0f / 7.0f, -12.0f / 7.0f, 12.0f / 7.0f, -4.0f / 7.0f, 3.0f / 7.0f,
+    3.0f / 7.0f, 4.0f / 7.0f, -3.0f / 7.0f, -3.0f / 7.0f, -1.0f / 7.0f, 1.0f / 7.0f,
+    6.0f / 7.0f, -6.0f / 7.0f, 1.0f / 7.0f, 1.0f / 7.0f, -6.0f / 7.0f, 4.0f / 7.0f,
+    1.0f / 7.0f, 2.0f / 7.0f, -9.0f / 7.0f, -15.0f / 7.0f, 3.0f / 7.0f, -1.0f / 7.0f,
+    -1.0f / 7.0f, 6.0f / 7.0f, -1.0f / 7.0f, -4.0f / 7.0f, -2.0f / 7.0f, 9.0f / 7.0f,
+    -3.0f / 7.0f, 15.0f / 7.0f, 13.0f / 7.0f, -8.0f / 7.0f, -15.0f / 7.0f, -13.0f / 7.0f,
+    8.0f / 7.0f, 15.0f / 7.0f, 2.0f, -2.0f, 4.0f / 7.0f, -3.0f / 7.0f,
+    -3.0f / 7.0f, 1.0f / 7.0f, -1.0f / 7.0f, -6.0f / 7.0f, 6.0f / 7.0f, 3.0f / 7.0f,
+    -4.0f / 7.0f, 3.0f / 7.0f, -4.0f / 7.0f, -2.0f / 7.0f, -1.0f / 7.0f, 15.0f / 7.0f,
+    9.0f / 7.0f, -3.0f / 7.0f, -1.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f, -13.0f / 7.0f,
+    8.0f / 7.0f, 15.0f / 7.0f, -8.0f / 7.0f, 13.0f / 7.0f, -15.0f / 7.0f, 1.0f / 7.0f,
+    1.0f / 7.0f, -6.0f / 7.0f, 1.0f / 7.0f, 2.0f / 7.0f, 4.0f / 7.0f, 3.0f / 7.0f,
+    -9.0f / 7.0f, -15.0f / 7.0f, -2.0f, 2.0f, 1.0f / 7.0f, 1.0f / 7.0f,
+    -6.0f / 7.0f, -1.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f, 2.0f / 7.0f, 2.0f / 7.0f,
+    -12.0f / 7.0f, 6.0f / 7.0f, -1.0f / 7.0f, -15.0f / 7.0f, -4.0f / 7.0f, 3.0f / 7.0f,
+    3.0f / 7.0f, -3.0f / 7.0f, 4.0f / 7.0f, -3.0f / 7.0f, 1.0f / 7.0f, -6.0f / 7.0f,
+    15.0f / 7.0f, -2.0f / 7.0f, -2.0f / 7.0f, 12.0f / 7.0f, -2.0f / 7.0f, 2.0f / 7.0f,
+    12.0f / 7.0f, -12.0f / 7.0f, -1.0f / 7.0f, 1.0f / 7.0f, 6.0f / 7.0f, -6.0f / 7.0f,
+    3.0f / 7.0f, -4.0f / 7.0f, 3.0f / 7.0f, -3.0f / 7.0f, 4.0f / 7.0f, -3.0f / 7.0f,
+    -8.0f / 7.0f, 13.0f / 7.0f, -15.0f / 7.0f, 8.0f / 7.0f, -13.0f / 7.0f, 15.0f / 7.0f,
+    2.0f / 7.0f, 4.0f / 7.0f, 1.0f / 7.0f, -15.0f / 7.0f, 3.0f / 7.0f, -9.0f / 7.0f,
+    1.0f / 7.0f, 1.0f / 7.0f, -6.0f / 7.0f, -2.0f / 7.0f, -1.0f / 7.0f, -4.0f / 7.0f,
+    -3.0f / 7.0f, 15.0f / 7.0f, 9.0f / 7.0f, -1.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f,
+    2.0f, -2.0f, -1.0f / 7.0f, -1.0f / 7.0f, 6.0f / 7.0f, 1.0f / 7.0f,
+    1.0f / 7.0f, -6.0f / 7.0f, -6.0f / 7.0f, 1.0f / 7.0f, 15.0f / 7.0f, -2.0f / 7.0f,
+    -2.0f / 7.0f, 12.0f / 7.0f, 6.0f / 7.0f, -1.0f / 7.0f, -15.0f / 7.0f, 2.0f / 7.0f,
+    2.0f / 7.0f, -12.0f / 7.0f, -3.0f / 7.0f, 4.0f / 7.0f, -3.0f / 7.0f, 3.0f / 7.0f,
+    -4.0f / 7.0f, 3.0f / 7.0f, 2.0f / 7.0f, -2.0f / 7.0f, -12.0f / 7.0f, 12.0f / 7.0f,
+};
+
 void check_cuda(cudaError_t status, const char* message) {
   if (status != cudaSuccess) {
     throw std::runtime_error(
@@ -4093,12 +4153,12 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
               spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
                   atom_stride, atom, c * kSpinDeg4Count + k)];
     }
-    for (int term = 0; term < kSpinChiralQohCount; ++term) {
-      const unsigned short packed = kSpinChiralQohPacked[term];
+    for (int term = 0; term < kSpinChiralQohSymCount; ++term) {
+      const unsigned short packed = kSpinChiralQohSymPacked[term];
       const int q = packed >> 8;
       const int o = (packed >> 4) & 0x0f;
       const int h = packed & 0x0f;
-      chiral_value += static_cast<float>(kSpinChiralQohCoeff[term]) *
+      chiral_value += kSpinChiralQohSymCoeff[term] *
                       geom[q] * octupoles_raw[o] * hexadecapoles_raw[h];
     }
     chiral_chirals_cache[
@@ -4371,13 +4431,13 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
     float* gQ = grad_Q + c * 9;
     float* gO_terms = grad_O_terms + c * kSpinDeg3Count;
     float* gH_terms = grad_H_terms + c * kSpinDeg4Count;
-    for (int term = 0; term < kSpinChiralQohCount; ++term) {
-      const unsigned short packed = kSpinChiralQohPacked[term];
+    for (int term = 0; term < kSpinChiralQohSymCount; ++term) {
+      const unsigned short packed = kSpinChiralQohSymPacked[term];
       const int q = packed >> 8;
       const int o = (packed >> 4) & 0x0f;
       const int h = packed & 0x0f;
       const float scale =
-          g * static_cast<float>(kSpinChiralQohCoeff[term]);
+          g * kSpinChiralQohSymCoeff[term];
       const float o_value = oct_raw[o];
       const float h_value = hex_raw[h];
       gQ[q] += scale * o_value * h_value;
