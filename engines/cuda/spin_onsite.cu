@@ -190,6 +190,43 @@ bool all_active(const std::vector<int>& mask, int num_types) {
   return true;
 }
 
+class PhaseTimer {
+ public:
+  explicit PhaseTimer(bool enabled) : enabled_(enabled) {
+    if (enabled_) {
+      check_cuda(cudaEventCreate(&mark_), "create spin phase timer mark");
+      check_cuda(cudaEventCreate(&now_), "create spin phase timer event");
+      check_cuda(cudaEventRecord(mark_), "record spin phase timer mark");
+    }
+  }
+
+  ~PhaseTimer() {
+    if (mark_ != nullptr) {
+      cudaEventDestroy(mark_);
+    }
+    if (now_ != nullptr) {
+      cudaEventDestroy(now_);
+    }
+  }
+
+  void split(float& target_ms) {
+    if (!enabled_) {
+      return;
+    }
+    check_cuda(cudaEventRecord(now_), "record spin phase timer event");
+    check_cuda(cudaEventSynchronize(now_), "synchronize spin phase timer event");
+    check_cuda(
+        cudaEventElapsedTime(&target_ms, mark_, now_),
+        "measure spin phase time");
+    check_cuda(cudaEventRecord(mark_), "advance spin phase timer mark");
+  }
+
+ private:
+  bool enabled_ = false;
+  cudaEvent_t mark_ = nullptr;
+  cudaEvent_t now_ = nullptr;
+};
+
 __device__ __forceinline__ int idx2(int c, int k, int width) {
   return c * width + k;
 }
@@ -5636,7 +5673,7 @@ void build_spin_descriptors_on_device(
   check_cuda(cudaGetLastError(), "build spin descriptors kernel launch failed");
 }
 
-void accumulate_spin_onsite_mforces_on_device(
+static void accumulate_spin_onsite_mforces_impl(
     const ModelProtocol& protocol,
     int atom_count,
     DeviceWorkspace& workspace) {
@@ -5662,7 +5699,7 @@ void accumulate_spin_onsite_mforces_on_device(
   check_cuda(cudaGetLastError(), "accumulate spin onsite mforces");
 }
 
-void accumulate_spin_scalar_forces_on_device(
+static void accumulate_spin_scalar_forces_impl(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
@@ -5745,7 +5782,7 @@ void accumulate_spin_scalar_forces_on_device(
   check_cuda(cudaGetLastError(), "accumulate spin scalar forces");
 }
 
-void accumulate_spin_density_forces_on_device(
+static void accumulate_spin_density_forces_impl(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
@@ -5869,7 +5906,7 @@ void accumulate_spin_density_forces_on_device(
   check_cuda(cudaGetLastError(), "accumulate spin density forces");
 }
 
-void accumulate_spin_chiral_polar_forces_on_device(
+static void accumulate_spin_chiral_polar_forces_impl(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
@@ -5977,6 +6014,37 @@ void accumulate_spin_chiral_polar_forces_on_device(
         view.virial_soa9);
   }
   check_cuda(cudaGetLastError(), "accumulate spin chiral polar forces");
+}
+
+void accumulate_spin_forces_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool accumulate_virial,
+    SpinForceTimings* timings) {
+  require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
+  SpinForceTimings ignored_timings;
+  SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
+  PhaseTimer timer(timings != nullptr);
+
+  accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
+  timer.split(measured.onsite_ms);
+
+  accumulate_spin_scalar_forces_impl(
+      protocol, atom_count, box, model, workspace, accumulate_virial);
+  timer.split(measured.scalar_ms);
+
+  accumulate_spin_density_forces_impl(
+      protocol, atom_count, box, model, workspace, accumulate_virial);
+  timer.split(measured.density_ms);
+
+  if (protocol.spin_chiral != 0) {
+    accumulate_spin_chiral_polar_forces_impl(
+        protocol, atom_count, box, model, workspace, accumulate_virial);
+  }
+  timer.split(measured.chiral_ms);
 }
 
 }  // namespace nep_adapters::cuda_backend

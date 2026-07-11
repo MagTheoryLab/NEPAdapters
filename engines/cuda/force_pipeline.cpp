@@ -1,4 +1,4 @@
-#include "nonspin_pipeline.hpp"
+#include "force_pipeline.hpp"
 
 #include "ann_energy.hpp"
 #include "angular_basis_cache.hpp"
@@ -8,6 +8,7 @@
 #include "radial_basis_cache.hpp"
 #include "radial_descriptor.hpp"
 #include "radial_force.hpp"
+#include "spin_onsite.hpp"
 #include "zbl_force.hpp"
 
 #include <stdexcept>
@@ -36,7 +37,8 @@ void build_staged_position_descriptors(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool has_angular) {
+    bool has_angular,
+    bool spin_model) {
   if (has_angular) {
     build_angular_geometry_cache_on_device(protocol, atom_count, box, workspace);
   }
@@ -51,6 +53,10 @@ void build_staged_position_descriptors(
     }
     build_radial_descriptors_on_device(protocol, atom_count, model, workspace);
   }
+  if (spin_model) {
+    build_spin_descriptors_on_device(
+        protocol, atom_count, box, model, workspace);
+  }
   if (has_angular) {
     if (try_build_angular_descriptors_and_ann_from_geometry_on_device(
             protocol, atom_count, model, workspace)) {
@@ -64,7 +70,7 @@ void build_staged_position_descriptors(
 
 void build_batched_descriptors(
     const ModelProtocol& protocol,
-    const NonSpinPipelineOptions& options,
+    const ForcePipelineOptions& options,
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
@@ -133,28 +139,30 @@ class PhaseTimer {
 };
 #endif
 
-}  // namespace
-
-void run_nonspin_pipeline(
+void run_force_pipeline(
     const ModelProtocol& protocol,
-    const NonSpinPipelineOptions& options,
+    const ForcePipelineOptions& options,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    NonSpinPipelineTimings* timings) {
-  require_ordinary_model(protocol);
+    bool spin_model,
+    ForcePipelineTimings* timings) {
   const bool has_angular = has_angular_terms(protocol);
-  NonSpinPipelineTimings ignored_timings;
-  NonSpinPipelineTimings& measured =
+  ForcePipelineTimings ignored_timings;
+  ForcePipelineTimings& measured =
       timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
 
-  if (options.topology == NonSpinNeighborTopology::batched_multi_box) {
+  if (options.topology == ForceNeighborTopology::batched_multi_box) {
+    if (spin_model) {
+      throw std::invalid_argument(
+          "spin execution pipeline does not support batched neighbor topology");
+    }
     build_batched_descriptors(
         protocol, options, atom_count, model, workspace, has_angular);
   } else if (
-      has_angular && protocol.descriptor_dim <= 64 &&
+      !spin_model && has_angular && protocol.descriptor_dim <= 64 &&
       try_build_descriptors_and_ann_from_positions_on_device(
           protocol,
           atom_count,
@@ -165,37 +173,45 @@ void run_nonspin_pipeline(
     // Fused descriptor/ANN path completed the phase.
   } else {
     build_staged_position_descriptors(
-        protocol, atom_count, box, model, workspace, has_angular);
+        protocol, atom_count, box, model, workspace, has_angular, spin_model);
   }
   timer.split(measured.descriptor_ann_ms);
 
-  switch (options.topology) {
-    case NonSpinNeighborTopology::batched_multi_box:
-      accumulate_radial_forces_batched(protocol, atom_count, model, workspace);
-      break;
-    case NonSpinNeighborTopology::single_box_symmetric:
-      accumulate_radial_forces_on_device(
-          protocol,
-          atom_count,
-          box,
-          model,
-          workspace,
-          options.accumulate_virial);
-      break;
-    case NonSpinNeighborTopology::external_full:
-      accumulate_lammps_radial_forces_on_device(
-          protocol,
-          atom_count,
-          box,
-          model,
-          workspace,
-          options.accumulate_virial);
-      break;
+  const bool fuse_radial_zbl =
+      options.topology == ForceNeighborTopology::single_box_symmetric &&
+      protocol.has_zbl && !options.zbl_outputs;
+  if (fuse_radial_zbl) {
+    accumulate_radial_and_zbl_forces_on_device(
+        protocol, atom_count, box, model, workspace);
+  } else {
+    switch (options.topology) {
+      case ForceNeighborTopology::batched_multi_box:
+        accumulate_radial_forces_batched(protocol, atom_count, model, workspace);
+        break;
+      case ForceNeighborTopology::single_box_symmetric:
+        accumulate_radial_forces_on_device(
+            protocol,
+            atom_count,
+            box,
+            model,
+            workspace,
+            options.accumulate_virial);
+        break;
+      case ForceNeighborTopology::external_full:
+        accumulate_lammps_radial_forces_on_device(
+            protocol,
+            atom_count,
+            box,
+            model,
+            workspace,
+            options.accumulate_virial);
+        break;
+    }
   }
   timer.split(measured.radial_force_ms);
 
   if (has_angular) {
-    if (options.topology == NonSpinNeighborTopology::batched_multi_box) {
+    if (options.topology == ForceNeighborTopology::batched_multi_box) {
       accumulate_l2_angular_forces_batched(protocol, atom_count, model, workspace);
     } else {
       accumulate_l2_angular_forces_on_device(
@@ -209,8 +225,8 @@ void run_nonspin_pipeline(
   }
   timer.split(measured.angular_force_ms);
 
-  if (protocol.has_zbl) {
-    if (options.topology == NonSpinNeighborTopology::batched_multi_box) {
+  if (protocol.has_zbl && !fuse_radial_zbl) {
+    if (options.topology == ForceNeighborTopology::batched_multi_box) {
       accumulate_zbl_forces_batched(protocol, atom_count, model, workspace);
     } else {
       accumulate_zbl_forces_on_device(
@@ -223,6 +239,53 @@ void run_nonspin_pipeline(
     }
   }
   timer.split(measured.zbl_force_ms);
+
+  if (spin_model) {
+    SpinForceTimings spin_timings;
+    accumulate_spin_forces_on_device(
+        protocol,
+        atom_count,
+        box,
+        model,
+        workspace,
+        options.accumulate_virial,
+        timings == nullptr ? nullptr : &spin_timings);
+    measured.spin_onsite_ms = spin_timings.onsite_ms;
+    measured.spin_scalar_ms = spin_timings.scalar_ms;
+    measured.spin_density_ms = spin_timings.density_ms;
+    measured.spin_chiral_ms = spin_timings.chiral_ms;
+  }
+}
+
+}  // namespace
+
+void run_nonspin_pipeline(
+    const ModelProtocol& protocol,
+    const ForcePipelineOptions& options,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    ForcePipelineTimings* timings) {
+  require_ordinary_model(protocol);
+  run_force_pipeline(
+      protocol, options, atom_count, box, model, workspace, false, timings);
+}
+
+void run_spin_pipeline(
+    const ModelProtocol& protocol,
+    const ForcePipelineOptions& options,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    ForcePipelineTimings* timings) {
+  if (protocol.spin_mode == 0 || protocol.charge_mode != 0) {
+    throw std::invalid_argument(
+        "spin execution pipeline accepts spin models without charge only");
+  }
+  run_force_pipeline(
+      protocol, options, atom_count, box, model, workspace, true, timings);
 }
 
 }  // namespace nep_adapters::cuda_backend

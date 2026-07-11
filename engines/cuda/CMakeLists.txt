@@ -3,7 +3,7 @@ add_library(nep_adapters_cuda
   host_staging.cpp
   model_parameters.cpp
   model_protocol.cpp
-  nonspin_pipeline.cpp
+  force_pipeline.cpp
   workspace_plan.cpp
 )
 add_library(NEPAdapters::cuda ALIAS nep_adapters_cuda)

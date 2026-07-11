@@ -14,33 +14,20 @@ void build_spin_descriptors_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace);
 
-void accumulate_spin_onsite_mforces_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace);
+struct SpinForceTimings {
+  float onsite_ms = 0.0f;
+  float scalar_ms = 0.0f;
+  float density_ms = 0.0f;
+  float chiral_ms = 0.0f;
+};
 
-void accumulate_spin_scalar_forces_on_device(
+void accumulate_spin_forces_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial);
-
-void accumulate_spin_density_forces_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool accumulate_virial);
-
-void accumulate_spin_chiral_polar_forces_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool accumulate_virial);
+    bool accumulate_virial,
+    SpinForceTimings* timings = nullptr);
 
 }  // namespace nep_adapters::cuda_backend
