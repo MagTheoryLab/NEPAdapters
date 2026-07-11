@@ -1713,9 +1713,6 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
   constexpr int Rho0DotBase = GeomBase + C * 9;
   constexpr int Raw1DotBase = Rho0DotBase + C * 3;
   constexpr int PolarBase = Raw1DotBase + C * 9;
-  constexpr int OctBase = PolarBase + C * 3;
-  constexpr int HexBase = OctBase + ChiC * kSpinDeg3Count;
-  constexpr int ComponentCount = HexBase + ChiC * kSpinDeg4Count;
   constexpr int DensityComponentCount = PolarBase - Rho0Base;
   __shared__ float prim[kSpinPrimitiveCount][SlotCapacity + 1];
   __shared__ float weights[C][SlotCapacity + 1];
@@ -1837,154 +1834,183 @@ __global__ void __launch_bounds__(128, 1) build_spin_primitive_cache_c4_l4_warp(
   }
   __syncthreads();
 
-  for (int component = lane; component < ComponentCount; component += blockDim.x) {
-    int c = 0;
-    int k = 0;
-    int p = 0;
-    float acc = 0.0f;
-    if (component < ScalarComponents) {
-      const int term = component / C;
-      c = component - term * C;
+  constexpr int ScalarTaskBase = 0;
+  constexpr int Rho0TaskBase = ScalarTaskBase + 4;
+  constexpr int Raw1TaskBase = Rho0TaskBase + 3;
+  constexpr int L1RdotTaskBase = Raw1TaskBase + 9;
+  constexpr int L1CrossTaskBase = L1RdotTaskBase + 1;
+  constexpr int L1StfTaskBase = L1CrossTaskBase + 3;
+  constexpr int Angular2TaskBase = L1StfTaskBase + 9;
+  constexpr int Angular3TaskBase = Angular2TaskBase + 15;
+  constexpr int Angular4TaskBase = Angular3TaskBase + 21;
+  constexpr int GeomTaskBase = Angular4TaskBase + 27;
+  constexpr int Rho0DotTaskBase = GeomTaskBase + 9;
+  constexpr int Raw1DotTaskBase = Rho0DotTaskBase + 3;
+  constexpr int PolarTaskBase = Raw1DotTaskBase + 9;
+  constexpr int ChannelTaskCount = PolarTaskBase + 3;
+
+  for (int task = lane; task < ChannelTaskCount; task += blockDim.x) {
+    float channel_acc[C] = {};
+    if (task < Rho0TaskBase) {
+      const int term = task - ScalarTaskBase;
       for (int slot = 0; slot < count; ++slot) {
         const float dot = prim[3][slot];
         const float value =
             term == 0 ? dot :
             term == 1 ? dot * dot :
             term == 2 ? prim[4][slot] : prim[5][slot] * prim[6][slot];
-        acc += weights[c][slot] * value;
+        for (int c = 0; c < C; ++c) {
+          channel_acc[c] += weights[c][slot] * value;
+        }
       }
-      descriptors[atom + atom_stride * (struct_dim + 2 + term * C + c)] = acc;
-      continue;
-    } else if (component < Raw1Base) {
-      k = component - Rho0Base;
-      c = k / 3;
-      p = k - c * 3;
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_rho0_cache[
-          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < L1RdotBase) {
-      k = component - Raw1Base;
-      c = k / 9;
-      p = 7 + (k - c * 9);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_raw1_cache[
-          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < L1CrossBase) {
-      k = component - L1RdotBase;
-      c = k;
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[6][slot];
-      density_l1_rdot_cache[
-          spin_component_cache_index<AtomMajor, C>(atom_stride, atom, c)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < L1StfBase) {
-      k = component - L1CrossBase;
-      c = k / 3;
-      p = 16 + (k - c * 3);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_l1_cross_cache[
-          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < Angular2Base) {
-      k = component - L1StfBase;
-      c = k / 9;
-      p = 19 + (k - c * 9);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_l1_stf_cache[
-          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < Angular3Base) {
-      k = component - Angular2Base;
-      c = k / 15;
-      p = 28 + (k - c * 15);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular2_cache[
-          spin_component_cache_index<AtomMajor, C * 15>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < Angular4Base) {
-      k = component - Angular3Base;
-      c = k / 21;
-      p = 43 + (k - c * 21);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular3_cache[
-          spin_component_cache_index<AtomMajor, C * 21>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < GeomBase) {
-      k = component - Angular4Base;
-      c = k / 27;
-      p = 64 + (k - c * 27);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_angular4_cache[
-          spin_component_cache_index<AtomMajor, C * 27>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < Rho0DotBase) {
-      k = component - GeomBase;
-      c = k / 9;
-      p = 91 + (k - c * 9);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      density_geom_cache[
-          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < Raw1DotBase) {
-      k = component - Rho0DotBase;
-      c = k / 3;
-      p = k - c * 3;
-      for (int slot = 0; slot < count; ++slot) {
-        acc += weights[c][slot] * prim[3][slot] * prim[p][slot];
+      for (int c = 0; c < C; ++c) {
+        descriptors[
+            atom + atom_stride * (struct_dim + 2 + term * C + c)] =
+            channel_acc[c];
       }
-      density_rho0_dot_cache[
-          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
       continue;
-    } else if (component < PolarBase) {
-      k = component - Raw1DotBase;
-      c = k / 9;
-      p = 7 + (k - c * 9);
-      for (int slot = 0; slot < count; ++slot) {
-        acc += weights[c][slot] * prim[3][slot] * prim[p][slot];
-      }
-      density_raw1_dot_cache[
-          spin_component_cache_index<AtomMajor, C * 9>(atom_stride, atom, k)] = acc;
-      density_components[component - Rho0Base] = acc;
-      continue;
-    } else if (component < OctBase) {
-      k = component - PolarBase;
-      c = k / 3;
-      p = 100 + (k - c * 3);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_polar_cache[
-          spin_component_cache_index<AtomMajor, C * 3>(atom_stride, atom, k)] = acc;
-      continue;
-    } else if (component < HexBase) {
-      k = component - OctBase;
-      c = k / kSpinDeg3Count;
-      p = 103 + (k - c * kSpinDeg3Count);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_octupoles_raw_cache[
-          spin_component_cache_index<AtomMajor, ChiC * kSpinDeg3Count>(
-              atom_stride, atom, k)] = acc;
-      continue;
+    }
+
+    int width = 0;
+    int component_base = 0;
+    int component_count = 0;
+    int primitive_base = 0;
+    int k = 0;
+    bool multiply_dot = false;
+    float* output = nullptr;
+    if (task < Raw1TaskBase) {
+      width = 3;
+      component_base = Rho0Base;
+      component_count = C * 3;
+      primitive_base = 0;
+      k = task - Rho0TaskBase;
+      output = density_rho0_cache;
+    } else if (task < L1RdotTaskBase) {
+      width = 9;
+      component_base = Raw1Base;
+      component_count = C * 9;
+      primitive_base = 7;
+      k = task - Raw1TaskBase;
+      output = density_raw1_cache;
+    } else if (task < L1CrossTaskBase) {
+      width = 1;
+      component_base = L1RdotBase;
+      component_count = C;
+      primitive_base = 6;
+      k = task - L1RdotTaskBase;
+      output = density_l1_rdot_cache;
+    } else if (task < L1StfTaskBase) {
+      width = 3;
+      component_base = L1CrossBase;
+      component_count = C * 3;
+      primitive_base = 16;
+      k = task - L1CrossTaskBase;
+      output = density_l1_cross_cache;
+    } else if (task < Angular2TaskBase) {
+      width = 9;
+      component_base = L1StfBase;
+      component_count = C * 9;
+      primitive_base = 19;
+      k = task - L1StfTaskBase;
+      output = density_l1_stf_cache;
+    } else if (task < Angular3TaskBase) {
+      width = 15;
+      component_base = Angular2Base;
+      component_count = C * 15;
+      primitive_base = 28;
+      k = task - Angular2TaskBase;
+      output = density_angular2_cache;
+    } else if (task < Angular4TaskBase) {
+      width = 21;
+      component_base = Angular3Base;
+      component_count = C * 21;
+      primitive_base = 43;
+      k = task - Angular3TaskBase;
+      output = density_angular3_cache;
+    } else if (task < GeomTaskBase) {
+      width = 27;
+      component_base = Angular4Base;
+      component_count = C * 27;
+      primitive_base = 64;
+      k = task - Angular4TaskBase;
+      output = density_angular4_cache;
+    } else if (task < Rho0DotTaskBase) {
+      width = 9;
+      component_base = GeomBase;
+      component_count = C * 9;
+      primitive_base = 91;
+      k = task - GeomTaskBase;
+      output = density_geom_cache;
+    } else if (task < Raw1DotTaskBase) {
+      width = 3;
+      component_base = Rho0DotBase;
+      component_count = C * 3;
+      primitive_base = 0;
+      k = task - Rho0DotTaskBase;
+      multiply_dot = true;
+      output = density_rho0_dot_cache;
+    } else if (task < PolarTaskBase) {
+      width = 9;
+      component_base = Raw1DotBase;
+      component_count = C * 9;
+      primitive_base = 7;
+      k = task - Raw1DotTaskBase;
+      multiply_dot = true;
+      output = density_raw1_dot_cache;
     } else {
-      k = component - HexBase;
-      c = k / kSpinDeg4Count;
-      p = 113 + (k - c * kSpinDeg4Count);
-      for (int slot = 0; slot < count; ++slot) acc += weights[c][slot] * prim[p][slot];
-      chiral_hexadecapoles_raw_cache[
-          spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
-              atom_stride, atom, k)] = acc;
+      width = 3;
+      component_base = PolarBase;
+      component_count = C * 3;
+      primitive_base = 100;
+      k = task - PolarTaskBase;
+      output = chiral_polar_cache;
+    }
+
+    for (int slot = 0; slot < count; ++slot) {
+      float value = prim[primitive_base + k][slot];
+      if (multiply_dot) {
+        value *= prim[3][slot];
+      }
+      for (int c = 0; c < C; ++c) {
+        channel_acc[c] += weights[c][slot] * value;
+      }
+    }
+    for (int c = 0; c < C; ++c) {
+      const int component = c * width + k;
+      output[spin_component_cache_index<AtomMajor>(
+          atom_stride, component_count, atom, component)] = channel_acc[c];
+      if (task < PolarTaskBase) {
+        density_components[
+            component_base - Rho0Base + component] = channel_acc[c];
+      }
     }
   }
 
+  constexpr int OctTaskBase = 0;
+  constexpr int HexTaskBase = OctTaskBase + kSpinDeg3Count;
+  constexpr int ChiralTaskCount = HexTaskBase + kSpinDeg4Count;
+  for (int task = lane; task < ChiralTaskCount; task += blockDim.x) {
+    const bool is_octupole = task < HexTaskBase;
+    const int width = is_octupole ? kSpinDeg3Count : kSpinDeg4Count;
+    const int k = is_octupole ? task - OctTaskBase : task - HexTaskBase;
+    const int primitive_base = is_octupole ? 103 : 113;
+    const int component_count = ChiC * width;
+    float channel_acc[ChiC] = {};
+    for (int slot = 0; slot < count; ++slot) {
+      const float value = prim[primitive_base + k][slot];
+      for (int c = 0; c < ChiC; ++c) {
+        channel_acc[c] += weights[c][slot] * value;
+      }
+    }
+    float* output = is_octupole
+        ? chiral_octupoles_raw_cache
+        : chiral_hexadecapoles_raw_cache;
+    for (int c = 0; c < ChiC; ++c) {
+      output[spin_component_cache_index<AtomMajor>(
+          atom_stride, component_count, atom, c * width + k)] =
+          channel_acc[c];
+    }
+  }
   __syncthreads();
   if (lane < C) {
     const int channel = lane;
