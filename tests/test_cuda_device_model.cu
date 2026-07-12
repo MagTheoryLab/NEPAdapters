@@ -1,13 +1,6 @@
-#include "ann_energy.hpp"
-#include "angular_basis_cache.hpp"
-#include "angular_descriptor.hpp"
+#include "device_operations.hpp"
 #include "device_model.hpp"
-#include "device_staging.hpp"
 #include "device_workspace.hpp"
-#include "internal_neighbor_builder.hpp"
-#include "pair_geometry_cache.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
 
 #include <cuda_runtime.h>
 

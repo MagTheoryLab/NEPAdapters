@@ -542,6 +542,66 @@ if(TARGET NEPAdapters::cpu_nep3 AND
 endif()
 
 if(TARGET NEPAdapters::cpu_opt)
+  add_executable(nep_adapters_fp64_oracle_test
+    test_fp64_oracle.cpp
+    "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/nep.cpp"
+    "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/neighbor_nep.cpp"
+    "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/ewald_nep.cpp"
+  )
+  target_link_libraries(
+    nep_adapters_fp64_oracle_test
+    PRIVATE
+      NEPAdapters::cpu_opt
+  )
+  target_include_directories(
+    nep_adapters_fp64_oracle_test
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/engines/cpu_common"
+      "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}"
+      "${PROJECT_SOURCE_DIR}/tests"
+  )
+  target_compile_definitions(
+    nep_adapters_fp64_oracle_test
+    PRIVATE
+      NEP=NEPAdaptersFp64OracleNativeNEP
+      EwaldNep=NEPAdaptersFp64OracleNativeEwaldNep
+      find_neighbor_list_small_box=nep_adapters_fp64_oracle_find_neighbor_list_small_box
+      NEP_ADAPTERS_FP64_MODEL_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/nep.txt"
+      NEP_ADAPTERS_FP64_XYZ_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/train.xyz"
+      NEP_ADAPTERS_FP64_DESCRIPTOR_PATH="${NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR}/descriptor.txt"
+      NEP_ADAPTERS_FP64_SPIN_MODEL_PATH="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+      NEP_ADAPTERS_FP64_SPIN_REFERENCE_PATH="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      nep_adapters_fp64_oracle_test
+      PRIVATE
+        -fno-fast-math
+        -ffp-contract=off
+    )
+  elseif(MSVC)
+    target_compile_options(nep_adapters_fp64_oracle_test PRIVATE /fp:strict)
+  endif()
+  set(NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL "")
+  if(TARGET NEPAdapters::cuda AND NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
+    target_link_libraries(
+      nep_adapters_fp64_oracle_test
+      PRIVATE
+        NEPAdapters::cuda
+    )
+    target_compile_definitions(
+      nep_adapters_fp64_oracle_test
+      PRIVATE
+        NEP_ADAPTERS_FP64_COMPARE_CUDA=1
+    )
+    set(NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL ";cuda")
+  endif()
+  add_test(
+    NAME nep_adapters_fp64_oracle_test
+    COMMAND nep_adapters_fp64_oracle_test)
+  set_tests_properties(nep_adapters_fp64_oracle_test PROPERTIES
+    LABELS "parity;oracle;fp64;cpu_opt;spin${NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL}")
+
   add_executable(nep_adapters_cpu_opt_spin_test
     test_cpu_opt_spin.cpp)
   target_link_libraries(

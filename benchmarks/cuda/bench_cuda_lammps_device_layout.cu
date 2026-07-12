@@ -1,22 +1,12 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cuda.hpp"
 
-#include "ann_energy.hpp"
-#include "angular_basis_cache.hpp"
-#include "angular_descriptor.hpp"
-#include "angular_force.hpp"
+#include "device_operations.hpp"
 #include "device_model.hpp"
-#include "device_staging.hpp"
 #include "device_workspace.hpp"
-#include "lammps_device_output.hpp"
 #include "model_parameters.hpp"
-#include "pair_geometry_cache.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
-#include "radial_force.hpp"
 #include "simulation_box.hpp"
 #include "workspace_plan.hpp"
-#include "zbl_force.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>

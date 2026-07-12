@@ -2,22 +2,11 @@
 #include "nep_adapters/engines/cuda.hpp"
 
 #if defined(NEP_ADAPTERS_BENCH_DEVICE_PIPELINE)
-#include "ann_energy.hpp"
-#include "angular_basis_cache.hpp"
-#include "angular_descriptor.hpp"
-#include "angular_force.hpp"
-#include "batch_output.hpp"
+#include "device_operations.hpp"
 #include "device_model.hpp"
-#include "device_staging.hpp"
 #include "device_workspace.hpp"
-#include "internal_neighbor_builder.hpp"
 #include "model_parameters.hpp"
-#include "pair_geometry_cache.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
-#include "radial_force.hpp"
 #include "workspace_plan.hpp"
-#include "zbl_force.hpp"
 
 #include <cuda_runtime.h>
 #endif

@@ -1,15 +1,21 @@
-# cuda Engine
+# CUDA Engine
 
-This directory contains the CUDA engine scaffold.
+This directory contains the CUDA engine implementation.
 
 CUDA dependencies must stay scoped to this engine and CUDA-enabled packages.
 The core runtime and CPU-only Python package must remain buildable without CUDA.
 
-The current implementation deliberately starts with a non-spin model boundary:
+The directory is organized around a small orchestration interface and separate
+CUDA compilation units:
 
-- `cuda_engine.cpp` registers the `cuda` engine and parses enough `nep.txt`
-  metadata to report cutoffs, type count, descriptor dimension, and the initial
-  device-input capability.
+- `cuda_engine.cpp` owns the engine interface and caller-specific staging.
+- `force_pipeline.*` owns the complete ordinary and spin force dataflow.
+- `device_operations.hpp` is the single private interface for device staging,
+  neighbor construction, descriptors, ANN evaluation, forces, and output.
+  Individual `.cu` files remain separate CUDA compilation units; they are not
+  separate public modules.
+- `spin_onsite.cu` owns spin orchestration, with descriptor and force device
+  implementation kept in two private `.cuh` fragments.
 - The ordinary NEP4/NEP5 `nep.txt` protocol follows
   `/Users/superbing/Desktop/Workspace/torchnep/src/force/nep.cu`; in particular,
   descriptor dimension is computed from `n_max` plus the newer `l_max ...
@@ -115,9 +121,8 @@ The current implementation deliberately starts with a non-spin model boundary:
   controlled by Kokkos/LAMMPS build macros. A future Kokkos frontend can pass
   device views more directly, but the host-neighbor API should continue to stage
   into this engine-owned execution layout.
-- Ordinary potential models are accepted; spin, charge, dipole,
-  polarizability, and temperature model tags are rejected until their contracts
-  are explicit.
+- Ordinary and spin execution use explicit pipelines. Charge-specific device
+  operations remain isolated from both in `qnep_charge.cu`.
 - `find_force_batch` validates the host batch contract and supports the
   device path described above. Other ordinary NEP shapes still return
   `NEPA_STATUS_UNSUPPORTED` until their force paths are verified.

@@ -1,4 +1,4 @@
-#include "internal_neighbor_builder.hpp"
+#include "device_operations.hpp"
 #include "simulation_box_device.cuh"
 
 #include <cuda_runtime.h>

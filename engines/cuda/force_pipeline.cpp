@@ -1,15 +1,6 @@
 #include "force_pipeline.hpp"
 
-#include "ann_energy.hpp"
-#include "angular_basis_cache.hpp"
-#include "angular_descriptor.hpp"
-#include "angular_force.hpp"
-#include "pair_geometry_cache.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
-#include "radial_force.hpp"
-#include "spin_onsite.hpp"
-#include "zbl_force.hpp"
+#include "device_operations.hpp"
 
 #include <stdexcept>
 

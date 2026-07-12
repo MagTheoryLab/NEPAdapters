@@ -27,6 +27,8 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     radial_descriptor.cu
     radial_basis_cache.cu
     spin_onsite.cu
+    spin_onsite_descriptors.cuh
+    spin_onsite_forces.cuh
     zbl_force.cu
   )
   set_source_files_properties(

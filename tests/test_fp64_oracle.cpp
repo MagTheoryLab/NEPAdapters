@@ -1,0 +1,1116 @@
+#include "nep_adapters/api.h"
+#include "nep_adapters/engines/cpu_opt.hpp"
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+#include "nep_adapters/engines/cuda.hpp"
+#endif
+
+#include "cpu_engine_adapter.hpp"
+#include "cpu_nep3_test_utils.hpp"
+#include "nep.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#if defined(_OPENMP) || defined(USE_TABLE_FOR_RADIAL_FUNCTIONS) || \
+    defined(NEP_ADAPTERS_CPU_OPT_USE_CBLAS)
+#error "The FP64 oracle must use the scalar, untabulated CPU path"
+#endif
+
+namespace {
+
+struct CaseData {
+  std::string name;
+  std::string model_path;
+  std::vector<std::int32_t> types;
+  std::vector<double> positions;
+  std::vector<double> spins;
+  std::array<double, 9> box{};
+  std::array<std::int32_t, 3> pbc{};
+
+  bool is_spin() const { return !spins.empty(); }
+  int atom_count() const { return static_cast<int>(types.size()); }
+};
+
+struct Prediction {
+  double energy = 0.0;
+  std::vector<double> potential;
+  std::vector<double> force;
+  std::vector<double> virial;
+  std::vector<double> atom_virial;
+  std::vector<double> mforce;
+  std::vector<double> tau;
+  std::vector<double> descriptor;
+};
+
+struct LammpsPrediction {
+  double energy = 0.0;
+  std::vector<double> virial6;
+  std::vector<double> potential;
+  std::vector<double> force;
+  std::vector<double> mforce;
+  std::vector<double> atom_virial9;
+};
+
+struct Budget {
+  double atol = 0.0;
+  double rtol = 0.0;
+};
+
+struct Budgets {
+  Budget energy_per_atom;
+  Budget potential;
+  Budget force;
+  Budget virial;
+  Budget atom_virial;
+  Budget mforce;
+  Budget tau;
+  Budget descriptor;
+  Budget radial_basis_sum;
+};
+
+struct ErrorStats {
+  double max_abs = 0.0;
+  double max_rel = 0.0;
+  double rms = 0.0;
+  std::uint64_t max_float_ulp = 0;
+  std::size_t max_index = 0;
+  bool finite = true;
+};
+
+void require_status(NepaStatus status, const std::string& operation) {
+  if (status != NEPA_STATUS_OK) {
+    throw std::runtime_error(
+        operation + " failed with status " + std::to_string(status));
+  }
+}
+
+std::uint32_t ordered_float_bits(float value) {
+  if (value == 0.0f) {
+    return 0x80000000u;
+  }
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
+
+std::uint64_t float_ulp_distance(double lhs, double rhs) {
+  const float a = static_cast<float>(lhs);
+  const float b = static_cast<float>(rhs);
+  if (!std::isfinite(a) || !std::isfinite(b)) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  const std::uint32_t oa = ordered_float_bits(a);
+  const std::uint32_t ob = ordered_float_bits(b);
+  return oa >= ob ? static_cast<std::uint64_t>(oa - ob)
+                  : static_cast<std::uint64_t>(ob - oa);
+}
+
+ErrorStats error_stats(
+    const std::vector<double>& candidate,
+    const std::vector<double>& reference) {
+  ErrorStats out;
+  if (candidate.size() != reference.size() || candidate.empty()) {
+    out.finite = false;
+    return out;
+  }
+  long double sum_sq = 0.0L;
+  for (std::size_t i = 0; i < candidate.size(); ++i) {
+    if (!std::isfinite(candidate[i]) || !std::isfinite(reference[i])) {
+      out.finite = false;
+      continue;
+    }
+    const double abs_error = std::abs(candidate[i] - reference[i]);
+    const double denominator = std::max(std::abs(reference[i]), 1.0e-12);
+    const double rel_error = abs_error / denominator;
+    const std::uint64_t ulp = float_ulp_distance(candidate[i], reference[i]);
+    if (abs_error > out.max_abs) {
+      out.max_abs = abs_error;
+      out.max_index = i;
+    }
+    out.max_rel = std::max(out.max_rel, rel_error);
+    out.max_float_ulp = std::max(out.max_float_ulp, ulp);
+    sum_sq += static_cast<long double>(abs_error) * abs_error;
+  }
+  out.rms = std::sqrt(static_cast<double>(sum_sq / candidate.size()));
+  return out;
+}
+
+bool within_budget(
+    const std::vector<double>& candidate,
+    const std::vector<double>& reference,
+    const Budget& budget) {
+  if (candidate.size() != reference.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < candidate.size(); ++i) {
+    if (!std::isfinite(candidate[i]) || !std::isfinite(reference[i])) {
+      return false;
+    }
+    const double limit = budget.atol + budget.rtol * std::abs(reference[i]);
+    if (std::abs(candidate[i] - reference[i]) > limit) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool report_field(
+    const std::string& backend,
+    const std::string& case_name,
+    const std::string& field,
+    const std::vector<double>& candidate,
+    const std::vector<double>& reference,
+    const Budget& budget) {
+  const ErrorStats stats = error_stats(candidate, reference);
+  const bool ok = stats.finite && within_budget(candidate, reference, budget);
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ACCURACY backend=" << backend
+            << " case=" << case_name
+            << " field=" << field
+            << " count=" << candidate.size()
+            << " max_abs=" << stats.max_abs
+            << " max_rel=" << stats.max_rel
+            << " rms=" << stats.rms
+            << " max_float_ulp=" << stats.max_float_ulp
+            << " max_index=" << stats.max_index
+            << " candidate_at_max="
+            << (stats.max_index < candidate.size()
+                    ? candidate[stats.max_index]
+                    : std::numeric_limits<double>::quiet_NaN())
+            << " reference_at_max="
+            << (stats.max_index < reference.size()
+                    ? reference[stats.max_index]
+                    : std::numeric_limits<double>::quiet_NaN())
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+double max_abs_diff(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return INFINITY;
+  }
+  double out = 0.0;
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    out = std::max(out, std::abs(lhs[i] - rhs[i]));
+  }
+  return out;
+}
+
+std::vector<double> read_reference_vector(
+    const std::string& path,
+    const std::string& wanted) {
+  std::ifstream input(path);
+  std::string label;
+  std::size_t count = 0;
+  while (input >> label >> count) {
+    std::vector<double> values(count, 0.0);
+    for (double& value : values) {
+      input >> value;
+    }
+    if (label == wanted) {
+      return values;
+    }
+  }
+  throw std::runtime_error("missing FP64 reference block: " + wanted);
+}
+
+int read_radial_descriptor_dim(const std::string& model_path) {
+  std::ifstream input(model_path);
+  std::string line;
+  while (std::getline(input, line)) {
+    std::istringstream tokens(line);
+    std::string label;
+    int n_max_radial = -1;
+    if (tokens >> label && label == "n_max" &&
+        tokens >> n_max_radial && n_max_radial >= 0) {
+      return n_max_radial + 1;
+    }
+  }
+  throw std::runtime_error("missing radial n_max in model: " + model_path);
+}
+
+std::vector<double> radial_descriptor_channels(
+    const std::vector<double>& descriptors,
+    int atom_count,
+    int radial_dim) {
+  if (atom_count <= 0 || radial_dim <= 0 ||
+      descriptors.size() % static_cast<std::size_t>(atom_count) != 0) {
+    throw std::runtime_error("invalid descriptor shape for radial split");
+  }
+  const std::size_t descriptor_dim =
+      descriptors.size() / static_cast<std::size_t>(atom_count);
+  if (static_cast<std::size_t>(radial_dim) > descriptor_dim) {
+    throw std::runtime_error("radial descriptor dimension exceeds total dimension");
+  }
+  std::vector<double> radial;
+  radial.reserve(static_cast<std::size_t>(atom_count) * radial_dim);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    const std::size_t offset = static_cast<std::size_t>(atom) * descriptor_dim;
+    radial.insert(
+        radial.end(),
+        descriptors.begin() + offset,
+        descriptors.begin() + offset + radial_dim);
+  }
+  return radial;
+}
+
+class OracleRunner {
+ public:
+  explicit OracleRunner(const std::string& model_path) : model_(model_path) {}
+
+  NepaStatus model_info(NepaModelInfo& info) { return model_.model_info(info); }
+  NepaStatus find_force_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
+    return model_.find_force_batch(batch, result);
+  }
+  NepaStatus find_descriptors(
+      const NepaStructureBatch& batch,
+      NepaFindDescriptorResult& result) {
+    return model_.find_descriptors(batch, result);
+  }
+  NepaStatus find_force_lammps_neighbors(
+      const NepaLammpsNeighborInput& input,
+      NepaLammpsNeighborResult& result) {
+    return model_.find_force_lammps_neighbors(input, result);
+  }
+
+ private:
+  nep_adapters::CpuModel<NEP> model_;
+};
+
+class ApiRunner {
+ public:
+  ApiRunner(const std::string& backend, const std::string& model_path)
+      : backend_(backend) {
+    const NepaStatus status = nepa_load_model(
+        backend.c_str(), model_path.c_str(), &model_);
+    if (status != NEPA_STATUS_OK || model_ == nullptr) {
+      throw std::runtime_error(
+          "failed to load backend " + backend + " status=" +
+          std::to_string(status));
+    }
+  }
+
+  ApiRunner(const ApiRunner&) = delete;
+  ApiRunner& operator=(const ApiRunner&) = delete;
+
+  ~ApiRunner() {
+    if (model_ != nullptr) {
+      nepa_free_model(model_);
+    }
+  }
+
+  NepaStatus model_info(NepaModelInfo& info) {
+    return nepa_model_info(model_, &info);
+  }
+  NepaStatus find_force_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
+    return nepa_find_force_batch(model_, &batch, &result);
+  }
+  NepaStatus find_descriptors(
+      const NepaStructureBatch& batch,
+      NepaFindDescriptorResult& result) {
+    return nepa_find_descriptors(model_, &batch, &result);
+  }
+  NepaStatus find_force_lammps_neighbors(
+      const NepaLammpsNeighborInput& input,
+      NepaLammpsNeighborResult& result) {
+    return nepa_find_force_lammps_neighbors(model_, &input, &result);
+  }
+
+ private:
+  std::string backend_;
+  NepaModel* model_ = nullptr;
+};
+
+template <typename Runner>
+Prediction evaluate_batch(
+    Runner& runner,
+    const CaseData& test_case,
+    bool include_descriptors = true) {
+  NepaModelInfo info{};
+  require_status(runner.model_info(info), "model_info");
+  const int atom_count = test_case.atom_count();
+  if (atom_count <= 0 || test_case.positions.size() !=
+                             static_cast<std::size_t>(atom_count) * 3 ||
+      (test_case.is_spin() && test_case.spins.size() !=
+                                  static_cast<std::size_t>(atom_count) * 3)) {
+    throw std::runtime_error("invalid FP64 oracle case shape");
+  }
+
+  const std::int32_t atom_counts[] = {atom_count};
+  const std::int32_t atom_offsets[] = {0};
+  NepaStructureBatch batch{};
+  batch.num_structures = 1;
+  batch.total_atoms = atom_count;
+  batch.atom_counts = atom_counts;
+  batch.atom_offsets = atom_offsets;
+  batch.types = test_case.types.data();
+  batch.positions_aos3 = test_case.positions.data();
+  batch.spins_aos3 = test_case.is_spin() ? test_case.spins.data() : nullptr;
+  batch.boxes_row_major9 = test_case.box.data();
+  batch.pbc_flags3 = test_case.pbc.data();
+
+  Prediction out;
+  out.potential.assign(atom_count, 0.0);
+  out.force.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  out.virial.assign(9, 0.0);
+  out.atom_virial.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+  if (test_case.is_spin()) {
+    out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+    out.tau.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  }
+
+  NepaFindForceResult result{};
+  result.energy_per_structure = &out.energy;
+  result.potential_per_atom = out.potential.data();
+  result.forces_aos3 = out.force.data();
+  result.virials_row_major9 = out.virial.data();
+  result.virials_per_atom_row_major9 = out.atom_virial.data();
+  result.mforces_aos3 = out.mforce.empty() ? nullptr : out.mforce.data();
+  result.tau_aos3 = out.tau.empty() ? nullptr : out.tau.data();
+  require_status(runner.find_force_batch(batch, result), "find_force_batch");
+
+  if (include_descriptors) {
+    out.descriptor.assign(
+        static_cast<std::size_t>(atom_count) * info.descriptor_dim, 0.0);
+    NepaFindDescriptorResult descriptor_result{};
+    descriptor_result.descriptors = out.descriptor.data();
+    require_status(
+        runner.find_descriptors(batch, descriptor_result),
+        "find_descriptors");
+  }
+  return out;
+}
+
+CaseData make_nonmag_fixture() {
+  const std::string model_path = NEP_ADAPTERS_FP64_MODEL_PATH;
+  const auto type_map = cpu_nep3_test::read_type_map(model_path);
+  const cpu_nep3_test::Frame frame =
+      cpu_nep3_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
+  CaseData out;
+  out.name = "nonmag_fixture";
+  out.model_path = model_path;
+  out.types = frame.types;
+  out.positions = frame.positions_aos3;
+  std::copy(frame.box, frame.box + 9, out.box.begin());
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
+CaseData make_dense_nonmag_case() {
+  CaseData out;
+  out.name = "nonmag_dense_neighbors";
+  out.model_path = NEP_ADAPTERS_FP64_MODEL_PATH;
+  constexpr int width = 6;
+  constexpr double spacing = 3.28;
+  constexpr int atom_count = width * width * width;
+  out.types.reserve(atom_count);
+  out.positions.reserve(static_cast<std::size_t>(atom_count) * 3);
+  int atom = 0;
+  for (int iz = 0; iz < width; ++iz) {
+    for (int iy = 0; iy < width; ++iy) {
+      for (int ix = 0; ix < width; ++ix, ++atom) {
+        out.types.push_back((ix + iy + iz) & 1);
+        out.positions.push_back(
+            (ix + 0.5) * spacing + 0.035 * std::sin(0.73 * atom));
+        out.positions.push_back(
+            (iy + 0.5) * spacing + 0.031 * std::cos(0.51 * atom));
+        out.positions.push_back(
+            (iz + 0.5) * spacing + 0.029 * std::sin(0.37 * atom + 0.2));
+      }
+    }
+  }
+  const double length = width * spacing;
+  out.box = {length, 0.0, 0.0, 0.0, length, 0.0, 0.0, 0.0, length};
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
+CaseData make_spin_reference_case() {
+  CaseData out;
+  out.name = "spin_chiral_reference";
+  out.model_path = NEP_ADAPTERS_FP64_SPIN_MODEL_PATH;
+  out.types = {0, 0, 0, 0};
+  out.positions = {
+      0.2, 0.2, 0.2,
+      3.7, 0.3, 0.2,
+      0.4, 3.6, 0.5,
+      1.8, 1.7, 3.5};
+  out.spins = {
+      1.0, 0.2, 0.0,
+      0.4, -0.3, 0.7,
+      -0.2, 0.8, 0.5,
+      0.6, 0.1, -0.4};
+  out.box = {4.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0};
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
+CaseData make_spin_finite_difference_case() {
+  CaseData out = make_spin_reference_case();
+  out.name = "spin_chiral_nonperiodic";
+  out.box = {16.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0, 16.0};
+  out.pbc = {0, 0, 0};
+  return out;
+}
+
+CaseData make_dense_spin_case() {
+  CaseData out;
+  out.name = "spin_chiral_dense_neighbors";
+  out.model_path = NEP_ADAPTERS_FP64_SPIN_MODEL_PATH;
+  constexpr int width = 4;
+  constexpr double spacing = 3.25;
+  constexpr int atom_count = width * width * width;
+  out.types.assign(atom_count, 0);
+  out.positions.reserve(static_cast<std::size_t>(atom_count) * 3);
+  out.spins.reserve(static_cast<std::size_t>(atom_count) * 3);
+  int atom = 0;
+  for (int iz = 0; iz < width; ++iz) {
+    for (int iy = 0; iy < width; ++iy) {
+      for (int ix = 0; ix < width; ++ix, ++atom) {
+        out.positions.push_back(
+            (ix + 0.5) * spacing + 0.031 * std::sin(0.43 * atom));
+        out.positions.push_back(
+            (iy + 0.5) * spacing + 0.027 * std::cos(0.37 * atom));
+        out.positions.push_back(
+            (iz + 0.5) * spacing + 0.029 * std::sin(0.29 * atom + 0.4));
+        out.spins.push_back(0.7 * std::cos(0.19 * atom));
+        out.spins.push_back(0.6 * std::sin(0.23 * atom + 0.2));
+        out.spins.push_back(0.5 * std::cos(0.31 * atom - 0.1));
+      }
+    }
+  }
+  const double length = width * spacing;
+  out.box = {length, 0.0, 0.0, 0.0, length, 0.0, 0.0, 0.0, length};
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
+bool validate_nonmag_frozen_reference(
+    const Prediction& oracle,
+    const CaseData& test_case) {
+  const auto type_map = cpu_nep3_test::read_type_map(test_case.model_path);
+  const cpu_nep3_test::Frame frame =
+      cpu_nep3_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
+  const cpu_nep3_test::Matrix descriptors =
+      cpu_nep3_test::read_matrix(NEP_ADAPTERS_FP64_DESCRIPTOR_PATH);
+  const std::vector<double> energy = {oracle.energy};
+  const std::vector<double> reference_energy = {frame.reference_energy};
+  const std::vector<double> reference_virial(
+      frame.reference_virial_row_major9,
+      frame.reference_virial_row_major9 + 9);
+  const double energy_diff = max_abs_diff(energy, reference_energy);
+  const double force_diff = max_abs_diff(oracle.force, frame.reference_forces_aos3);
+  const double virial_diff = max_abs_diff(oracle.virial, reference_virial);
+  const double descriptor_diff = max_abs_diff(oracle.descriptor, descriptors.values);
+  const bool ok = frame.has_reference_forces && frame.has_reference_virial &&
+                  descriptors.rows == static_cast<std::size_t>(test_case.atom_count()) &&
+                  energy_diff <= 1.0e-10 && force_diff <= 1.0e-10 &&
+                  virial_diff <= 1.0e-10 && descriptor_diff <= 1.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ORACLE_SELF_CHECK case=" << test_case.name
+            << " energy=" << energy_diff
+            << " force=" << force_diff
+            << " virial=" << virial_diff
+            << " descriptor=" << descriptor_diff
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+bool validate_spin_frozen_reference(
+    const Prediction& oracle,
+    const CaseData& test_case) {
+  const std::string path = NEP_ADAPTERS_FP64_SPIN_REFERENCE_PATH;
+  const double energy_diff = max_abs_diff(
+      std::vector<double>{oracle.energy},
+      read_reference_vector(path, "energy_total"));
+  const double potential_diff = max_abs_diff(
+      oracle.potential, read_reference_vector(path, "energy_atom"));
+  const double force_diff =
+      max_abs_diff(oracle.force, read_reference_vector(path, "force"));
+  const double mforce_diff =
+      max_abs_diff(oracle.mforce, read_reference_vector(path, "mforce"));
+  const double virial_diff =
+      max_abs_diff(oracle.virial, read_reference_vector(path, "virial9"));
+  const double descriptor_diff = max_abs_diff(
+      oracle.descriptor, read_reference_vector(path, "descriptor"));
+  const bool ok = energy_diff <= 1.0e-10 && potential_diff <= 1.0e-10 &&
+                  force_diff <= 1.0e-10 && mforce_diff <= 1.0e-10 &&
+                  virial_diff <= 1.0e-9 && descriptor_diff <= 1.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ORACLE_SELF_CHECK case=" << test_case.name
+            << " energy=" << energy_diff
+            << " potential=" << potential_diff
+            << " force=" << force_diff
+            << " mforce=" << mforce_diff
+            << " virial=" << virial_diff
+            << " descriptor=" << descriptor_diff
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+CaseData displaced_case(
+    const CaseData& base,
+    bool spin_coordinate,
+    std::size_t coordinate,
+    double delta) {
+  CaseData out = base;
+  std::vector<double>& values = spin_coordinate ? out.spins : out.positions;
+  values[coordinate] += delta;
+  return out;
+}
+
+CaseData strained_case(const CaseData& base, int axis, double strain) {
+  CaseData out = base;
+  for (int atom = 0; atom < out.atom_count(); ++atom) {
+    out.positions[3 * static_cast<std::size_t>(atom) + axis] *= 1.0 + strain;
+  }
+  for (int column = 0; column < 3; ++column) {
+    out.box[3 * axis + column] *= 1.0 + strain;
+  }
+  return out;
+}
+
+template <typename Runner>
+double energy_only(Runner& runner, const CaseData& test_case) {
+  return evaluate_batch(runner, test_case, false).energy;
+}
+
+template <typename Runner>
+bool validate_oracle_derivatives(
+    Runner& oracle,
+    const CaseData& test_case) {
+  const Prediction base = evaluate_batch(oracle, test_case, false);
+  constexpr double h = 2.0e-4;
+  double force_diff = 0.0;
+  for (std::size_t coordinate = 0; coordinate < test_case.positions.size(); ++coordinate) {
+    const double em2 = energy_only(
+        oracle, displaced_case(test_case, false, coordinate, -2.0 * h));
+    const double em1 = energy_only(
+        oracle, displaced_case(test_case, false, coordinate, -h));
+    const double ep1 = energy_only(
+        oracle, displaced_case(test_case, false, coordinate, h));
+    const double ep2 = energy_only(
+        oracle, displaced_case(test_case, false, coordinate, 2.0 * h));
+    const double finite_difference_force =
+        (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
+    force_diff = std::max(
+        force_diff,
+        std::abs(base.force[coordinate] - finite_difference_force));
+  }
+
+  double mforce_diff = 0.0;
+  if (test_case.is_spin()) {
+    for (std::size_t coordinate = 0; coordinate < test_case.spins.size(); ++coordinate) {
+      const double em2 = energy_only(
+          oracle, displaced_case(test_case, true, coordinate, -2.0 * h));
+      const double em1 = energy_only(
+          oracle, displaced_case(test_case, true, coordinate, -h));
+      const double ep1 = energy_only(
+          oracle, displaced_case(test_case, true, coordinate, h));
+      const double ep2 = energy_only(
+          oracle, displaced_case(test_case, true, coordinate, 2.0 * h));
+      const double finite_difference_mforce =
+          (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
+      mforce_diff = std::max(
+          mforce_diff,
+          std::abs(base.mforce[coordinate] - finite_difference_mforce));
+    }
+  }
+
+  double virial_diff = 0.0;
+  for (int axis = 0; axis < 3; ++axis) {
+    const double em2 = energy_only(oracle, strained_case(test_case, axis, -2.0 * h));
+    const double em1 = energy_only(oracle, strained_case(test_case, axis, -h));
+    const double ep1 = energy_only(oracle, strained_case(test_case, axis, h));
+    const double ep2 = energy_only(oracle, strained_case(test_case, axis, 2.0 * h));
+    // Public NEP virial follows the negative strain derivative convention.
+    const double finite_difference_virial =
+        (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
+    virial_diff = std::max(
+        virial_diff,
+        std::abs(base.virial[4 * axis] - finite_difference_virial));
+  }
+
+  std::array<double, 3> force_sum{};
+  for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+    for (int component = 0; component < 3; ++component) {
+      force_sum[component] +=
+          base.force[3 * static_cast<std::size_t>(atom) + component];
+    }
+  }
+  const double force_sum_max = std::max(
+      std::abs(force_sum[0]),
+      std::max(std::abs(force_sum[1]), std::abs(force_sum[2])));
+  const bool ok = force_diff <= 2.0e-7 && mforce_diff <= 2.0e-7 &&
+                  virial_diff <= 2.0e-7 && force_sum_max <= 2.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ORACLE_DERIVATIVE case=" << test_case.name
+            << " force=" << force_diff
+            << " mforce=" << mforce_diff
+            << " virial_diag=" << virial_diff
+            << " force_sum=" << force_sum_max
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+Budgets cpu_budgets() {
+  return {
+      {2.0e-8, 2.0e-12},
+      {2.0e-8, 2.0e-12},
+      {5.0e-8, 2.0e-11},
+      {5.0e-7, 2.0e-11},
+      {5.0e-7, 2.0e-11},
+      {5.0e-8, 2.0e-11},
+      {5.0e-8, 2.0e-11},
+      {2.0e-8, 2.0e-11},
+      {2.0e-8, 2.0e-11},
+  };
+}
+
+Budgets cuda_budgets() {
+  return {
+      {5.0e-4, 0.0},
+      {5.0e-4, 0.0},
+      {1.0e-3, 0.0},
+      {5.0e-3, 0.0},
+      {5.0e-3, 0.0},
+      {1.0e-3, 0.0},
+      {1.0e-3, 0.0},
+      {5.0e-4, 0.0},
+      {2.0e-6, 2.0e-6},
+  };
+}
+
+bool compare_prediction(
+    const std::string& backend,
+    const CaseData& test_case,
+    const Prediction& candidate,
+    const Prediction& oracle,
+    const Budgets& budgets) {
+  const double atoms = static_cast<double>(test_case.atom_count());
+  bool ok = true;
+  ok = report_field(
+           backend,
+           test_case.name,
+           "energy_per_atom",
+           {candidate.energy / atoms},
+           {oracle.energy / atoms},
+           budgets.energy_per_atom) && ok;
+  ok = report_field(
+           backend, test_case.name, "potential", candidate.potential,
+           oracle.potential, budgets.potential) && ok;
+  ok = report_field(
+           backend, test_case.name, "force", candidate.force,
+           oracle.force, budgets.force) && ok;
+  ok = report_field(
+           backend, test_case.name, "virial", candidate.virial,
+           oracle.virial, budgets.virial) && ok;
+  ok = report_field(
+           backend, test_case.name, "atom_virial", candidate.atom_virial,
+           oracle.atom_virial, budgets.atom_virial) && ok;
+  ok = report_field(
+           backend, test_case.name, "descriptor", candidate.descriptor,
+           oracle.descriptor, budgets.descriptor) && ok;
+  const int radial_dim = read_radial_descriptor_dim(test_case.model_path);
+  ok = report_field(
+           backend,
+           test_case.name,
+           "radial_basis_sum_scaled",
+           radial_descriptor_channels(
+               candidate.descriptor, test_case.atom_count(), radial_dim),
+           radial_descriptor_channels(
+               oracle.descriptor, test_case.atom_count(), radial_dim),
+           budgets.radial_basis_sum) && ok;
+  if (test_case.is_spin()) {
+    ok = report_field(
+             backend, test_case.name, "mforce", candidate.mforce,
+             oracle.mforce, budgets.mforce) && ok;
+    ok = report_field(
+             backend, test_case.name, "tau", candidate.tau,
+             oracle.tau, budgets.tau) && ok;
+  }
+  return ok;
+}
+
+struct LammpsStorage {
+  explicit LammpsStorage(const CaseData& test_case) {
+    const int atom_count = test_case.atom_count();
+    ilist.resize(atom_count);
+    std::iota(ilist.begin(), ilist.end(), 0);
+    numneigh.assign(atom_count, atom_count - 1);
+    neighbor_rows.resize(atom_count);
+    firstneigh.resize(atom_count, nullptr);
+    for (int atom = 0; atom < atom_count; ++atom) {
+      for (int neighbor = 0; neighbor < atom_count; ++neighbor) {
+        if (neighbor != atom) {
+          neighbor_rows[atom].push_back(neighbor);
+        }
+      }
+      firstneigh[atom] = neighbor_rows[atom].data();
+    }
+
+    int max_type = 0;
+    lammps_types.resize(atom_count);
+    for (int atom = 0; atom < atom_count; ++atom) {
+      max_type = std::max(max_type, static_cast<int>(test_case.types[atom]));
+      lammps_types[atom] = test_case.types[atom] + 1;
+    }
+    type_map.assign(max_type + 2, -1);
+    for (int type = 0; type <= max_type; ++type) {
+      type_map[type + 1] = type;
+    }
+
+    position_rows.resize(atom_count);
+    position_ptrs.resize(atom_count, nullptr);
+    for (int atom = 0; atom < atom_count; ++atom) {
+      for (int component = 0; component < 3; ++component) {
+        position_rows[atom][component] =
+            test_case.positions[3 * static_cast<std::size_t>(atom) + component];
+      }
+      position_ptrs[atom] = position_rows[atom].data();
+    }
+
+    if (test_case.is_spin()) {
+      spin_rows.resize(atom_count);
+      spin_ptrs.resize(atom_count, nullptr);
+      for (int atom = 0; atom < atom_count; ++atom) {
+        for (int component = 0; component < 3; ++component) {
+          spin_rows[atom][component] =
+              test_case.spins[3 * static_cast<std::size_t>(atom) + component];
+        }
+        spin_rows[atom][3] = 1.0;
+        spin_ptrs[atom] = spin_rows[atom].data();
+      }
+    }
+
+    input.nlocal = atom_count;
+    input.inum = atom_count;
+    input.ilist = ilist.data();
+    input.numneigh = numneigh.data();
+    input.firstneigh = firstneigh.data();
+    input.types = lammps_types.data();
+    input.type_map = type_map.data();
+    input.positions = position_ptrs.data();
+    input.spins = spin_ptrs.empty() ? nullptr : spin_ptrs.data();
+  }
+
+  NepaLammpsNeighborInput input{};
+  std::vector<int> ilist;
+  std::vector<int> numneigh;
+  std::vector<std::vector<int>> neighbor_rows;
+  std::vector<int*> firstneigh;
+  std::vector<int> lammps_types;
+  std::vector<int> type_map;
+  std::vector<std::array<double, 3>> position_rows;
+  std::vector<double*> position_ptrs;
+  std::vector<std::array<double, 4>> spin_rows;
+  std::vector<double*> spin_ptrs;
+};
+
+template <typename Runner>
+LammpsPrediction evaluate_lammps(
+    Runner& runner,
+    const CaseData& test_case,
+    LammpsStorage& storage) {
+  const int atom_count = test_case.atom_count();
+  std::vector<std::array<double, 3>> force_rows(atom_count);
+  std::vector<double*> force_ptrs(atom_count, nullptr);
+  std::vector<std::array<double, 3>> mforce_rows(
+      test_case.is_spin() ? atom_count : 0);
+  std::vector<double*> mforce_ptrs(
+      test_case.is_spin() ? atom_count : 0, nullptr);
+  std::vector<std::array<double, 9>> virial_rows(atom_count);
+  std::vector<double*> virial_ptrs(atom_count, nullptr);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    force_ptrs[atom] = force_rows[atom].data();
+    virial_ptrs[atom] = virial_rows[atom].data();
+    if (test_case.is_spin()) {
+      mforce_ptrs[atom] = mforce_rows[atom].data();
+    }
+  }
+
+  LammpsPrediction out;
+  out.virial6.assign(6, 0.0);
+  out.potential.assign(atom_count, 0.0);
+  out.force.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  out.atom_virial9.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+  if (test_case.is_spin()) {
+    out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  }
+
+  NepaLammpsNeighborResult result{};
+  result.total_potential = &out.energy;
+  result.total_virial6 = out.virial6.data();
+  result.potential_per_atom = out.potential.data();
+  result.forces = force_ptrs.data();
+  result.mforces = mforce_ptrs.empty() ? nullptr : mforce_ptrs.data();
+  result.virials_per_atom9 = virial_ptrs.data();
+  require_status(
+      runner.find_force_lammps_neighbors(storage.input, result),
+      "find_force_lammps_neighbors");
+
+  for (int atom = 0; atom < atom_count; ++atom) {
+    for (int component = 0; component < 3; ++component) {
+      out.force[3 * static_cast<std::size_t>(atom) + component] =
+          force_rows[atom][component];
+      if (test_case.is_spin()) {
+        out.mforce[3 * static_cast<std::size_t>(atom) + component] =
+            mforce_rows[atom][component];
+      }
+    }
+    for (int component = 0; component < 9; ++component) {
+      out.atom_virial9[9 * static_cast<std::size_t>(atom) + component] =
+          virial_rows[atom][component];
+    }
+  }
+  return out;
+}
+
+std::vector<double> batch_virial6(const Prediction& batch) {
+  return {
+      batch.virial[0], batch.virial[4], batch.virial[8],
+      batch.virial[1], batch.virial[2], batch.virial[5]};
+}
+
+std::vector<double> lammps_atom_virial_to_batch_order(
+    const std::vector<double>& values) {
+  static constexpr int map[9] = {0, 4, 8, 1, 2, 5, 3, 6, 7};
+  std::vector<double> out(values.size(), 0.0);
+  for (std::size_t atom = 0; atom < values.size() / 9; ++atom) {
+    for (int lammps_component = 0; lammps_component < 9; ++lammps_component) {
+      out[9 * atom + map[lammps_component]] =
+          values[9 * atom + lammps_component];
+    }
+  }
+  return out;
+}
+
+bool validate_oracle_lammps(
+    const CaseData& test_case,
+    const Prediction& batch,
+    const LammpsPrediction& lammps) {
+  const double energy_diff = std::abs(batch.energy - lammps.energy);
+  const double potential_diff = max_abs_diff(batch.potential, lammps.potential);
+  const double force_diff = max_abs_diff(batch.force, lammps.force);
+  const double virial_diff = max_abs_diff(batch_virial6(batch), lammps.virial6);
+  const double atom_virial_diff = max_abs_diff(
+      batch.atom_virial,
+      lammps_atom_virial_to_batch_order(lammps.atom_virial9));
+  const double mforce_diff = test_case.is_spin()
+      ? max_abs_diff(batch.mforce, lammps.mforce)
+      : 0.0;
+  const bool ok = energy_diff <= 2.0e-10 && potential_diff <= 2.0e-10 &&
+                  force_diff <= 2.0e-10 && virial_diff <= 2.0e-10 &&
+                  atom_virial_diff <= 2.0e-10 && mforce_diff <= 2.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ORACLE_LAMMPS_SELF_CHECK case=" << test_case.name
+            << " energy=" << energy_diff
+            << " potential=" << potential_diff
+            << " force=" << force_diff
+            << " virial=" << virial_diff
+            << " atom_virial=" << atom_virial_diff
+            << " mforce=" << mforce_diff
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+bool compare_lammps_prediction(
+    const std::string& backend,
+    const CaseData& test_case,
+    const LammpsPrediction& candidate,
+    const LammpsPrediction& oracle,
+    const Budgets& budgets) {
+  const double atoms = static_cast<double>(test_case.atom_count());
+  bool ok = true;
+  ok = report_field(
+           backend, test_case.name + "_lammps", "energy_per_atom",
+           {candidate.energy / atoms}, {oracle.energy / atoms},
+           budgets.energy_per_atom) && ok;
+  ok = report_field(
+           backend, test_case.name + "_lammps", "potential",
+           candidate.potential, oracle.potential, budgets.potential) && ok;
+  ok = report_field(
+           backend, test_case.name + "_lammps", "force",
+           candidate.force, oracle.force, budgets.force) && ok;
+  ok = report_field(
+           backend, test_case.name + "_lammps", "virial6",
+           candidate.virial6, oracle.virial6, budgets.virial) && ok;
+  ok = report_field(
+           backend, test_case.name + "_lammps", "atom_virial9",
+           candidate.atom_virial9, oracle.atom_virial9,
+           budgets.atom_virial) && ok;
+  if (test_case.is_spin()) {
+    ok = report_field(
+             backend, test_case.name + "_lammps", "mforce",
+             candidate.mforce, oracle.mforce, budgets.mforce) && ok;
+  }
+  return ok;
+}
+
+bool run_backend_batch_cases(
+    const std::string& backend,
+    const Budgets& budgets,
+    const std::vector<std::pair<CaseData, Prediction>>& nonmag_cases,
+    const std::vector<std::pair<CaseData, Prediction>>& spin_cases) {
+  bool ok = true;
+  ApiRunner nonmag_backend(backend, NEP_ADAPTERS_FP64_MODEL_PATH);
+  for (const auto& item : nonmag_cases) {
+    const Prediction candidate = evaluate_batch(nonmag_backend, item.first);
+    ok = compare_prediction(
+             backend, item.first, candidate, item.second, budgets) && ok;
+  }
+
+  ApiRunner spin_backend(backend, NEP_ADAPTERS_FP64_SPIN_MODEL_PATH);
+  for (const auto& item : spin_cases) {
+    const Prediction candidate = evaluate_batch(spin_backend, item.first);
+    ok = compare_prediction(
+             backend, item.first, candidate, item.second, budgets) && ok;
+  }
+  return ok;
+}
+
+template <typename BackendRunner>
+bool run_lammps_case(
+    const std::string& backend_name,
+    const Budgets& budgets,
+    BackendRunner& backend,
+    OracleRunner& oracle,
+    const CaseData& test_case) {
+  LammpsStorage oracle_storage(test_case);
+  const Prediction oracle_batch = evaluate_batch(oracle, test_case);
+  const LammpsPrediction oracle_lammps =
+      evaluate_lammps(oracle, test_case, oracle_storage);
+  bool ok = validate_oracle_lammps(test_case, oracle_batch, oracle_lammps);
+
+  LammpsStorage backend_storage(test_case);
+  const LammpsPrediction candidate =
+      evaluate_lammps(backend, test_case, backend_storage);
+  ok = compare_lammps_prediction(
+           backend_name, test_case, candidate, oracle_lammps, budgets) && ok;
+  return ok;
+}
+
+}  // namespace
+
+int main() {
+  try {
+    std::cout << "FP64_ORACLE_CONFIG scalar=double openmp=off cblas=off "
+                 "radial_table=off fast_math=off fp_contract=off\n";
+    if (!nep_adapters::register_cpu_opt_engine()) {
+      std::cerr << "failed to register cpu_opt\n";
+      return EXIT_FAILURE;
+    }
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+    if (!nep_adapters::register_cuda_engine()) {
+      std::cerr << "failed to register cuda\n";
+      return EXIT_FAILURE;
+    }
+#endif
+
+    bool ok = true;
+    OracleRunner nonmag_oracle(NEP_ADAPTERS_FP64_MODEL_PATH);
+    const CaseData nonmag_fixture = make_nonmag_fixture();
+    const Prediction nonmag_fixture_oracle =
+        evaluate_batch(nonmag_oracle, nonmag_fixture);
+    ok = validate_nonmag_frozen_reference(
+             nonmag_fixture_oracle, nonmag_fixture) && ok;
+    ok = validate_oracle_derivatives(nonmag_oracle, nonmag_fixture) && ok;
+
+    const CaseData dense_nonmag = make_dense_nonmag_case();
+    const Prediction dense_nonmag_oracle =
+        evaluate_batch(nonmag_oracle, dense_nonmag);
+    const std::vector<std::pair<CaseData, Prediction>> nonmag_cases = {
+        {nonmag_fixture, nonmag_fixture_oracle},
+        {dense_nonmag, dense_nonmag_oracle},
+    };
+
+    OracleRunner spin_oracle(NEP_ADAPTERS_FP64_SPIN_MODEL_PATH);
+    const CaseData spin_reference = make_spin_reference_case();
+    const Prediction spin_reference_oracle =
+        evaluate_batch(spin_oracle, spin_reference);
+    ok = validate_spin_frozen_reference(spin_reference_oracle, spin_reference) && ok;
+
+    const CaseData spin_nonperiodic = make_spin_finite_difference_case();
+    const Prediction spin_nonperiodic_oracle =
+        evaluate_batch(spin_oracle, spin_nonperiodic);
+    ok = validate_oracle_derivatives(spin_oracle, spin_nonperiodic) && ok;
+    const CaseData dense_spin = make_dense_spin_case();
+    const Prediction dense_spin_oracle = evaluate_batch(spin_oracle, dense_spin);
+    const std::vector<std::pair<CaseData, Prediction>> spin_cases = {
+        {spin_nonperiodic, spin_nonperiodic_oracle},
+        {dense_spin, dense_spin_oracle},
+    };
+
+    ok = run_backend_batch_cases(
+             "cpu_opt",
+             cpu_budgets(),
+             nonmag_cases,
+             spin_cases) && ok;
+
+    CaseData nonmag_lammps = nonmag_fixture;
+    nonmag_lammps.name = "nonmag_nonperiodic";
+    nonmag_lammps.pbc = {0, 0, 0};
+    ApiRunner cpu_nonmag("cpu_opt", nonmag_lammps.model_path);
+    ok = run_lammps_case(
+             "cpu_opt",
+             cpu_budgets(),
+             cpu_nonmag,
+             nonmag_oracle,
+             nonmag_lammps) && ok;
+    ApiRunner cpu_spin("cpu_opt", spin_nonperiodic.model_path);
+    ok = run_lammps_case(
+             "cpu_opt",
+             cpu_budgets(),
+             cpu_spin,
+             spin_oracle,
+             spin_nonperiodic) && ok;
+
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+    ok = run_backend_batch_cases(
+             "cuda",
+             cuda_budgets(),
+             nonmag_cases,
+             spin_cases) && ok;
+    ApiRunner cuda_nonmag("cuda", nonmag_lammps.model_path);
+    ok = run_lammps_case(
+             "cuda",
+             cuda_budgets(),
+             cuda_nonmag,
+             nonmag_oracle,
+             nonmag_lammps) && ok;
+    ApiRunner cuda_spin("cuda", spin_nonperiodic.model_path);
+    ok = run_lammps_case(
+             "cuda",
+             cuda_budgets(),
+             cuda_spin,
+             spin_oracle,
+             spin_nonperiodic) && ok;
+#endif
+
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  } catch (const std::exception& error) {
+    std::cerr << "FP64 oracle test failed: " << error.what() << '\n';
+    return EXIT_FAILURE;
+  }
+}

@@ -1,4 +1,4 @@
-#include "angular_basis_cache.hpp"
+#include "device_operations.hpp"
 
 #include <cuda_runtime.h>
 

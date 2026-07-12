@@ -1,4 +1,4 @@
-#include "qnep_charge.hpp"
+#include "device_operations.hpp"
 
 #include "simulation_box_device.cuh"
 

@@ -1,8 +1,10 @@
-#include "angular_descriptor.hpp"
+#include "device_operations.hpp"
 #include "simulation_box_device.cuh"
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -12,6 +14,8 @@ namespace {
 
 constexpr float kPi = 3.1415927f;
 constexpr int kMaxFusedDescriptorDim = 64;
+constexpr int kAngularOrderTile = 3;
+constexpr std::size_t kDefaultDynamicSharedMemoryBytes = 48 * 1024;
 
 void check_cuda(cudaError_t status, const char* message) {
   if (status != cudaSuccess) {
@@ -838,7 +842,13 @@ __global__ void build_descriptors_and_ann_from_positions(
     float* __restrict__ fp) {
   (void)q_scaler;
   (void)descriptors;
+  extern __shared__ float radial_basis_sums[];
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  const int radial_basis_size = basis_size_radial + 1;
+  const int radial_basis_channels = num_types * radial_basis_size;
+  for (int channel = 0; channel < radial_basis_channels; ++channel) {
+    radial_basis_sums[channel * blockDim.x + threadIdx.x] = 0.0f;
+  }
   if (atom >= atom_count) {
     return;
   }
@@ -864,14 +874,13 @@ __global__ void build_descriptors_and_ann_from_positions(
   const double zi = positions_soa3[2 * atom_stride + atom];
   const float radial_rcinv = 1.0f / cutoff_radial;
   const int radial_basis_count =
-      (n_max_radial + 1) * (basis_size_radial + 1);
+      (n_max_radial + 1) * radial_basis_size;
   const int angular_basis_count =
       (n_max_angular + 1) * (basis_size_angular + 1);
   const int radial_count = nn_radial[atom];
   for (int slot = 0; slot < radial_count; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
-    const int type_pair = type1 * num_types + type2;
     float dx = 0.0f;
     float dy = 0.0f;
     float dz = 0.0f;
@@ -900,10 +909,20 @@ __global__ void build_descriptors_and_ann_from_positions(
         t_minus_1 = t;
         fn = (t + 1.0f) * half_fc;
       }
-      for (int n = 0; n <= n_max_radial; ++n) {
-        const int coefficient_index =
-            type_pair * radial_basis_count + n * (basis_size_radial + 1) + k;
-        q[n] += fn * descriptor_coefficients[coefficient_index];
+      radial_basis_sums[
+          (type2 * radial_basis_size + k) * blockDim.x + threadIdx.x] += fn;
+    }
+  }
+  for (int n = 0; n <= n_max_radial; ++n) {
+    for (int type2 = 0; type2 < num_types; ++type2) {
+      const int type_pair = type1 * num_types + type2;
+      const int coefficient_base =
+          type_pair * radial_basis_count + n * radial_basis_size;
+      for (int k = 0; k < radial_basis_size; ++k) {
+        q[n] += radial_basis_sums[
+                    (type2 * radial_basis_size + k) * blockDim.x +
+                    threadIdx.x] *
+                descriptor_coefficients[coefficient_base + k];
       }
     }
   }
@@ -913,8 +932,22 @@ __global__ void build_descriptors_and_ann_from_positions(
   const int angular_count = nn_angular[atom];
   const float angular_rcinv = 1.0f / cutoff_angular;
 
-  for (int n = 0; n <= n_max_angular; ++n) {
-    float s[24] = {0.0f};
+  const int angular_order_count = n_max_angular + 1;
+  for (int n_base = 0; n_base < angular_order_count;
+       n_base += kAngularOrderTile) {
+    const int active_orders =
+        n_base + kAngularOrderTile <= angular_order_count
+        ? kAngularOrderTile
+        : angular_order_count - n_base;
+    float s[kAngularOrderTile][24];
+#pragma unroll
+    for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+#pragma unroll
+      for (int abc = 0; abc < 24; ++abc) {
+        s[tile][abc] = 0.0f;
+      }
+    }
+
     for (int slot = 0; slot < angular_count; ++slot) {
       const int offset = atom + atom_stride * slot;
       const int neighbor = nl_angular[offset];
@@ -924,7 +957,7 @@ __global__ void build_descriptors_and_ann_from_positions(
       float dy = 0.0f;
       float dz = 0.0f;
       float r = 0.0f;
-      if (n == 0) {
+      if (n_base == 0) {
         minimum_image_delta(
             box,
             positions_soa3[neighbor] - xi,
@@ -964,9 +997,13 @@ __global__ void build_descriptors_and_ann_from_positions(
       const float x = 2.0f * (r * angular_rcinv - 1.0f) *
                       (r * angular_rcinv - 1.0f) - 1.0f;
       const float half_fc = 0.5f * fc;
-      float gn = 0.0f;
+      float gn[kAngularOrderTile] = {0.0f};
       float t_minus_2 = 1.0f;
       float t_minus_1 = x;
+      const int coefficient_base =
+          angular_coefficient_offset +
+          type_pair * angular_basis_count +
+          n_base * (basis_size_angular + 1);
       for (int k = 0; k <= basis_size_angular; ++k) {
         float fn = fc;
         if (k == 1) {
@@ -977,108 +1014,132 @@ __global__ void build_descriptors_and_ann_from_positions(
           t_minus_1 = t;
           fn = (t + 1.0f) * half_fc;
         }
-        const int coefficient_index =
-            angular_coefficient_offset +
-            type_pair * angular_basis_count +
-            n * (basis_size_angular + 1) + k;
-        gn += fn * descriptor_coefficients[coefficient_index];
+#pragma unroll
+        for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+          if (tile < active_orders) {
+            const int coefficient_index =
+                coefficient_base + tile * (basis_size_angular + 1) + k;
+            gn[tile] +=
+                fn * descriptor_coefficients[coefficient_index];
+          }
+        }
       }
 
       const float rinv = 1.0f / r;
       const float x12 = dx * rinv;
       const float y12 = dy * rinv;
       const float z12 = dz * rinv;
-      if (l_max_3body >= 1) {
-        accumulate_s_l1(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 2) {
-        accumulate_s_l2(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 3) {
-        accumulate_s_l3(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 4) {
-        accumulate_s_l4(x12, y12, z12, gn, s);
+#pragma unroll
+      for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+        if (tile < active_orders) {
+          if (l_max_3body >= 1) {
+            accumulate_s_l1(x12, y12, z12, gn[tile], s[tile]);
+          }
+          if (l_max_3body >= 2) {
+            accumulate_s_l2(x12, y12, z12, gn[tile], s[tile]);
+          }
+          if (l_max_3body >= 3) {
+            accumulate_s_l3(x12, y12, z12, gn[tile], s[tile]);
+          }
+          if (l_max_3body >= 4) {
+            accumulate_s_l4(x12, y12, z12, gn[tile], s[tile]);
+          }
+        }
       }
     }
 
-    for (int abc = 0; abc < abc_count; ++abc) {
-      const int s_index = atom + atom_stride * (n * abc_count + abc);
-      sum_fxyz[s_index] = abc < 24 ? s[abc] : 0.0f;
-    }
+#pragma unroll
+    for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+      if (tile < active_orders) {
+        const int n = n_base + tile;
+        const float* s_order = s[tile];
+        for (int abc = 0; abc < abc_count; ++abc) {
+          const int s_index = atom + atom_stride * (n * abc_count + abc);
+          sum_fxyz[s_index] = abc < 24 ? s_order[abc] : 0.0f;
+        }
 
-    if (l_max_3body >= 1) {
-      const int descriptor_index = radial_dim + n;
-      const float value = find_q_l1(s);
-      q[descriptor_index] = value;
-    }
-    if (l_max_3body >= 2) {
-      const int descriptor_index = radial_dim + (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l2(s);
-        q[descriptor_index] = value;
-      }
-    }
-    if (l_max_3body >= 3) {
-      const int descriptor_index = radial_dim + 2 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l3(s);
-        q[descriptor_index] = value;
-      }
-    }
-    if (l_max_3body >= 4) {
-      const int descriptor_index = radial_dim + 3 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l4(s);
-        q[descriptor_index] = value;
-      }
-    }
-    int channel = l_max_3body;
-    if (has_q_222) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_222(s);
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_1111) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_1111(s);
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_112) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_112(s);
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_123) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_123(s);
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_233) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_233(s);
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_134) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_134(s);
-        q[descriptor_index] = value;
+        if (l_max_3body >= 1) {
+          const int descriptor_index = radial_dim + n;
+          const float value = find_q_l1(s_order);
+          q[descriptor_index] = value;
+        }
+        if (l_max_3body >= 2) {
+          const int descriptor_index = radial_dim + angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_l2(s_order);
+            q[descriptor_index] = value;
+          }
+        }
+        if (l_max_3body >= 3) {
+          const int descriptor_index =
+              radial_dim + 2 * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_l3(s_order);
+            q[descriptor_index] = value;
+          }
+        }
+        if (l_max_3body >= 4) {
+          const int descriptor_index =
+              radial_dim + 3 * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_l4(s_order);
+            q[descriptor_index] = value;
+          }
+        }
+        int channel = l_max_3body;
+        if (has_q_222) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_222(s_order);
+            q[descriptor_index] = value;
+          }
+          ++channel;
+        }
+        if (has_q_1111) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_1111(s_order);
+            q[descriptor_index] = value;
+          }
+          ++channel;
+        }
+        if (has_q_112) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_112(s_order);
+            q[descriptor_index] = value;
+          }
+          ++channel;
+        }
+        if (has_q_123) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_123(s_order);
+            q[descriptor_index] = value;
+          }
+          ++channel;
+        }
+        if (has_q_233) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_233(s_order);
+            q[descriptor_index] = value;
+          }
+          ++channel;
+        }
+        if (has_q_134) {
+          const int descriptor_index =
+              radial_dim + channel * angular_order_count + n;
+          if (descriptor_index < descriptor_dim) {
+            const float value = find_q_134(s_order);
+            q[descriptor_index] = value;
+          }
+        }
       }
     }
   }
@@ -1452,12 +1513,42 @@ bool try_build_descriptors_and_ann_from_positions_on_device(
 
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
+  const std::size_t radial_basis_sum_shared_bytes =
+      static_cast<std::size_t>(threads) *
+      static_cast<std::size_t>(protocol.num_types) *
+      static_cast<std::size_t>(protocol.basis_size_radial + 1) * sizeof(float);
+  const bool needs_shared_memory_optin =
+      radial_basis_sum_shared_bytes > kDefaultDynamicSharedMemoryBytes;
+  if (needs_shared_memory_optin) {
+    int device = 0;
+    check_cuda(cudaGetDevice(&device), "get CUDA device for radial basis sum");
+    cudaDeviceProp device_properties{};
+    check_cuda(
+        cudaGetDeviceProperties(&device_properties, device),
+        "get CUDA device properties for radial basis sum");
+    const std::size_t optin_shared_bytes = std::max(
+        static_cast<std::size_t>(device_properties.sharedMemPerBlock),
+        static_cast<std::size_t>(device_properties.sharedMemPerBlockOptin));
+    if (radial_basis_sum_shared_bytes > optin_shared_bytes) {
+      return false;
+    }
+  }
   if (blocks > 0) {
     const auto launch = [&](auto store_potential_tag, auto descriptor_dim_tag) {
       constexpr bool kStorePotential = decltype(store_potential_tag)::value;
       constexpr int kDescriptorDim = decltype(descriptor_dim_tag)::value;
+      if (needs_shared_memory_optin) {
+        check_cuda(
+            cudaFuncSetAttribute(
+                build_descriptors_and_ann_from_positions<
+                    kStorePotential,
+                    kDescriptorDim>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                static_cast<int>(radial_basis_sum_shared_bytes)),
+            "configure fused radial basis-sum shared memory");
+      }
       build_descriptors_and_ann_from_positions<kStorePotential, kDescriptorDim>
-          <<<blocks, threads>>>(
+          <<<blocks, threads, radial_basis_sum_shared_bytes>>>(
           atom_count,
           static_cast<int>(workspace_view.atom_capacity),
           protocol.version,

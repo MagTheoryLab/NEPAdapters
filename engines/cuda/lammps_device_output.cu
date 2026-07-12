@@ -1,4 +1,4 @@
-#include "lammps_device_output.hpp"
+#include "device_operations.hpp"
 
 #include <cuda_runtime.h>
 

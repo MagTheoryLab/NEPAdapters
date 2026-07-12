@@ -1,15 +1,10 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cuda.hpp"
 
-#include "ann_energy.hpp"
+#include "device_operations.hpp"
 #include "device_model.hpp"
-#include "device_staging.hpp"
 #include "device_workspace.hpp"
-#include "internal_neighbor_builder.hpp"
 #include "model_parameters.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
-#include "radial_force.hpp"
 #include "simulation_box.hpp"
 #include "workspace_plan.hpp"
 

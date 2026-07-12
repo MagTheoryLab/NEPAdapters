@@ -2,24 +2,11 @@
 #include "nep_adapters/engines/cuda.hpp"
 
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-#include "ann_energy.hpp"
-#include "angular_descriptor.hpp"
-#include "angular_force.hpp"
-#include "batch_output.hpp"
+#include "device_operations.hpp"
 #include "device_model.hpp"
-#include "device_staging.hpp"
 #include "device_workspace.hpp"
-#include "internal_neighbor_builder.hpp"
-#include "lammps_device_output.hpp"
 #include "model_parameters.hpp"
 #include "force_pipeline.hpp"
-#include "pair_geometry_cache.hpp"
-#include "qnep_charge.hpp"
-#include "radial_basis_cache.hpp"
-#include "radial_descriptor.hpp"
-#include "radial_force.hpp"
-#include "spin_onsite.hpp"
-#include "zbl_force.hpp"
 #endif
 
 #include "host_staging.hpp"
@@ -733,8 +720,11 @@ class CudaModel : public nep_adapters::Model {
             copy_device_doubles(view.potential, view.atom_capacity);
         const std::vector<double> force_soa =
             copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        const bool needs_mforce_copy =
+            protocol_.spin_mode != 0 &&
+            (result.mforces_aos3 != nullptr || result.tau_aos3 != nullptr);
         const std::vector<double> mforce_soa =
-            result.mforces_aos3 != nullptr && protocol_.spin_mode != 0
+            needs_mforce_copy
                 ? copy_device_doubles(view.mforce_soa3, view.atom_capacity * 3)
                 : std::vector<double>{};
         const std::vector<double> virial_soa =
@@ -769,6 +759,19 @@ class CudaModel : public nep_adapters::Model {
                 mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
             result.mforces_aos3[3 * global_atom + 2] =
                 mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+          }
+          if (result.tau_aos3 != nullptr && protocol_.spin_mode != 0) {
+            const double sx = batch.spins_aos3[3 * global_atom + 0];
+            const double sy = batch.spins_aos3[3 * global_atom + 1];
+            const double sz = batch.spins_aos3[3 * global_atom + 2];
+            const double mx = mforce_soa[static_cast<std::size_t>(atom)];
+            const double my =
+                mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
+            const double mz =
+                mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
+            result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
+            result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
+            result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
           }
           if (result.virials_per_atom_row_major9 != nullptr) {
             for (int component = 0; component < 9; ++component) {
