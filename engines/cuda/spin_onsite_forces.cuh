@@ -52,7 +52,7 @@ __global__ void accumulate_spin_scalar_forces(
     bool use_cached_geometry,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
@@ -205,7 +205,7 @@ __global__ void accumulate_spin_scalar_forces(
       atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
     }
-    if (accumulate_virial) {
+    if (virial_mode != SpinVirialMode::disabled) {
       for (int a = 0; a < 3; ++a) {
         const double rij_a = rhat[a] * dist;
         for (int b = 0; b < 3; ++b) {
@@ -220,7 +220,10 @@ __global__ void accumulate_spin_scalar_forces(
               row_major == 6 ? 7 :
               row_major == 7 ? 8 : 2;
           atomicAdd(
-              virial_soa9 + internal_component * atom_stride + atom,
+              virial_soa9 + internal_component * atom_stride +
+                  (virial_mode == SpinVirialMode::cpu_atom_decomposition
+                       ? 0
+                       : atom),
               -rij_a * grad_rij[b]);
         }
       }
@@ -266,7 +269,7 @@ __global__ void accumulate_spin_density_forces(
     const float* __restrict__ density_raw1_dot_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
@@ -608,12 +611,15 @@ __global__ void accumulate_spin_density_forces(
       atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
     }
-    if (accumulate_virial) {
+    if (virial_mode != SpinVirialMode::disabled) {
       for (int a = 0; a < 3; ++a) {
         const double rij_a = rhat[a] * dist;
         for (int b = 0; b < 3; ++b) {
           atomicAdd(
-              virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride + atom,
+              virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
+                  (virial_mode == SpinVirialMode::cpu_atom_decomposition
+                       ? 0
+                       : atom),
               -rij_a * grad_rij[b]);
         }
       }
@@ -806,7 +812,7 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
     const float* __restrict__ density_l1_dot_pull_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
   constexpr int C = 4;
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1020,13 +1026,17 @@ __global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_p
       atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
     }
-    if (accumulate_virial) {
+    if (virial_mode != SpinVirialMode::disabled) {
       for (int a = 0; a < 3; ++a) {
         const double rij_a = rhat[a] * dist;
         for (int b = 0; b < 3; ++b) {
           atomicAdd(
               virial_soa9 + virial_internal_component(a * 3 + b) *
-                                 atom_stride + atom,
+                                 atom_stride +
+                                 (virial_mode ==
+                                          SpinVirialMode::cpu_atom_decomposition
+                                      ? 0
+                                      : atom),
               -rij_a * grad_rij[b]);
         }
       }
@@ -1068,7 +1078,7 @@ __device__ void apply_edge_gradients(
     const double* grad_sj,
     double* force_soa3,
     double* mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* virial_soa9) {
   (void)si;
   (void)sj;
@@ -1086,12 +1096,15 @@ __device__ void apply_edge_gradients(
     atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
     atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
   }
-  if (accumulate_virial) {
+  if (virial_mode != SpinVirialMode::disabled) {
     for (int a = 0; a < 3; ++a) {
       const double rij_a = rhat[a] * dist;
       for (int b = 0; b < 3; ++b) {
         atomicAdd(
-            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride + atom,
+            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
+                (virial_mode == SpinVirialMode::cpu_atom_decomposition
+                     ? 0
+                     : atom),
             -rij_a * grad_rij[b]);
       }
     }
@@ -1472,7 +1485,7 @@ __device__ void apply_edge_gradients_f32(
     const float* grad_sj,
     double* force_soa3,
     double* mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* virial_soa9) {
   const float grad_dist = grad_weight * weight_derivative;
   float dot_r = 0.0f;
@@ -1492,12 +1505,15 @@ __device__ void apply_edge_gradients_f32(
     atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
               -static_cast<double>(grad_sj[d]));
   }
-  if (accumulate_virial) {
+  if (virial_mode != SpinVirialMode::disabled) {
     for (int a = 0; a < 3; ++a) {
       const double rij_a = static_cast<double>(rhat[a] * dist);
       for (int b = 0; b < 3; ++b) {
         atomicAdd(
-            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride + atom,
+            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
+                (virial_mode == SpinVirialMode::cpu_atom_decomposition
+                     ? 0
+                     : atom),
             -rij_a * static_cast<double>(grad_rij[b]));
       }
     }
@@ -2347,7 +2363,7 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
     const float* __restrict__ chiral_pseudodevs_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
   constexpr int C = 4;
   constexpr int ChiC = 2;
@@ -2735,7 +2751,7 @@ accumulate_spin_chiral_forces_c4_l4_cached_f32(
         grad_sj,
         force_soa3,
         mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         virial_soa9);
   }
 }
@@ -2768,7 +2784,7 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     const float* __restrict__ chiral_pseudodevs_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
@@ -3145,7 +3161,7 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
         grad_sj,
         force_soa3,
         mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         virial_soa9);
   }
 }

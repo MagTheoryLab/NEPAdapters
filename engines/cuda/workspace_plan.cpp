@@ -275,6 +275,14 @@ void add_execution_scratch(
   }
 }
 
+void add_per_atom_virial_sink_scratch(WorkspacePlan& plan) {
+  add_array(
+      plan,
+      "per_atom_virial_float_soa9",
+      ScalarType::float32,
+      9 * plan.atom_capacity);
+}
+
 }  // namespace
 
 std::size_t DeviceArrayPlan::bytes() const {
@@ -358,7 +366,8 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
     bool include_basis_cache,
-    bool include_angular_vectors) {
+    bool include_angular_vectors,
+    bool include_per_atom_virial_sink) {
   if (atom_capacity == 0) {
     throw std::runtime_error("atom_capacity must be positive");
   }
@@ -388,6 +397,9 @@ WorkspacePlan make_external_neighbor_workspace_plan(
       protocol,
       include_basis_cache,
       include_angular_vectors);
+  if (include_per_atom_virial_sink) {
+    add_per_atom_virial_sink_scratch(plan);
+  }
 
   return plan;
 }

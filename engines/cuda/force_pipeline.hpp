@@ -13,14 +13,28 @@ enum class ForceNeighborTopology {
   external_full,
 };
 
-struct ForcePipelineOptions {
+enum class VirialOutputMode {
+  none,
+  total_only,
+  per_atom_n2,
+};
+
+struct ForceEvaluationRequest {
   ForceNeighborTopology topology =
       ForceNeighborTopology::single_box_symmetric;
+  VirialOutputMode virial = VirialOutputMode::total_only;
   bool orthorhombic_batched = false;
   bool store_potential = true;
-  bool accumulate_virial = true;
-  bool zbl_outputs = true;
 };
+
+constexpr bool requests_virial(const ForceEvaluationRequest& request) {
+  return request.virial != VirialOutputMode::none;
+}
+
+constexpr bool requests_per_atom_virial(
+    const ForceEvaluationRequest& request) {
+  return request.virial == VirialOutputMode::per_atom_n2;
+}
 
 struct ForcePipelineTimings {
   float descriptor_ann_ms = 0.0f;
@@ -37,7 +51,7 @@ struct ForcePipelineTimings {
 // callers only choose the neighbor topology and requested outputs.
 void run_nonspin_pipeline(
     const ModelProtocol& protocol,
-    const ForcePipelineOptions& options,
+    const ForceEvaluationRequest& request,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
@@ -46,7 +60,7 @@ void run_nonspin_pipeline(
 
 void run_spin_pipeline(
     const ModelProtocol& protocol,
-    const ForcePipelineOptions& options,
+    const ForceEvaluationRequest& request,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,

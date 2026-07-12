@@ -6,6 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace nep_adapters::cuda_backend {
 namespace {
@@ -85,7 +86,7 @@ __device__ __forceinline__ void find_f_and_fp_zbl(
   f *= fc;
 }
 
-template <bool AccumulateEnergyVirial>
+template <bool AccumulateEnergyVirial, bool VirialToNeighbor>
 __global__ void accumulate_zbl_forces(
     int atom_count,
     int atom_stride,
@@ -171,15 +172,43 @@ __global__ void accumulate_zbl_forces(
     s_fy += 2.0f * f12y;
     s_fz += 2.0f * f12z;
     if constexpr (AccumulateEnergyVirial) {
-      s_sxx -= x12 * f12x;
-      s_sxy -= x12 * f12y;
-      s_sxz -= x12 * f12z;
-      s_syx -= y12 * f12x;
-      s_syy -= y12 * f12y;
-      s_syz -= y12 * f12z;
-      s_szx -= z12 * f12x;
-      s_szy -= z12 * f12y;
-      s_szz -= z12 * f12z;
+      if constexpr (VirialToNeighbor) {
+        atomicAdd(&virial_soa9[neighbor], -static_cast<double>(x12 * f12x));
+        atomicAdd(
+            &virial_soa9[atom_stride + neighbor],
+            -static_cast<double>(y12 * f12y));
+        atomicAdd(
+            &virial_soa9[2 * atom_stride + neighbor],
+            -static_cast<double>(z12 * f12z));
+        atomicAdd(
+            &virial_soa9[3 * atom_stride + neighbor],
+            -static_cast<double>(x12 * f12y));
+        atomicAdd(
+            &virial_soa9[4 * atom_stride + neighbor],
+            -static_cast<double>(x12 * f12z));
+        atomicAdd(
+            &virial_soa9[5 * atom_stride + neighbor],
+            -static_cast<double>(y12 * f12z));
+        atomicAdd(
+            &virial_soa9[6 * atom_stride + neighbor],
+            -static_cast<double>(y12 * f12x));
+        atomicAdd(
+            &virial_soa9[7 * atom_stride + neighbor],
+            -static_cast<double>(z12 * f12x));
+        atomicAdd(
+            &virial_soa9[8 * atom_stride + neighbor],
+            -static_cast<double>(z12 * f12y));
+      } else {
+        s_sxx -= x12 * f12x;
+        s_sxy -= x12 * f12y;
+        s_sxz -= x12 * f12z;
+        s_syx -= y12 * f12x;
+        s_syy -= y12 * f12y;
+        s_syz -= y12 * f12z;
+        s_szx -= z12 * f12x;
+        s_szy -= z12 * f12y;
+        s_szz -= z12 * f12z;
+      }
       s_pe += 0.5f * f;
     }
   }
@@ -189,18 +218,21 @@ __global__ void accumulate_zbl_forces(
   force_soa3[2 * atom_stride + atom] += static_cast<double>(s_fz);
   if constexpr (AccumulateEnergyVirial) {
     potential[atom] += static_cast<double>(s_pe);
-    virial_soa9[atom] += static_cast<double>(s_sxx);
-    virial_soa9[atom_stride + atom] += static_cast<double>(s_syy);
-    virial_soa9[2 * atom_stride + atom] += static_cast<double>(s_szz);
-    virial_soa9[3 * atom_stride + atom] += static_cast<double>(s_sxy);
-    virial_soa9[4 * atom_stride + atom] += static_cast<double>(s_sxz);
-    virial_soa9[5 * atom_stride + atom] += static_cast<double>(s_syz);
-    virial_soa9[6 * atom_stride + atom] += static_cast<double>(s_syx);
-    virial_soa9[7 * atom_stride + atom] += static_cast<double>(s_szx);
-    virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
+    if constexpr (!VirialToNeighbor) {
+      virial_soa9[atom] += static_cast<double>(s_sxx);
+      virial_soa9[atom_stride + atom] += static_cast<double>(s_syy);
+      virial_soa9[2 * atom_stride + atom] += static_cast<double>(s_szz);
+      virial_soa9[3 * atom_stride + atom] += static_cast<double>(s_sxy);
+      virial_soa9[4 * atom_stride + atom] += static_cast<double>(s_sxz);
+      virial_soa9[5 * atom_stride + atom] += static_cast<double>(s_syz);
+      virial_soa9[6 * atom_stride + atom] += static_cast<double>(s_syx);
+      virial_soa9[7 * atom_stride + atom] += static_cast<double>(s_szx);
+      virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
+    }
   }
 }
 
+template <bool VirialToNeighbor>
 __global__ void accumulate_zbl_forces_batched(
     int atom_count,
     int atom_stride,
@@ -293,15 +325,43 @@ __global__ void accumulate_zbl_forces_batched(
     s_fx += 2.0f * f12x;
     s_fy += 2.0f * f12y;
     s_fz += 2.0f * f12z;
-    s_sxx -= x12 * f12x;
-    s_sxy -= x12 * f12y;
-    s_sxz -= x12 * f12z;
-    s_syx -= y12 * f12x;
-    s_syy -= y12 * f12y;
-    s_syz -= y12 * f12z;
-    s_szx -= z12 * f12x;
-    s_szy -= z12 * f12y;
-    s_szz -= z12 * f12z;
+    if constexpr (VirialToNeighbor) {
+      atomicAdd(&virial_soa9[neighbor], -static_cast<double>(x12 * f12x));
+      atomicAdd(
+          &virial_soa9[atom_stride + neighbor],
+          -static_cast<double>(y12 * f12y));
+      atomicAdd(
+          &virial_soa9[2 * atom_stride + neighbor],
+          -static_cast<double>(z12 * f12z));
+      atomicAdd(
+          &virial_soa9[3 * atom_stride + neighbor],
+          -static_cast<double>(x12 * f12y));
+      atomicAdd(
+          &virial_soa9[4 * atom_stride + neighbor],
+          -static_cast<double>(x12 * f12z));
+      atomicAdd(
+          &virial_soa9[5 * atom_stride + neighbor],
+          -static_cast<double>(y12 * f12z));
+      atomicAdd(
+          &virial_soa9[6 * atom_stride + neighbor],
+          -static_cast<double>(y12 * f12x));
+      atomicAdd(
+          &virial_soa9[7 * atom_stride + neighbor],
+          -static_cast<double>(z12 * f12x));
+      atomicAdd(
+          &virial_soa9[8 * atom_stride + neighbor],
+          -static_cast<double>(z12 * f12y));
+    } else {
+      s_sxx -= x12 * f12x;
+      s_sxy -= x12 * f12y;
+      s_sxz -= x12 * f12z;
+      s_syx -= y12 * f12x;
+      s_syy -= y12 * f12y;
+      s_syz -= y12 * f12z;
+      s_szx -= z12 * f12x;
+      s_szy -= z12 * f12y;
+      s_szz -= z12 * f12z;
+    }
     s_pe += 0.5f * f;
   }
 
@@ -309,15 +369,17 @@ __global__ void accumulate_zbl_forces_batched(
   force_soa3[atom] += static_cast<double>(s_fx);
   force_soa3[atom_stride + atom] += static_cast<double>(s_fy);
   force_soa3[2 * atom_stride + atom] += static_cast<double>(s_fz);
-  virial_soa9[atom] += static_cast<double>(s_sxx);
-  virial_soa9[atom_stride + atom] += static_cast<double>(s_syy);
-  virial_soa9[2 * atom_stride + atom] += static_cast<double>(s_szz);
-  virial_soa9[3 * atom_stride + atom] += static_cast<double>(s_sxy);
-  virial_soa9[4 * atom_stride + atom] += static_cast<double>(s_sxz);
-  virial_soa9[5 * atom_stride + atom] += static_cast<double>(s_syz);
-  virial_soa9[6 * atom_stride + atom] += static_cast<double>(s_syx);
-  virial_soa9[7 * atom_stride + atom] += static_cast<double>(s_szx);
-  virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
+  if constexpr (!VirialToNeighbor) {
+    virial_soa9[atom] += static_cast<double>(s_sxx);
+    virial_soa9[atom_stride + atom] += static_cast<double>(s_syy);
+    virial_soa9[2 * atom_stride + atom] += static_cast<double>(s_szz);
+    virial_soa9[3 * atom_stride + atom] += static_cast<double>(s_sxy);
+    virial_soa9[4 * atom_stride + atom] += static_cast<double>(s_sxz);
+    virial_soa9[5 * atom_stride + atom] += static_cast<double>(s_syz);
+    virial_soa9[6 * atom_stride + atom] += static_cast<double>(s_syx);
+    virial_soa9[7 * atom_stride + atom] += static_cast<double>(s_szx);
+    virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
+  }
 }
 
 }  // namespace
@@ -328,7 +390,8 @@ void accumulate_zbl_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_energy_virial) {
+    bool accumulate_energy_virial,
+    bool virial_to_neighbor) {
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
   require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
@@ -357,38 +420,35 @@ void accumulate_zbl_forces_on_device(
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
+    const auto launch = [&](auto accumulate_tag, auto virial_to_neighbor_tag) {
+      constexpr bool kAccumulateEnergyVirial = decltype(accumulate_tag)::value;
+      constexpr bool kVirialToNeighbor =
+          decltype(virial_to_neighbor_tag)::value;
+      accumulate_zbl_forces<kAccumulateEnergyVirial, kVirialToNeighbor>
+          <<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.num_types,
+          static_cast<float>(protocol.zbl_inner),
+          static_cast<float>(protocol.zbl_outer),
+          box,
+          view.types,
+          model_view.atomic_numbers,
+          view.positions_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          view.potential,
+          view.force_soa3,
+          view.virial_soa9);
+    };
     if (accumulate_energy_virial) {
-      accumulate_zbl_forces<true><<<blocks, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.num_types,
-          static_cast<float>(protocol.zbl_inner),
-          static_cast<float>(protocol.zbl_outer),
-          box,
-          view.types,
-          model_view.atomic_numbers,
-          view.positions_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          view.potential,
-          view.force_soa3,
-          view.virial_soa9);
+      if (virial_to_neighbor) {
+        launch(std::true_type{}, std::true_type{});
+      } else {
+        launch(std::true_type{}, std::false_type{});
+      }
     } else {
-      accumulate_zbl_forces<false><<<blocks, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.num_types,
-          static_cast<float>(protocol.zbl_inner),
-          static_cast<float>(protocol.zbl_outer),
-          box,
-          view.types,
-          model_view.atomic_numbers,
-          view.positions_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          view.potential,
-          view.force_soa3,
-          view.virial_soa9);
+      launch(std::false_type{}, std::false_type{});
     }
   }
   check_cuda(cudaGetLastError(), "accumulate ZBL forces kernel launch failed");
@@ -398,7 +458,8 @@ void accumulate_zbl_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
-    DeviceWorkspace& workspace) {
+    DeviceWorkspace& workspace,
+    bool virial_to_neighbor) {
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
   require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
@@ -429,24 +490,33 @@ void accumulate_zbl_forces_batched(
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    accumulate_zbl_forces_batched<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.num_types,
-        static_cast<float>(protocol.zbl_inner),
-        static_cast<float>(protocol.zbl_outer),
-        view.atom_to_structure,
-        view.boxes_row_major9,
-        view.box_inverse_row_major9,
-        view.pbc_flags3,
-        view.types,
-        model_view.atomic_numbers,
-        view.positions_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.potential,
-        view.force_soa3,
-        view.virial_soa9);
+    const auto launch = [&](auto virial_to_neighbor_tag) {
+      constexpr bool kVirialToNeighbor =
+          decltype(virial_to_neighbor_tag)::value;
+      accumulate_zbl_forces_batched<kVirialToNeighbor><<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.num_types,
+          static_cast<float>(protocol.zbl_inner),
+          static_cast<float>(protocol.zbl_outer),
+          view.atom_to_structure,
+          view.boxes_row_major9,
+          view.box_inverse_row_major9,
+          view.pbc_flags3,
+          view.types,
+          model_view.atomic_numbers,
+          view.positions_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          view.potential,
+          view.force_soa3,
+          view.virial_soa9);
+    };
+    if (virial_to_neighbor) {
+      launch(std::true_type{});
+    } else {
+      launch(std::false_type{});
+    }
   }
   check_cuda(cudaGetLastError(), "accumulate batched ZBL forces launch failed");
   check_cuda(cudaDeviceSynchronize(), "accumulate batched ZBL forces failed");

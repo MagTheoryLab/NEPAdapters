@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -97,6 +98,7 @@ __global__ void write_lammps_forces(
 
 __global__ void reduce_lammps_partial_sums(
     int nlocal,
+    int virial_atom_count,
     int atom_stride,
     int partial_block_count,
     const double* potential,
@@ -105,10 +107,12 @@ __global__ void reduce_lammps_partial_sums(
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   const int component = blockIdx.y;
   double sum = 0.0;
-  if (atom < nlocal) {
-    if (component == 0) {
+  if (component == 0) {
+    if (atom < nlocal) {
       sum = potential[atom];
-    } else {
+    }
+  } else {
+    if (atom < virial_atom_count) {
       sum = lammps_voigt_component(
           virial_soa9,
           atom_stride,
@@ -168,7 +172,60 @@ __global__ void finalize_lammps_totals(
   total_virial6[component - 1] = partial[0];
 }
 
+__global__ void accumulate_float_per_atom_virial(
+    int atom_count,
+    int atom_stride,
+    const float* virial_float_soa9,
+    double* virial_soa9) {
+  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+#pragma unroll
+  for (int component = 0; component < 9; ++component) {
+    const int offset = component * atom_stride + atom;
+    virial_soa9[offset] += static_cast<double>(virial_float_soa9[offset]);
+  }
+}
+
 }  // namespace
+
+void prepare_lammps_per_atom_virial_sink(
+    int atom_count,
+    DeviceWorkspace& workspace) {
+  require(atom_count >= 0, "atom_count must be non-negative");
+  const DeviceWorkspaceView view = workspace.view();
+  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
+          "atom_count exceeds workspace atom capacity");
+  require(view.per_atom_virial_float_soa9 != nullptr,
+          "workspace missing per-atom virial sink");
+  check_cuda(
+      cudaMemset(
+          view.per_atom_virial_float_soa9,
+          0,
+          9 * view.atom_capacity * sizeof(float)),
+      "clear per-atom virial sink");
+}
+
+void finalize_lammps_per_atom_virial_sink(
+    int atom_count,
+    DeviceWorkspace& workspace) {
+  require(atom_count >= 0, "atom_count must be non-negative");
+  const DeviceWorkspaceView view = workspace.view();
+  require(view.per_atom_virial_float_soa9 != nullptr &&
+              view.virial_soa9 != nullptr,
+          "workspace missing per-atom virial sink or output");
+  const int output_count = static_cast<int>(view.atom_capacity);
+  const int blocks = (output_count + kThreads - 1) / kThreads;
+  if (blocks > 0) {
+    accumulate_float_per_atom_virial<<<blocks, kThreads>>>(
+        output_count,
+        output_count,
+        view.per_atom_virial_float_soa9,
+        view.virial_soa9);
+    check_cuda(cudaGetLastError(), "finalize per-atom virial sink");
+  }
+}
 
 void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborInput& input,
@@ -260,13 +317,17 @@ void write_lammps_device_outputs(
     return;
   }
 
-  const int partial_blocks = (input.nlocal + kThreads - 1) / kThreads;
+  const int virial_atom_count =
+      result.virials_per_atom9 != nullptr ? input.nall : input.nlocal;
+  const int reduction_atom_count = std::max(input.nlocal, virial_atom_count);
+  const int partial_blocks = (reduction_atom_count + kThreads - 1) / kThreads;
   const dim3 reduction_grid(partial_blocks, 7);
   reduce_lammps_partial_sums<<<
-      reduction_grid,
+          reduction_grid,
       kThreads,
       kThreads * sizeof(double)>>>(
       input.nlocal,
+      virial_atom_count,
       static_cast<int>(view.atom_capacity),
       partial_blocks,
       view.potential,

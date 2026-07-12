@@ -64,6 +64,32 @@ bool needs_angular_terms(
   return protocol.body_channels.channel_count() > 0;
 }
 
+nep_adapters::cuda_backend::VirialOutputMode select_virial_output_mode(
+    bool total_requested,
+    bool per_atom_requested) {
+  using nep_adapters::cuda_backend::VirialOutputMode;
+  if (per_atom_requested) {
+    return VirialOutputMode::per_atom_n2;
+  }
+  return total_requested ? VirialOutputMode::total_only
+                         : VirialOutputMode::none;
+}
+
+nep_adapters::cuda_backend::ForceEvaluationRequest make_force_evaluation_request(
+    nep_adapters::cuda_backend::ForceNeighborTopology topology,
+    bool store_potential,
+    bool total_virial_requested,
+    bool per_atom_virial_requested,
+    bool orthorhombic_batched = false) {
+  nep_adapters::cuda_backend::ForceEvaluationRequest request;
+  request.topology = topology;
+  request.virial = select_virial_output_mode(
+      total_virial_requested, per_atom_virial_requested);
+  request.orthorhombic_batched = orthorhombic_batched;
+  request.store_potential = store_potential;
+  return request;
+}
+
 int env_int(const char* name, int fallback) {
   const char* raw = std::getenv(name);
   if (raw == nullptr || raw[0] == '\0') {
@@ -252,47 +278,22 @@ void build_radial_descriptor_stage(
       workspace);
 }
 
-void build_angular_descriptors_and_ann_stage(
+bool try_build_structural_descriptor_core_stage(
     const nep_adapters::cuda_backend::ModelProtocol& protocol,
     int atom_count,
+    const nep_adapters::cuda_backend::SimulationBox& box,
     const nep_adapters::cuda_backend::DeviceModel& device,
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
     bool has_angular) {
-  if (protocol.charge_mode > 0) {
-    if (has_angular) {
-      nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
-          protocol,
-          atom_count,
-          device,
-          workspace);
-    }
-    nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
-        protocol,
-        atom_count,
-        device,
-        workspace);
-    return;
-  }
-  if (has_angular) {
-    if (nep_adapters::cuda_backend::
-            try_build_angular_descriptors_and_ann_from_geometry_on_device(
-                protocol,
-                atom_count,
-                device,
-                workspace)) {
-      return;
-    }
-    nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
-        protocol,
-        atom_count,
-        device,
-        workspace);
-  }
-  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-      protocol,
-      atom_count,
-      device,
-      workspace);
+  nep_adapters::cuda_backend::DescriptorCoreOptions options;
+  options.topology =
+      nep_adapters::cuda_backend::DescriptorCoreTopology::single_box;
+  options.output =
+      nep_adapters::cuda_backend::DescriptorCoreOutput::structural_descriptors;
+  options.has_angular = has_angular;
+  return nep_adapters::cuda_backend::
+      try_build_descriptor_core_from_positions_on_device(
+          protocol, atom_count, box, device, workspace, options);
 }
 
 void build_charge_descriptors_and_ann_stage(
@@ -302,19 +303,25 @@ void build_charge_descriptors_and_ann_stage(
     const nep_adapters::cuda_backend::DeviceModel& device,
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
     bool has_angular) {
-  build_radial_descriptor_stage(
-      protocol,
-      atom_count,
-      box,
-      device,
-      workspace,
-      has_angular);
-  build_angular_descriptors_and_ann_stage(
-      protocol,
-      atom_count,
-      device,
-      workspace,
-      has_angular);
+  if (!try_build_structural_descriptor_core_stage(
+          protocol, atom_count, box, device, workspace, has_angular)) {
+    build_radial_descriptor_stage(
+        protocol,
+        atom_count,
+        box,
+        device,
+        workspace,
+        has_angular);
+    if (has_angular) {
+      nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
+          protocol,
+          atom_count,
+          device,
+          workspace);
+    }
+  }
+  nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
+      protocol, atom_count, device, workspace);
 }
 
 int lammps_atom_capacity(const NepaLammpsNeighborInput& input) {
@@ -551,13 +558,16 @@ class CudaModel : public nep_adapters::Model {
             batch.total_atoms,
             workspace,
             orthorhombic_fast_path);
-        nep_adapters::cuda_backend::ForcePipelineOptions pipeline_options;
-        pipeline_options.topology = nep_adapters::cuda_backend::
-            ForceNeighborTopology::batched_multi_box;
-        pipeline_options.orthorhombic_batched = orthorhombic_fast_path;
+        const auto force_request = make_force_evaluation_request(
+            nep_adapters::cuda_backend::
+                ForceNeighborTopology::batched_multi_box,
+            true,
+            true,
+            result.virials_per_atom_row_major9 != nullptr,
+            orthorhombic_fast_path);
         nep_adapters::cuda_backend::run_nonspin_pipeline(
             protocol_,
-            pipeline_options,
+            force_request,
             batch.total_atoms,
             nep_adapters::cuda_backend::SimulationBox{},
             device_,
@@ -655,12 +665,15 @@ class CudaModel : public nep_adapters::Model {
             workspace);
         const bool has_angular = needs_angular_terms(protocol_);
         if (protocol_.spin_mode != 0) {
-          nep_adapters::cuda_backend::ForcePipelineOptions pipeline_options;
-          pipeline_options.topology = nep_adapters::cuda_backend::
-              ForceNeighborTopology::single_box_symmetric;
+          const auto force_request = make_force_evaluation_request(
+              nep_adapters::cuda_backend::
+                  ForceNeighborTopology::single_box_symmetric,
+              true,
+              true,
+              result.virials_per_atom_row_major9 != nullptr);
           nep_adapters::cuda_backend::run_spin_pipeline(
               protocol_,
-              pipeline_options,
+              force_request,
               atom_count,
               box,
               device_,
@@ -695,7 +708,7 @@ class CudaModel : public nep_adapters::Model {
               workspace,
               true,
               false,
-              true);
+              result.virials_per_atom_row_major9 != nullptr);
           if (has_angular) {
             nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
                 protocol_,
@@ -704,7 +717,7 @@ class CudaModel : public nep_adapters::Model {
                 device_,
                 workspace,
                 true,
-                true);
+                result.virials_per_atom_row_major9 != nullptr);
           }
           if (protocol_.has_zbl) {
             nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
@@ -712,7 +725,9 @@ class CudaModel : public nep_adapters::Model {
                 atom_count,
                 box,
                 device_,
-                workspace);
+                workspace,
+                true,
+                result.virials_per_atom_row_major9 != nullptr);
           }
         }
 
@@ -867,19 +882,21 @@ class CudaModel : public nep_adapters::Model {
             atom_count,
             box,
             workspace);
-        build_radial_descriptor_stage(
-            protocol_,
-            atom_count,
-            box,
-            device_,
-            workspace,
-            needs_angular_terms(protocol_));
-        if (needs_angular_terms(protocol_)) {
-          nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
+        const bool has_angular = needs_angular_terms(protocol_);
+        if (!try_build_structural_descriptor_core_stage(
+                protocol_, atom_count, box, device_, workspace, has_angular)) {
+          build_radial_descriptor_stage(
               protocol_,
               atom_count,
+              box,
               device_,
-              workspace);
+              workspace,
+              has_angular);
+          if (has_angular) {
+            nep_adapters::cuda_backend::
+                build_angular_descriptors_from_geometry_on_device(
+                    protocol_, atom_count, device_, workspace);
+          }
         }
         if (protocol_.spin_mode != 0) {
           nep_adapters::cuda_backend::build_spin_descriptors_on_device(
@@ -965,20 +982,16 @@ class CudaModel : public nep_adapters::Model {
       if (view.virial_soa9 != nullptr) {
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
       }
-      const bool accumulate_virial =
-          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
-      const bool zbl_outputs =
-          result.total_potential != nullptr || result.potential_per_atom != nullptr ||
-          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
-      nep_adapters::cuda_backend::ForcePipelineOptions pipeline_options;
-      pipeline_options.topology =
-          nep_adapters::cuda_backend::ForceNeighborTopology::single_box_symmetric;
-      pipeline_options.accumulate_virial = accumulate_virial;
-      pipeline_options.zbl_outputs = zbl_outputs;
+      const auto force_request = make_force_evaluation_request(
+          nep_adapters::cuda_backend::
+              ForceNeighborTopology::single_box_symmetric,
+          true,
+          result.total_virial6 != nullptr,
+          result.virials_per_atom9 != nullptr);
       if (protocol_.spin_mode != 0) {
         nep_adapters::cuda_backend::run_spin_pipeline(
             protocol_,
-            pipeline_options,
+            force_request,
             atom_capacity,
             box,
             device_,
@@ -986,7 +999,7 @@ class CudaModel : public nep_adapters::Model {
       } else {
         nep_adapters::cuda_backend::run_nonspin_pipeline(
             protocol_,
-            pipeline_options,
+            force_request,
             atom_capacity,
             box,
             device_,
@@ -1034,15 +1047,19 @@ class CudaModel : public nep_adapters::Model {
                                view.atom_capacity +
                            static_cast<std::size_t>(atom)];
             result.virials_per_atom9[atom][component] = value;
-            total_raw9[component] += value;
           }
-        } else {
-          for (int component = 0; component < 9; ++component) {
-            total_raw9[component] +=
-                virial_soa[static_cast<std::size_t>(component) *
-                               view.atom_capacity +
-                           static_cast<std::size_t>(atom)];
-          }
+        }
+      }
+      const int total_virial_atoms =
+          nep_adapters::cuda_backend::requests_per_atom_virial(force_request)
+              ? atom_capacity
+              : input.nlocal;
+      for (int atom = 0; atom < total_virial_atoms; ++atom) {
+        for (int component = 0; component < 9; ++component) {
+          total_raw9[component] +=
+              virial_soa[static_cast<std::size_t>(component) *
+                             view.atom_capacity +
+                         static_cast<std::size_t>(atom)];
         }
       }
       *result.total_potential = total_potential;
@@ -1144,6 +1161,10 @@ class CudaModel : public nep_adapters::Model {
             external_protocol.neighbor_capacity_angular,
             input.max_neighbors);
       }
+      const bool needs_per_atom_virial_sink =
+          external_protocol.spin_mode == 0 &&
+          external_protocol.charge_mode == 0 &&
+          result.virials_per_atom9 != nullptr;
       const bool rebuild_workspace =
           lammps_device_workspace_ == nullptr ||
           atom_capacity > lammps_device_atom_capacity_ ||
@@ -1151,7 +1172,9 @@ class CudaModel : public nep_adapters::Model {
           external_protocol.neighbor_capacity_radial >
               lammps_device_radial_capacity_ ||
           external_protocol.neighbor_capacity_angular >
-              lammps_device_angular_capacity_;
+              lammps_device_angular_capacity_ ||
+          (needs_per_atom_virial_sink &&
+           !lammps_device_has_per_atom_virial_sink_);
       LammpsDevicePairProfiler profiler(input.nlocal, rebuild_workspace);
       float stage_ms = 0.0f;
       float clear_ms = 0.0f;
@@ -1168,7 +1191,8 @@ class CudaModel : public nep_adapters::Model {
           lammps_device_workspace(
               external_protocol,
               atom_capacity,
-              active_atom_capacity);
+              active_atom_capacity,
+              needs_per_atom_virial_sink);
       // ponytail: GPUMD uses fixed model MN; per-step compact counts add a
       // device-to-host sync in the Pair hot path.
       nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
@@ -1197,20 +1221,16 @@ class CudaModel : public nep_adapters::Model {
       }
       profiler.split(clear_ms);
       const bool has_angular = needs_angular_terms(external_protocol);
-      const bool zbl_outputs =
-          result.total_potential != nullptr || result.potential_per_atom != nullptr ||
-          result.total_virial6 != nullptr || result.virials_per_atom9 != nullptr;
-      nep_adapters::cuda_backend::ForcePipelineOptions pipeline_options;
-      pipeline_options.topology =
-          nep_adapters::cuda_backend::ForceNeighborTopology::external_full;
-      pipeline_options.store_potential = store_potential;
-      pipeline_options.accumulate_virial = accumulate_virial;
-      pipeline_options.zbl_outputs = zbl_outputs;
+      const auto force_request = make_force_evaluation_request(
+          nep_adapters::cuda_backend::ForceNeighborTopology::external_full,
+          store_potential,
+          result.total_virial6 != nullptr,
+          result.virials_per_atom9 != nullptr);
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
       if (external_protocol.spin_mode != 0) {
         nep_adapters::cuda_backend::run_spin_pipeline(
             external_protocol,
-            pipeline_options,
+            force_request,
             input.nlocal,
             box,
             device_,
@@ -1219,34 +1239,20 @@ class CudaModel : public nep_adapters::Model {
       } else if (external_protocol.charge_mode == 0) {
         nep_adapters::cuda_backend::run_nonspin_pipeline(
             external_protocol,
-            pipeline_options,
+            force_request,
             input.nlocal,
             box,
             device_,
             workspace,
             profiler.enabled() ? &pipeline_timings : nullptr);
       } else {
-        bool descriptor_done = false;
-        if (has_angular && view.f12x == nullptr) {
-          descriptor_done =
-              nep_adapters::cuda_backend::
-                  try_build_descriptors_and_ann_from_positions_on_device(
-                      external_protocol,
-                      input.nlocal,
-                      box,
-                      device_,
-                      workspace,
-                      store_potential);
-        }
-        if (!descriptor_done) {
-          build_charge_descriptors_and_ann_stage(
-              external_protocol,
-              input.nlocal,
-              box,
-              device_,
-              workspace,
-              has_angular);
-        }
+        build_charge_descriptors_and_ann_stage(
+            external_protocol,
+            input.nlocal,
+            box,
+            device_,
+            workspace,
+            has_angular);
         profiler.split(descriptor_ann_ms);
         nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
             external_protocol,
@@ -1254,7 +1260,8 @@ class CudaModel : public nep_adapters::Model {
             box,
             device_,
             workspace,
-            accumulate_virial);
+            accumulate_virial,
+            result.virials_per_atom9 != nullptr);
         profiler.split(radial_force_ms);
         if (has_angular) {
           nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
@@ -1263,7 +1270,8 @@ class CudaModel : public nep_adapters::Model {
               box,
               device_,
               workspace,
-              accumulate_virial);
+              accumulate_virial,
+              result.virials_per_atom9 != nullptr);
         }
         profiler.split(angular_force_ms);
         if (external_protocol.has_zbl) {
@@ -1273,7 +1281,8 @@ class CudaModel : public nep_adapters::Model {
               box,
               device_,
               workspace,
-              zbl_outputs);
+              store_potential || accumulate_virial,
+              result.virials_per_atom9 != nullptr);
         }
         profiler.split(zbl_force_ms);
       }
@@ -1322,12 +1331,15 @@ class CudaModel : public nep_adapters::Model {
   nep_adapters::cuda_backend::DeviceWorkspace& lammps_device_workspace(
       const nep_adapters::cuda_backend::ModelProtocol& protocol,
       std::size_t atom_capacity,
-      std::size_t active_atom_capacity) {
+      std::size_t active_atom_capacity,
+      bool needs_per_atom_virial_sink) {
     if (lammps_device_workspace_ != nullptr &&
         atom_capacity <= lammps_device_atom_capacity_ &&
         active_atom_capacity <= lammps_device_active_atom_capacity_ &&
         protocol.neighbor_capacity_radial <= lammps_device_radial_capacity_ &&
-        protocol.neighbor_capacity_angular <= lammps_device_angular_capacity_) {
+        protocol.neighbor_capacity_angular <= lammps_device_angular_capacity_ &&
+        (!needs_per_atom_virial_sink ||
+         lammps_device_has_per_atom_virial_sink_)) {
       return *lammps_device_workspace_;
     }
 
@@ -1337,12 +1349,14 @@ class CudaModel : public nep_adapters::Model {
             atom_capacity,
             active_atom_capacity,
             false,
-            needs_angular_terms(protocol) || protocol.spin_mode != 0));
+            needs_angular_terms(protocol) || protocol.spin_mode != 0,
+            needs_per_atom_virial_sink));
     lammps_device_workspace_ = std::move(workspace);
     lammps_device_atom_capacity_ = atom_capacity;
     lammps_device_active_atom_capacity_ = active_atom_capacity;
     lammps_device_radial_capacity_ = protocol.neighbor_capacity_radial;
     lammps_device_angular_capacity_ = protocol.neighbor_capacity_angular;
+    lammps_device_has_per_atom_virial_sink_ = needs_per_atom_virial_sink;
     return *lammps_device_workspace_;
   }
 
@@ -1356,6 +1370,7 @@ class CudaModel : public nep_adapters::Model {
   std::size_t lammps_device_active_atom_capacity_ = 0;
   int lammps_device_radial_capacity_ = 0;
   int lammps_device_angular_capacity_ = 0;
+  bool lammps_device_has_per_atom_virial_sink_ = false;
 #endif
 };
 

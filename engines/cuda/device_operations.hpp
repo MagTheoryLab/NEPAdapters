@@ -17,6 +17,112 @@ struct LammpsDeviceNeighborCounts {
   int max_angular = 0;
 };
 
+#if defined(__CUDACC__)
+template <typename T>
+__device__ __forceinline__ T warp_sum_equal_atom(
+    unsigned peer_mask,
+    T value) {
+  const int lane = threadIdx.x & 31;
+  unsigned remaining = peer_mask & ~(1u << lane);
+  T sum = value;
+  while (remaining != 0u) {
+    const int source_lane = __ffs(static_cast<int>(remaining)) - 1;
+    sum += __shfl_sync(peer_mask, value, source_lane);
+    remaining &= remaining - 1u;
+  }
+  return sum;
+}
+
+__device__ __forceinline__ void atomic_add_per_atom_virial_float(
+    int atom_stride,
+    int atom,
+    float x12,
+    float y12,
+    float z12,
+    float fx,
+    float fy,
+    float fz,
+    float* virial_soa9) {
+  atomicAdd(&virial_soa9[atom], -x12 * fx);
+  atomicAdd(&virial_soa9[atom_stride + atom], -y12 * fy);
+  atomicAdd(&virial_soa9[2 * atom_stride + atom], -z12 * fz);
+  atomicAdd(&virial_soa9[3 * atom_stride + atom], -x12 * fy);
+  atomicAdd(&virial_soa9[4 * atom_stride + atom], -x12 * fz);
+  atomicAdd(&virial_soa9[5 * atom_stride + atom], -y12 * fz);
+  atomicAdd(&virial_soa9[6 * atom_stride + atom], -y12 * fx);
+  atomicAdd(&virial_soa9[7 * atom_stride + atom], -z12 * fx);
+  atomicAdd(&virial_soa9[8 * atom_stride + atom], -z12 * fy);
+}
+
+__device__ __forceinline__ void
+atomic_add_force_and_per_atom_virial_float_warp_aggregated(
+    unsigned active_mask,
+    int atom_stride,
+    int atom,
+    float x12,
+    float y12,
+    float z12,
+    float fx,
+    float fy,
+    float fz,
+    double* force_soa3,
+    float* virial_soa9) {
+  const unsigned peer_mask = __match_any_sync(active_mask, atom);
+  const int lane = threadIdx.x & 31;
+  const int leader = __ffs(static_cast<int>(peer_mask)) - 1;
+  if ((peer_mask & (peer_mask - 1u)) == 0u) {
+    atomicAdd(&force_soa3[atom], -static_cast<double>(fx));
+    atomicAdd(
+        &force_soa3[atom_stride + atom], -static_cast<double>(fy));
+    atomicAdd(
+        &force_soa3[2 * atom_stride + atom], -static_cast<double>(fz));
+    atomic_add_per_atom_virial_float(
+        atom_stride,
+        atom,
+        x12,
+        y12,
+        z12,
+        fx,
+        fy,
+        fz,
+        virial_soa9);
+    return;
+  }
+
+  const double force_x = warp_sum_equal_atom(
+      peer_mask, -static_cast<double>(fx));
+  const double force_y = warp_sum_equal_atom(
+      peer_mask, -static_cast<double>(fy));
+  const double force_z = warp_sum_equal_atom(
+      peer_mask, -static_cast<double>(fz));
+  const float virial_xx = warp_sum_equal_atom(peer_mask, -x12 * fx);
+  const float virial_yy = warp_sum_equal_atom(peer_mask, -y12 * fy);
+  const float virial_zz = warp_sum_equal_atom(peer_mask, -z12 * fz);
+  const float virial_xy = warp_sum_equal_atom(peer_mask, -x12 * fy);
+  const float virial_xz = warp_sum_equal_atom(peer_mask, -x12 * fz);
+  const float virial_yz = warp_sum_equal_atom(peer_mask, -y12 * fz);
+  const float virial_yx = warp_sum_equal_atom(peer_mask, -y12 * fx);
+  const float virial_zx = warp_sum_equal_atom(peer_mask, -z12 * fx);
+  const float virial_zy = warp_sum_equal_atom(peer_mask, -z12 * fy);
+  if (lane != leader) {
+    return;
+  }
+
+  atomicAdd(&force_soa3[atom], force_x);
+  atomicAdd(&force_soa3[atom_stride + atom], force_y);
+  atomicAdd(&force_soa3[2 * atom_stride + atom], force_z);
+  atomicAdd(&virial_soa9[atom], virial_xx);
+  atomicAdd(&virial_soa9[atom_stride + atom], virial_yy);
+  atomicAdd(&virial_soa9[2 * atom_stride + atom], virial_zz);
+  atomicAdd(&virial_soa9[3 * atom_stride + atom], virial_xy);
+  atomicAdd(&virial_soa9[4 * atom_stride + atom], virial_xz);
+  atomicAdd(&virial_soa9[5 * atom_stride + atom], virial_yz);
+  atomicAdd(&virial_soa9[6 * atom_stride + atom], virial_yx);
+  atomicAdd(&virial_soa9[7 * atom_stride + atom], virial_zx);
+  atomicAdd(&virial_soa9[8 * atom_stride + atom], virial_zy);
+}
+#endif
+
 void stage_batch_on_device(
     const NepaStructureBatch& batch,
     DeviceWorkspace& workspace);
@@ -128,13 +234,30 @@ bool try_build_angular_descriptors_and_ann_from_geometry_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace);
 
-bool try_build_descriptors_and_ann_from_positions_on_device(
+enum class DescriptorCoreTopology {
+  single_box,
+  batched_multi_box,
+};
+
+enum class DescriptorCoreOutput {
+  structural_descriptors,
+  ann_energy_and_derivatives,
+};
+
+struct DescriptorCoreOptions {
+  DescriptorCoreTopology topology = DescriptorCoreTopology::single_box;
+  DescriptorCoreOutput output = DescriptorCoreOutput::structural_descriptors;
+  bool has_angular = true;
+  bool store_potential = true;
+};
+
+bool try_build_descriptor_core_from_positions_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool store_potential = true);
+    const DescriptorCoreOptions& options);
 
 void evaluate_ann_energy_on_device(
     const ModelProtocol& protocol,
@@ -173,7 +296,15 @@ void accumulate_lammps_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial = true);
+    bool accumulate_virial = true,
+    bool virial_to_neighbor = false);
+
+void accumulate_lammps_radial_forces_to_per_atom_sink(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
 
 void accumulate_radial_and_zbl_forces_on_device(
     const ModelProtocol& protocol,
@@ -186,7 +317,8 @@ void accumulate_radial_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
-    DeviceWorkspace& workspace);
+    DeviceWorkspace& workspace,
+    bool virial_to_neighbor = false);
 
 void accumulate_l2_angular_forces_on_device(
     const ModelProtocol& protocol,
@@ -197,11 +329,19 @@ void accumulate_l2_angular_forces_on_device(
     bool accumulate_virial = true,
     bool virial_to_neighbor = false);
 
+void accumulate_l2_angular_forces_to_per_atom_sink(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
 void accumulate_l2_angular_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
-    DeviceWorkspace& workspace);
+    DeviceWorkspace& workspace,
+    bool virial_to_neighbor = false);
 
 void accumulate_zbl_forces_on_device(
     const ModelProtocol& protocol,
@@ -209,12 +349,22 @@ void accumulate_zbl_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_energy_virial = true);
+    bool accumulate_energy_virial = true,
+    bool virial_to_neighbor = false);
 
 void accumulate_zbl_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool virial_to_neighbor = false);
+
+void prepare_lammps_per_atom_virial_sink(
+    int atom_count,
+    DeviceWorkspace& workspace);
+
+void finalize_lammps_per_atom_virial_sink(
+    int atom_count,
     DeviceWorkspace& workspace);
 
 void apply_qnep_charge_terms_on_device(
@@ -246,6 +396,7 @@ void accumulate_spin_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     bool accumulate_virial,
+    bool cpu_atom_virial,
     SpinForceTimings* timings = nullptr);
 
 }  // namespace nep_adapters::cuda_backend

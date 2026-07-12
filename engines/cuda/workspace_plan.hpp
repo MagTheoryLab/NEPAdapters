@@ -52,7 +52,8 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
     bool include_basis_cache = true,
-    bool include_angular_vectors = true);
+    bool include_angular_vectors = true,
+    bool include_per_atom_virial_sink = false);
 
 WorkspacePlan make_model_workspace_plan(const ModelProtocol& protocol);
 

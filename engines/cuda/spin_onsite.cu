@@ -24,6 +24,12 @@ constexpr int kSpinPrimitiveCount =
 constexpr int kSpinPrimitiveSlots = 88;
 constexpr int kSpinChiralQohCount = 300;
 
+enum class SpinVirialMode : int {
+  disabled,
+  center_owned,
+  cpu_atom_decomposition,
+};
+
 __device__ __constant__ unsigned short kSpinChiralQohPacked[kSpinChiralQohCount] = {
     20, 23, 29, 35, 37, 46, 52, 55, 61, 67, 69, 78,
     86, 88, 92, 99, 101, 110, 118, 120, 124, 132, 135, 141,
@@ -203,11 +209,11 @@ void launch_spin_density_forces_c4_l4(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceWorkspaceView& view,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     int blocks,
     int threads) {
   if constexpr (AtomMajor) {
-    if (accumulate_virial) {
+    if (virial_mode != SpinVirialMode::disabled) {
       prepare_spin_density_pulls_c4_l4<true><<<blocks, threads>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
@@ -247,7 +253,7 @@ void launch_spin_density_forces_c4_l4(
         view.spin_density_raw1_dot,
         view.mforce_soa3);
   }
-  if (accumulate_virial) {
+  if (virial_mode != SpinVirialMode::disabled) {
     accumulate_spin_density_forces_c4_l4_pull<AtomMajor><<<blocks, threads>>>(
         atom_count,
         static_cast<int>(view.atom_capacity),
@@ -273,7 +279,7 @@ void launch_spin_density_forces_c4_l4(
         view.spin_density_raw1_dot,
         view.force_soa3,
         view.mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         view.virial_soa9);
   } else {
     accumulate_spin_density_forces_c4_l4_block_f32<AtomMajor>
@@ -313,7 +319,7 @@ void launch_spin_chiral_forces_c4_l4(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceWorkspaceView& view,
-    bool accumulate_virial,
+    SpinVirialMode virial_mode,
     int blocks,
     int threads) {
   accumulate_spin_chiral_forces_c4_l4_cached_f32<AtomMajor><<<blocks, threads>>>(
@@ -339,7 +345,7 @@ void launch_spin_chiral_forces_c4_l4(
       view.spin_chiral_pseudodevs,
       view.force_soa3,
       view.mforce_soa3,
-      accumulate_virial,
+      virial_mode,
       view.virial_soa9);
 }
 
@@ -658,7 +664,7 @@ static void accumulate_spin_scalar_forces_impl(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial) {
+    SpinVirialMode virial_mode) {
   require(protocol.spin_mode != 0, "spin scalar force requires spin model");
   require(protocol.spin_compress > 0 &&
               protocol.spin_compress <= kMaxSpinCompress,
@@ -697,7 +703,7 @@ static void accumulate_spin_scalar_forces_impl(
           "workspace missing spin edge dz");
   require(!use_cached_geometry || view.spin_edge_dist != nullptr,
           "workspace missing spin edge dist");
-  if (use_cached_geometry && !accumulate_virial) {
+  if (use_cached_geometry && virial_mode == SpinVirialMode::disabled) {
     return;
   }
   const int threads = 32;
@@ -729,7 +735,7 @@ static void accumulate_spin_scalar_forces_impl(
         use_cached_geometry,
         view.force_soa3,
         view.mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         view.virial_soa9);
   }
   check_cuda(cudaGetLastError(), "accumulate spin scalar forces");
@@ -741,7 +747,7 @@ static void accumulate_spin_density_forces_impl(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial) {
+    SpinVirialMode virial_mode) {
   require(protocol.spin_mode != 0, "spin density force requires spin model");
   require(protocol.spin_compress > 0 &&
               protocol.spin_compress <= kMaxSpinCompress,
@@ -809,10 +815,10 @@ static void accumulate_spin_density_forces_impl(
   if (blocks > 0 && use_cached_geometry) {
     if (protocol.neighbor_capacity_radial <= 32) {
       launch_spin_density_forces_c4_l4<true>(
-          protocol, atom_count, view, accumulate_virial, blocks, threads);
+          protocol, atom_count, view, virial_mode, blocks, threads);
     } else {
       launch_spin_density_forces_c4_l4<false>(
-          protocol, atom_count, view, accumulate_virial, blocks, threads);
+          protocol, atom_count, view, virial_mode, blocks, threads);
     }
   } else if (blocks > 0) {
     accumulate_spin_density_forces<<<blocks, threads>>>(
@@ -853,7 +859,7 @@ static void accumulate_spin_density_forces_impl(
         view.spin_density_raw1_dot,
         view.force_soa3,
         view.mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         view.virial_soa9);
   }
   check_cuda(cudaGetLastError(), "accumulate spin density forces");
@@ -865,7 +871,7 @@ static void accumulate_spin_chiral_polar_forces_impl(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial) {
+    SpinVirialMode virial_mode) {
   require(protocol.spin_mode != 0, "spin chiral polar force requires spin model");
   require(protocol.spin_chiral != 0, "spin chiral polar force requires chiral model");
   require(protocol.spin_compress > 0 &&
@@ -924,10 +930,10 @@ static void accumulate_spin_chiral_polar_forces_impl(
   if (blocks > 0 && use_cached_geometry) {
     if (protocol.neighbor_capacity_radial <= 32) {
       launch_spin_chiral_forces_c4_l4<true>(
-          protocol, atom_count, view, accumulate_virial, blocks, threads);
+          protocol, atom_count, view, virial_mode, blocks, threads);
     } else {
       launch_spin_chiral_forces_c4_l4<false>(
-          protocol, atom_count, view, accumulate_virial, blocks, threads);
+          protocol, atom_count, view, virial_mode, blocks, threads);
     }
   } else if (blocks > 0) {
     accumulate_spin_chiral_forces<<<blocks, threads>>>(
@@ -958,7 +964,7 @@ static void accumulate_spin_chiral_polar_forces_impl(
         view.spin_chiral_pseudodevs,
         view.force_soa3,
         view.mforce_soa3,
-        accumulate_virial,
+        virial_mode,
         view.virial_soa9);
   }
   check_cuda(cudaGetLastError(), "accumulate spin chiral polar forces");
@@ -971,26 +977,32 @@ void accumulate_spin_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     bool accumulate_virial,
+    bool cpu_atom_virial,
     SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
   SpinForceTimings ignored_timings;
   SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
+  const SpinVirialMode virial_mode =
+      !accumulate_virial
+          ? SpinVirialMode::disabled
+          : (cpu_atom_virial ? SpinVirialMode::cpu_atom_decomposition
+                             : SpinVirialMode::center_owned);
 
   accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
   timer.split(measured.onsite_ms);
 
   accumulate_spin_scalar_forces_impl(
-      protocol, atom_count, box, model, workspace, accumulate_virial);
+      protocol, atom_count, box, model, workspace, virial_mode);
   timer.split(measured.scalar_ms);
 
   accumulate_spin_density_forces_impl(
-      protocol, atom_count, box, model, workspace, accumulate_virial);
+      protocol, atom_count, box, model, workspace, virial_mode);
   timer.split(measured.density_ms);
 
   if (protocol.spin_chiral != 0) {
     accumulate_spin_chiral_polar_forces_impl(
-        protocol, atom_count, box, model, workspace, accumulate_virial);
+        protocol, atom_count, box, model, workspace, virial_mode);
   }
   timer.split(measured.chiral_ms);
 }

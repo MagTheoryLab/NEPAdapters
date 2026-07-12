@@ -2,6 +2,7 @@
 #include "nep_adapters/engines/cpu_opt.hpp"
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
 #include "nep_adapters/engines/cuda.hpp"
+#include <cuda_runtime_api.h>
 #endif
 
 #include "cpu_engine_adapter.hpp"
@@ -336,6 +337,13 @@ class ApiRunner {
       NepaLammpsNeighborResult& result) {
     return nepa_find_force_lammps_neighbors(model_, &input, &result);
   }
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+  NepaStatus find_force_lammps_device_neighbors(
+      const NepaLammpsDeviceNeighborInput& input,
+      NepaLammpsDeviceNeighborResult& result) {
+    return nepa_find_force_lammps_device_neighbors(model_, &input, &result);
+  }
+#endif
 
  private:
   std::string backend_;
@@ -753,20 +761,59 @@ bool compare_prediction(
   return ok;
 }
 
+template <typename Runner>
+double model_cutoff_max(Runner& runner) {
+  NepaModelInfo info{};
+  require_status(runner.model_info(info), "model_info");
+  if (!(info.cutoff_max > 0.0)) {
+    throw std::runtime_error("model cutoff must be positive");
+  }
+  return info.cutoff_max;
+}
+
+std::vector<std::vector<int>> make_nonperiodic_neighbor_rows(
+    const CaseData& test_case,
+    double cutoff) {
+  if (test_case.pbc[0] != 0 || test_case.pbc[1] != 0 ||
+      test_case.pbc[2] != 0) {
+    throw std::runtime_error(
+        "LAMMPS FP64 oracle neighbor builder requires a nonperiodic case");
+  }
+  const int atom_count = test_case.atom_count();
+  const double cutoff_squared = cutoff * cutoff;
+  std::vector<std::vector<int>> rows(atom_count);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    const std::size_t atom_offset = 3 * static_cast<std::size_t>(atom);
+    for (int neighbor = 0; neighbor < atom_count; ++neighbor) {
+      if (neighbor == atom) {
+        continue;
+      }
+      const std::size_t neighbor_offset =
+          3 * static_cast<std::size_t>(neighbor);
+      double distance_squared = 0.0;
+      for (int component = 0; component < 3; ++component) {
+        const double delta = test_case.positions[neighbor_offset + component] -
+                             test_case.positions[atom_offset + component];
+        distance_squared += delta * delta;
+      }
+      if (distance_squared < cutoff_squared) {
+        rows[atom].push_back(neighbor);
+      }
+    }
+  }
+  return rows;
+}
+
 struct LammpsStorage {
-  explicit LammpsStorage(const CaseData& test_case) {
+  LammpsStorage(const CaseData& test_case, double cutoff) {
     const int atom_count = test_case.atom_count();
     ilist.resize(atom_count);
     std::iota(ilist.begin(), ilist.end(), 0);
-    numneigh.assign(atom_count, atom_count - 1);
-    neighbor_rows.resize(atom_count);
+    neighbor_rows = make_nonperiodic_neighbor_rows(test_case, cutoff);
+    numneigh.resize(atom_count);
     firstneigh.resize(atom_count, nullptr);
     for (int atom = 0; atom < atom_count; ++atom) {
-      for (int neighbor = 0; neighbor < atom_count; ++neighbor) {
-        if (neighbor != atom) {
-          neighbor_rows[atom].push_back(neighbor);
-        }
-      }
+      numneigh[atom] = static_cast<int>(neighbor_rows[atom].size());
       firstneigh[atom] = neighbor_rows[atom].data();
     }
 
@@ -827,6 +874,156 @@ struct LammpsStorage {
   std::vector<std::array<double, 4>> spin_rows;
   std::vector<double*> spin_ptrs;
 };
+
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+void require_cuda(cudaError_t status, const std::string& operation) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(
+        operation + " failed: " + cudaGetErrorString(status));
+  }
+}
+
+template <typename T>
+class DeviceBuffer {
+ public:
+  explicit DeviceBuffer(std::size_t count) : count_(count) {
+    if (count_ > 0) {
+      require_cuda(
+          cudaMalloc(reinterpret_cast<void**>(&data_), count_ * sizeof(T)),
+          "cudaMalloc");
+    }
+  }
+
+  explicit DeviceBuffer(const std::vector<T>& host) : DeviceBuffer(host.size()) {
+    if (count_ > 0) {
+      require_cuda(
+          cudaMemcpy(
+              data_,
+              host.data(),
+              count_ * sizeof(T),
+              cudaMemcpyHostToDevice),
+          "cudaMemcpy host to device");
+    }
+  }
+
+  ~DeviceBuffer() {
+    if (data_ != nullptr) {
+      cudaFree(data_);
+    }
+  }
+
+  DeviceBuffer(const DeviceBuffer&) = delete;
+  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+  T* data() { return data_; }
+  const T* data() const { return data_; }
+
+  void copy_to(std::vector<T>& host) const {
+    if (host.size() != count_) {
+      throw std::runtime_error("device copyback size mismatch");
+    }
+    if (count_ > 0) {
+      require_cuda(
+          cudaMemcpy(
+              host.data(),
+              data_,
+              count_ * sizeof(T),
+              cudaMemcpyDeviceToHost),
+          "cudaMemcpy device to host");
+    }
+  }
+
+ private:
+  std::size_t count_ = 0;
+  T* data_ = nullptr;
+};
+
+LammpsPrediction evaluate_lammps_device(
+    ApiRunner& runner,
+    const CaseData& test_case) {
+  if (test_case.is_spin()) {
+    throw std::runtime_error(
+        "dense device LAMMPS oracle currently covers nonmagnetic models");
+  }
+  const int atom_count = test_case.atom_count();
+  const std::vector<std::vector<int>> neighbor_rows =
+      make_nonperiodic_neighbor_rows(test_case, model_cutoff_max(runner));
+  int max_neighbors = 0;
+  for (const auto& row : neighbor_rows) {
+    max_neighbors = std::max(max_neighbors, static_cast<int>(row.size()));
+  }
+  std::vector<int> ilist(atom_count);
+  std::iota(ilist.begin(), ilist.end(), 0);
+  std::vector<int> counts(atom_count, 0);
+  std::vector<int> neighbors(
+      static_cast<std::size_t>(atom_count) * max_neighbors);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    counts[atom] = static_cast<int>(neighbor_rows[atom].size());
+    for (int slot = 0; slot < counts[atom]; ++slot) {
+      neighbors[static_cast<std::size_t>(atom) * max_neighbors + slot] =
+          neighbor_rows[atom][slot];
+    }
+  }
+  std::vector<int> types(test_case.types.begin(), test_case.types.end());
+
+  DeviceBuffer<int> d_ilist(ilist);
+  DeviceBuffer<int> d_counts(counts);
+  DeviceBuffer<int> d_neighbors(neighbors);
+  DeviceBuffer<int> d_types(types);
+  DeviceBuffer<double> d_positions(test_case.positions);
+  DeviceBuffer<double> d_energy(1);
+  DeviceBuffer<double> d_virial6(6);
+  DeviceBuffer<double> d_potential(atom_count);
+  DeviceBuffer<double> d_force(static_cast<std::size_t>(atom_count) * 3);
+  DeviceBuffer<double> d_atom_virial(
+      static_cast<std::size_t>(atom_count) * 9);
+
+  NepaLammpsDeviceNeighborInput input{};
+  input.nlocal = atom_count;
+  input.nall = atom_count;
+  input.inum = atom_count;
+  input.max_neighbors = max_neighbors;
+  input.neighbor_rows = atom_count;
+  input.numneigh_length = atom_count;
+  input.ilist = d_ilist.data();
+  input.numneigh = d_counts.data();
+  input.neighbors = d_neighbors.data();
+  input.neighbor_atom_stride = max_neighbors;
+  input.neighbor_slot_stride = 1;
+  input.types = d_types.data();
+  input.positions = d_positions.data();
+  input.position_atom_stride = 3;
+  input.position_component_stride = 1;
+
+  NepaLammpsDeviceNeighborResult result{};
+  result.total_potential = d_energy.data();
+  result.total_virial6 = d_virial6.data();
+  result.potential_per_atom = d_potential.data();
+  result.forces = d_force.data();
+  result.force_atom_stride = 3;
+  result.force_component_stride = 1;
+  result.virials_per_atom9 = d_atom_virial.data();
+  result.virial_atom_stride = 9;
+  result.virial_component_stride = 1;
+  require_status(
+      runner.find_force_lammps_device_neighbors(input, result),
+      "find_force_lammps_device_neighbors");
+
+  LammpsPrediction out;
+  std::vector<double> energy(1, 0.0);
+  out.virial6.assign(6, 0.0);
+  out.potential.assign(atom_count, 0.0);
+  out.force.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  out.atom_virial9.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+  d_energy.copy_to(energy);
+  d_virial6.copy_to(out.virial6);
+  d_potential.copy_to(out.potential);
+  d_force.copy_to(out.force);
+  d_atom_virial.copy_to(out.atom_virial9);
+  out.energy = energy[0];
+  return out;
+}
+#endif
 
 template <typename Runner>
 LammpsPrediction evaluate_lammps(
@@ -997,19 +1194,38 @@ bool run_lammps_case(
     BackendRunner& backend,
     OracleRunner& oracle,
     const CaseData& test_case) {
-  LammpsStorage oracle_storage(test_case);
+  LammpsStorage oracle_storage(test_case, model_cutoff_max(oracle));
   const Prediction oracle_batch = evaluate_batch(oracle, test_case);
   const LammpsPrediction oracle_lammps =
       evaluate_lammps(oracle, test_case, oracle_storage);
   bool ok = validate_oracle_lammps(test_case, oracle_batch, oracle_lammps);
 
-  LammpsStorage backend_storage(test_case);
+  LammpsStorage backend_storage(test_case, model_cutoff_max(backend));
   const LammpsPrediction candidate =
       evaluate_lammps(backend, test_case, backend_storage);
   ok = compare_lammps_prediction(
            backend_name, test_case, candidate, oracle_lammps, budgets) && ok;
   return ok;
 }
+
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+bool run_device_lammps_case(
+    const Budgets& budgets,
+    ApiRunner& backend,
+    OracleRunner& oracle,
+    const CaseData& test_case) {
+  LammpsStorage oracle_storage(test_case, model_cutoff_max(oracle));
+  const Prediction oracle_batch = evaluate_batch(oracle, test_case);
+  const LammpsPrediction oracle_lammps =
+      evaluate_lammps(oracle, test_case, oracle_storage);
+  bool ok = validate_oracle_lammps(test_case, oracle_batch, oracle_lammps);
+  const LammpsPrediction candidate =
+      evaluate_lammps_device(backend, test_case);
+  ok = compare_lammps_prediction(
+           "cuda_device", test_case, candidate, oracle_lammps, budgets) && ok;
+  return ok;
+}
+#endif
 
 }  // namespace
 
@@ -1099,6 +1315,20 @@ int main() {
              cuda_nonmag,
              nonmag_oracle,
              nonmag_lammps) && ok;
+    CaseData dense_nonmag_lammps = dense_nonmag;
+    dense_nonmag_lammps.name = "nonmag_dense_nonperiodic_device";
+    // The native CPU oracle encodes nonperiodic structures with a box large
+    // enough that no periodic image enters the cutoff.
+    dense_nonmag_lammps.box = {
+        64.0, 0.0, 0.0,
+        0.0, 64.0, 0.0,
+        0.0, 0.0, 64.0};
+    dense_nonmag_lammps.pbc = {0, 0, 0};
+    ok = run_device_lammps_case(
+             cuda_budgets(),
+             cuda_nonmag,
+             nonmag_oracle,
+             dense_nonmag_lammps) && ok;
     ApiRunner cuda_spin("cuda", spin_nonperiodic.model_path);
     ok = run_lammps_case(
              "cuda",

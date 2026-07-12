@@ -121,6 +121,17 @@ double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& r
   return diff;
 }
 
+void print_non_finite(
+    const char* label,
+    const std::vector<double>& values) {
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (!std::isfinite(values[index])) {
+      std::cerr << " nonfinite=" << label << '[' << index << "]="
+                << values[index];
+    }
+  }
+}
+
 bool check_max_abs_diff_rejects_non_finite() {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   const double infinity = std::numeric_limits<double>::infinity();
@@ -263,7 +274,12 @@ bool check_dim(int active_dim) {
               << " energy=" << std::abs(c.energy - g.energy)
               << " force=" << max_abs_diff(c.force, g.force)
               << " virial=" << max_abs_diff(c.virial, g.virial)
-              << " mforce=" << max_abs_diff(c.mforce, g.mforce) << "\n";
+              << " mforce=" << max_abs_diff(c.mforce, g.mforce);
+    print_non_finite("cpu_force", c.force);
+    print_non_finite("gpu_force", g.force);
+    print_non_finite("cpu_virial", c.virial);
+    print_non_finite("gpu_virial", g.virial);
+    std::cerr << '\n';
   }
   nepa_free_model(cpu);
   nepa_free_model(gpu);

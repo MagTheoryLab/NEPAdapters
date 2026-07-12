@@ -584,10 +584,17 @@ if(TARGET NEPAdapters::cpu_opt)
   endif()
   set(NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL "")
   if(TARGET NEPAdapters::cuda AND NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
+    find_package(CUDAToolkit REQUIRED)
+    target_include_directories(
+      nep_adapters_fp64_oracle_test
+      PRIVATE
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
     target_link_libraries(
       nep_adapters_fp64_oracle_test
       PRIVATE
         NEPAdapters::cuda
+        CUDA::cudart
     )
     target_compile_definitions(
       nep_adapters_fp64_oracle_test

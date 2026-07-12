@@ -75,6 +75,7 @@ struct DeviceWorkspaceView {
   float* f12x = nullptr;
   float* f12y = nullptr;
   float* f12z = nullptr;
+  float* per_atom_virial_float_soa9 = nullptr;
   float* spin_density_rho0 = nullptr;
   float* spin_density_raw1 = nullptr;
   float* spin_density_l1_rdot = nullptr;

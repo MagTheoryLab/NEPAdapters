@@ -124,6 +124,8 @@ void set_view_pointer(
     view.f12y = static_cast<float*>(device);
   } else if (name == "f12z") {
     view.f12z = static_cast<float*>(device);
+  } else if (name == "per_atom_virial_float_soa9") {
+    view.per_atom_virial_float_soa9 = static_cast<float*>(device);
   } else if (name == "spin_density_rho0") {
     view.spin_density_rho0 = static_cast<float*>(device);
   } else if (name == "spin_density_raw1") {

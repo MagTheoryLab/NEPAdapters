@@ -1114,14 +1114,18 @@ void run_reused_workspace_once(
     clear_potential(workspace);
   }
   const bool has_angular = protocol.body_channels.channel_count() > 0;
-  if (!has_angular ||
-      !nep_adapters::cuda_backend::try_build_descriptors_and_ann_from_positions_on_device(
+  nep_adapters::cuda_backend::DescriptorCoreOptions descriptor_options;
+  descriptor_options.output = nep_adapters::cuda_backend::
+      DescriptorCoreOutput::ann_energy_and_derivatives;
+  descriptor_options.has_angular = has_angular;
+  descriptor_options.store_potential = store_potential;
+  if (!nep_adapters::cuda_backend::try_build_descriptor_core_from_positions_on_device(
           protocol,
           storage.atom_count,
           box,
           model,
           workspace,
-          store_potential)) {
+          descriptor_options)) {
     if (has_angular) {
       nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
           protocol,
@@ -1233,15 +1237,19 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
     }
   });
   const bool has_angular = protocol.body_channels.channel_count() > 0;
+  nep_adapters::cuda_backend::DescriptorCoreOptions descriptor_options;
+  descriptor_options.output = nep_adapters::cuda_backend::
+      DescriptorCoreOutput::ann_energy_and_derivatives;
+  descriptor_options.has_angular = has_angular;
+  descriptor_options.store_potential = store_potential;
   timing.descriptor_ms = time_synchronized_phase([&]() {
-    if (!has_angular ||
-        !nep_adapters::cuda_backend::try_build_descriptors_and_ann_from_positions_on_device(
+    if (!nep_adapters::cuda_backend::try_build_descriptor_core_from_positions_on_device(
             protocol,
             storage.atom_count,
             box,
             model,
             workspace,
-            store_potential)) {
+            descriptor_options)) {
       if (has_angular) {
         nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
             protocol,
