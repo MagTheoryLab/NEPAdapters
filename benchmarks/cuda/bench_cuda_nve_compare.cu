@@ -4,9 +4,7 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
-#include "model_parameters.hpp"
 #include "simulation_box.hpp"
-#include "workspace_plan.hpp"
 
 #include <cuda_runtime.h>
 
@@ -280,7 +278,7 @@ void run_step(
       box,
       model,
       workspace,
-      false);
+      nep_adapters::cuda_backend::VirialTarget::none);
 
   if (!options.integrate) {
     return;

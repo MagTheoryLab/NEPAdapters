@@ -12,15 +12,13 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
   find_package(CUDAToolkit REQUIRED)
   target_sources(nep_adapters_cuda PRIVATE
     ann_energy.cu
-    angular_basis_cache.cu
     angular_descriptor.cu
     angular_force.cu
-    batch_output.cu
     device_model.cu
     device_staging.cu
     device_workspace.cu
     internal_neighbor_builder.cu
-    lammps_device_output.cu
+    device_output.cu
     pair_geometry_cache.cu
     qnep_charge.cu
     radial_force.cu
@@ -33,15 +31,13 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
   )
   set_source_files_properties(
     ann_energy.cu
-    angular_basis_cache.cu
     angular_descriptor.cu
     angular_force.cu
-    batch_output.cu
     device_model.cu
     device_staging.cu
     device_workspace.cu
     internal_neighbor_builder.cu
-    lammps_device_output.cu
+    device_output.cu
     pair_geometry_cache.cu
     qnep_charge.cu
     radial_force.cu

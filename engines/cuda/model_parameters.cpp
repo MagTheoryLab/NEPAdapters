@@ -1,4 +1,4 @@
-#include "model_parameters.hpp"
+#include "device_model.hpp"
 
 #include <stdexcept>
 

@@ -47,18 +47,12 @@ struct ForcePipelineTimings {
   float spin_chiral_ms = 0.0f;
 };
 
-// Runs a complete CUDA force dataflow. Kernel selection stays private so
-// callers only choose the neighbor topology and requested outputs.
-void run_nonspin_pipeline(
-    const ModelProtocol& protocol,
-    const ForceEvaluationRequest& request,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    ForcePipelineTimings* timings = nullptr);
-
-void run_spin_pipeline(
+// Runs the complete CUDA force dataflow for the model encoded by protocol.
+// Callers specify topology and observable outputs; model-family dispatch,
+// ZBL composition, virial placement, and kernel selection stay private.
+// Charge models remain on their existing dedicated path until that extension
+// can satisfy this same interface without widening it.
+void run_force_pipeline(
     const ModelProtocol& protocol,
     const ForceEvaluationRequest& request,
     int atom_count,

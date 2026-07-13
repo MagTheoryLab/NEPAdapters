@@ -1564,58 +1564,36 @@ void accumulate_l2_angular_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
   validate_angular_force_inputs(
       protocol, atom_count, model_view, view, false);
 
   if (atom_count > 0) {
-    if (accumulate_virial) {
-      dispatch_angular_pull_tile<true, false>(
-          protocol,
-          atom_count,
-          box,
-          model_view,
-          view,
-          false,
-          virial_to_neighbor);
-    } else {
-      dispatch_angular_pull_tile<false, false>(
-          protocol, atom_count, box, model_view, view, false, false);
+    switch (virial_target) {
+      case VirialTarget::none:
+        dispatch_angular_pull_tile<false, false>(
+            protocol, atom_count, box, model_view, view, false, false);
+        break;
+      case VirialTarget::center_atom:
+        dispatch_angular_pull_tile<true, false>(
+            protocol, atom_count, box, model_view, view, false, false);
+        break;
+      case VirialTarget::neighbor_atom:
+        dispatch_angular_pull_tile<true, false>(
+            protocol, atom_count, box, model_view, view, false, true);
+        break;
+      case VirialTarget::neighbor_float_sink:
+        require(view.per_atom_virial_float_soa9 != nullptr,
+                "workspace missing per-atom virial sink");
+        dispatch_angular_pull_tile<true, true>(
+            protocol, atom_count, box, model_view, view, false, false);
+        break;
     }
   }
   check_cuda(
       cudaGetLastError(), "accumulate angular forces kernel launch failed");
-}
-
-void accumulate_l2_angular_forces_to_per_atom_sink(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace) {
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView view = workspace.view();
-  validate_angular_force_inputs(
-      protocol, atom_count, model_view, view, false);
-  require(view.per_atom_virial_float_soa9 != nullptr,
-          "workspace missing per-atom virial sink");
-
-  if (atom_count > 0) {
-    dispatch_angular_pull_tile<true, true>(
-        protocol,
-        atom_count,
-        box,
-        model_view,
-        view,
-        false,
-        false);
-  }
-  check_cuda(
-      cudaGetLastError(),
-      "accumulate angular forces to per-atom sink failed");
 }
 
 void accumulate_l2_angular_forces_batched(
@@ -1623,7 +1601,11 @@ void accumulate_l2_angular_forces_batched(
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
+  require(
+      virial_target == VirialTarget::center_atom ||
+          virial_target == VirialTarget::neighbor_atom,
+      "batched angular forces require an FP64 virial target");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
   validate_angular_force_inputs(
@@ -1637,7 +1619,7 @@ void accumulate_l2_angular_forces_batched(
         model_view,
         view,
         true,
-        virial_to_neighbor);
+        virial_target == VirialTarget::neighbor_atom);
   }
   check_cuda(cudaGetLastError(),
              "accumulate batched angular forces kernel launch failed");

@@ -4,9 +4,7 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
-#include "model_parameters.hpp"
 #include "simulation_box.hpp"
-#include "workspace_plan.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -1163,13 +1161,16 @@ void run_reused_workspace_once(
   }
   const bool accumulate_virial = options.write_totals || options.write_per_atom;
   const bool zbl_outputs = options.write_totals || options.write_per_atom;
+  const auto virial_target = accumulate_virial
+      ? nep_adapters::cuda_backend::VirialTarget::center_atom
+      : nep_adapters::cuda_backend::VirialTarget::none;
   nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
       protocol,
       storage.atom_count,
       box,
       model,
       workspace,
-      accumulate_virial);
+      virial_target);
   if (has_angular) {
     nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
         protocol,
@@ -1177,7 +1178,7 @@ void run_reused_workspace_once(
         box,
         model,
         workspace,
-        accumulate_virial);
+        virial_target);
   }
   if (protocol.has_zbl && zbl_outputs) {
     nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
@@ -1291,13 +1292,16 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
     const bool accumulate_virial =
         options.write_totals || options.write_per_atom;
     const bool zbl_outputs = options.write_totals || options.write_per_atom;
+    const auto virial_target = accumulate_virial
+        ? nep_adapters::cuda_backend::VirialTarget::center_atom
+        : nep_adapters::cuda_backend::VirialTarget::none;
     nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
         protocol,
         storage.atom_count,
         box,
         model,
         workspace,
-        accumulate_virial);
+        virial_target);
     if (has_angular) {
       nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
           protocol,
@@ -1305,7 +1309,7 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
           box,
           model,
           workspace,
-          accumulate_virial);
+          virial_target);
     }
     if (protocol.has_zbl && zbl_outputs) {
       nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(

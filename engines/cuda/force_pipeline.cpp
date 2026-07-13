@@ -11,10 +11,10 @@
 namespace nep_adapters::cuda_backend {
 namespace {
 
-void require_ordinary_model(const ModelProtocol& protocol) {
-  if (protocol.spin_mode != 0 || protocol.charge_mode != 0) {
+void require_supported_model(const ModelProtocol& protocol) {
+  if (protocol.charge_mode != 0) {
     throw std::invalid_argument(
-        "non-spin execution pipeline accepts ordinary models only");
+        "CUDA force pipeline charge integration is not implemented");
   }
 }
 
@@ -22,14 +22,28 @@ bool has_angular_terms(const ModelProtocol& protocol) {
   return protocol.body_channels.channel_count() > 0;
 }
 
-void build_staged_position_descriptors(
+DescriptorCoreOptions make_descriptor_options(
+    const ForceEvaluationRequest& request,
+    bool has_angular,
+    DescriptorCoreOutput output) {
+  DescriptorCoreOptions options;
+  options.topology =
+      request.topology == ForceNeighborTopology::batched_multi_box
+          ? DescriptorCoreTopology::batched_multi_box
+          : DescriptorCoreTopology::single_box;
+  options.output = output;
+  options.has_angular = has_angular;
+  options.store_potential = request.store_potential;
+  return options;
+}
+
+void build_staged_radial_descriptors(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool has_angular,
-    bool spin_model) {
+    bool has_angular) {
   if (has_angular) {
     build_angular_geometry_cache_on_device(protocol, atom_count, box, workspace);
   }
@@ -44,22 +58,9 @@ void build_staged_position_descriptors(
     }
     build_radial_descriptors_on_device(protocol, atom_count, model, workspace);
   }
-  if (spin_model) {
-    build_spin_descriptors_on_device(
-        protocol, atom_count, box, model, workspace);
-  }
-  if (has_angular) {
-    if (try_build_angular_descriptors_and_ann_from_geometry_on_device(
-            protocol, atom_count, model, workspace)) {
-      return;
-    }
-    build_angular_descriptors_from_geometry_on_device(
-        protocol, atom_count, model, workspace);
-  }
-  evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
 }
 
-void build_batched_descriptors(
+void build_batched_radial_descriptors(
     const ModelProtocol& protocol,
     const ForceEvaluationRequest& request,
     int atom_count,
@@ -75,16 +76,86 @@ void build_batched_descriptors(
     build_radial_basis_cache_on_device(protocol, atom_count, workspace);
   }
   build_radial_descriptors_on_device(protocol, atom_count, model, workspace);
-  if (has_angular &&
-      try_build_angular_descriptors_and_ann_from_geometry_on_device(
-          protocol, atom_count, model, workspace)) {
-    return;
-  }
+}
+
+void finish_angular_descriptors_and_ann(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool has_angular) {
   if (has_angular) {
+    if (try_build_angular_descriptors_and_ann_from_geometry_on_device(
+            protocol, atom_count, model, workspace)) {
+      return;
+    }
     build_angular_descriptors_from_geometry_on_device(
         protocol, atom_count, model, workspace);
   }
   evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
+}
+
+void build_ordinary_descriptors_and_ann(
+    const ModelProtocol& protocol,
+    const ForceEvaluationRequest& request,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool has_angular) {
+  DescriptorCoreOptions options = make_descriptor_options(
+      request,
+      has_angular,
+      DescriptorCoreOutput::ann_energy_and_derivatives);
+  if (try_build_descriptor_core_from_positions_on_device(
+          protocol, atom_count, box, model, workspace, options)) {
+    return;
+  }
+
+  options.output = DescriptorCoreOutput::structural_descriptors;
+  if (try_build_descriptor_core_from_positions_on_device(
+          protocol, atom_count, box, model, workspace, options)) {
+    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
+    return;
+  }
+
+  if (request.topology == ForceNeighborTopology::batched_multi_box) {
+    build_batched_radial_descriptors(
+        protocol, request, atom_count, model, workspace, has_angular);
+  } else {
+    build_staged_radial_descriptors(
+        protocol, atom_count, box, model, workspace, has_angular);
+  }
+  finish_angular_descriptors_and_ann(
+      protocol, atom_count, model, workspace, has_angular);
+}
+
+void build_spin_descriptors_and_ann(
+    const ModelProtocol& protocol,
+    const ForceEvaluationRequest& request,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace,
+    bool has_angular) {
+  DescriptorCoreOptions options = make_descriptor_options(
+      request,
+      has_angular,
+      DescriptorCoreOutput::structural_descriptors);
+  if (try_build_descriptor_core_from_positions_on_device(
+          protocol, atom_count, box, model, workspace, options)) {
+    build_spin_descriptors_on_device(
+        protocol, atom_count, box, model, workspace);
+    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
+    return;
+  }
+
+  build_staged_radial_descriptors(
+      protocol, atom_count, box, model, workspace, has_angular);
+  build_spin_descriptors_on_device(
+      protocol, atom_count, box, model, workspace);
+  finish_angular_descriptors_and_ann(
+      protocol, atom_count, model, workspace, has_angular);
 }
 
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
@@ -130,15 +201,44 @@ class PhaseTimer {
 };
 #endif
 
-void run_force_pipeline(
+VirialTarget select_virial_target(
+    const ForceEvaluationRequest& request,
+    bool allow_float_sink) {
+  switch (request.virial) {
+    case VirialOutputMode::none:
+      return VirialTarget::none;
+    case VirialOutputMode::total_only:
+      return VirialTarget::center_atom;
+    case VirialOutputMode::per_atom_n2:
+      if (allow_float_sink &&
+          request.topology == ForceNeighborTopology::external_full) {
+        return VirialTarget::neighbor_float_sink;
+      }
+      return VirialTarget::neighbor_atom;
+  }
+  throw std::invalid_argument("invalid virial output mode");
+}
+
+VirialTarget select_zbl_virial_target(
+    VirialTarget target,
+    bool accumulate_energy_virial) {
+  if (!accumulate_energy_virial) {
+    return VirialTarget::none;
+  }
+  return virial_targets_neighbor(target)
+      ? VirialTarget::neighbor_atom
+      : VirialTarget::center_atom;
+}
+
+void execute_force_pipeline(
     const ModelProtocol& protocol,
     const ForceEvaluationRequest& request,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool spin_model,
     ForcePipelineTimings* timings) {
+  const bool spin_model = protocol.spin_mode != 0;
   const bool has_angular = has_angular_terms(protocol);
   ForcePipelineTimings ignored_timings;
   ForcePipelineTimings& measured =
@@ -150,48 +250,24 @@ void run_force_pipeline(
         "spin execution pipeline does not support batched neighbor topology");
   }
 
-  DescriptorCoreOptions descriptor_options;
-  descriptor_options.topology =
-      request.topology == ForceNeighborTopology::batched_multi_box
-          ? DescriptorCoreTopology::batched_multi_box
-          : DescriptorCoreTopology::single_box;
-  descriptor_options.has_angular = has_angular;
-  descriptor_options.store_potential = request.store_potential;
-
-  bool descriptor_phase_done = false;
-  if (!spin_model) {
-    descriptor_options.output =
-        DescriptorCoreOutput::ann_energy_and_derivatives;
-    descriptor_phase_done = try_build_descriptor_core_from_positions_on_device(
-        protocol, atom_count, box, model, workspace, descriptor_options);
-  }
-  if (!descriptor_phase_done) {
-    descriptor_options.output = DescriptorCoreOutput::structural_descriptors;
-    if (try_build_descriptor_core_from_positions_on_device(
-            protocol, atom_count, box, model, workspace, descriptor_options)) {
-      if (spin_model) {
-        build_spin_descriptors_on_device(
-            protocol, atom_count, box, model, workspace);
-      }
-      evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-    } else if (request.topology == ForceNeighborTopology::batched_multi_box) {
-      build_batched_descriptors(
-          protocol, request, atom_count, model, workspace, has_angular);
-    } else {
-      build_staged_position_descriptors(
-          protocol, atom_count, box, model, workspace, has_angular, spin_model);
-    }
+  if (spin_model) {
+    build_spin_descriptors_and_ann(
+        protocol, request, atom_count, box, model, workspace, has_angular);
+  } else {
+    build_ordinary_descriptors_and_ann(
+        protocol, request, atom_count, box, model, workspace, has_angular);
   }
   timer.split(measured.descriptor_ann_ms);
 
-  const bool accumulate_virial = requests_virial(request);
-  const bool virial_to_neighbor = requests_per_atom_virial(request);
-  const bool use_per_atom_sink = !spin_model && virial_to_neighbor &&
-      request.topology == ForceNeighborTopology::external_full;
-  const bool zbl_outputs = request.store_potential || accumulate_virial;
+  const VirialTarget virial_target =
+      select_virial_target(request, !spin_model);
+  const bool use_per_atom_sink =
+      virial_target == VirialTarget::neighbor_float_sink;
+  const bool zbl_outputs =
+      request.store_potential || accumulates_virial(virial_target);
   const bool fuse_radial_zbl =
       request.topology == ForceNeighborTopology::single_box_symmetric &&
-      protocol.has_zbl && !zbl_outputs && !virial_to_neighbor;
+      protocol.has_zbl && !zbl_outputs;
   if (fuse_radial_zbl) {
     accumulate_radial_and_zbl_forces_on_device(
         protocol, atom_count, box, model, workspace);
@@ -206,7 +282,7 @@ void run_force_pipeline(
             atom_count,
             model,
             workspace,
-            virial_to_neighbor);
+            virial_target);
         break;
       case ForceNeighborTopology::single_box_symmetric:
         accumulate_radial_forces_on_device(
@@ -215,24 +291,17 @@ void run_force_pipeline(
             box,
             model,
             workspace,
-            accumulate_virial,
-            true,
-            virial_to_neighbor);
+            virial_target,
+            true);
         break;
       case ForceNeighborTopology::external_full:
-        if (use_per_atom_sink) {
-          accumulate_lammps_radial_forces_to_per_atom_sink(
-              protocol, atom_count, box, model, workspace);
-        } else {
-          accumulate_lammps_radial_forces_on_device(
-              protocol,
-              atom_count,
-              box,
-              model,
-              workspace,
-              accumulate_virial,
-              virial_to_neighbor);
-        }
+        accumulate_lammps_radial_forces_on_device(
+            protocol,
+            atom_count,
+            box,
+            model,
+            workspace,
+            virial_target);
         break;
     }
   }
@@ -245,10 +314,7 @@ void run_force_pipeline(
           atom_count,
           model,
           workspace,
-          virial_to_neighbor);
-    } else if (use_per_atom_sink) {
-      accumulate_l2_angular_forces_to_per_atom_sink(
-          protocol, atom_count, box, model, workspace);
+          virial_target);
     } else {
       accumulate_l2_angular_forces_on_device(
           protocol,
@@ -256,8 +322,7 @@ void run_force_pipeline(
           box,
           model,
           workspace,
-          accumulate_virial,
-          virial_to_neighbor);
+          virial_target);
     }
   }
   if (use_per_atom_sink) {
@@ -272,7 +337,7 @@ void run_force_pipeline(
           atom_count,
           model,
           workspace,
-          virial_to_neighbor);
+          select_zbl_virial_target(virial_target, zbl_outputs));
     } else {
       accumulate_zbl_forces_on_device(
           protocol,
@@ -281,7 +346,7 @@ void run_force_pipeline(
           model,
           workspace,
           zbl_outputs,
-          virial_to_neighbor);
+          select_zbl_virial_target(virial_target, zbl_outputs));
     }
   }
   timer.split(measured.zbl_force_ms);
@@ -294,8 +359,8 @@ void run_force_pipeline(
         box,
         model,
         workspace,
-        accumulate_virial,
-        virial_to_neighbor,
+        accumulates_virial(virial_target),
+        virial_targets_neighbor(virial_target),
         timings == nullptr ? nullptr : &spin_timings);
     measured.spin_onsite_ms = spin_timings.onsite_ms;
     measured.spin_scalar_ms = spin_timings.scalar_ms;
@@ -306,7 +371,7 @@ void run_force_pipeline(
 
 }  // namespace
 
-void run_nonspin_pipeline(
+void run_force_pipeline(
     const ModelProtocol& protocol,
     const ForceEvaluationRequest& request,
     int atom_count,
@@ -314,25 +379,9 @@ void run_nonspin_pipeline(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     ForcePipelineTimings* timings) {
-  require_ordinary_model(protocol);
-  run_force_pipeline(
-      protocol, request, atom_count, box, model, workspace, false, timings);
-}
-
-void run_spin_pipeline(
-    const ModelProtocol& protocol,
-    const ForceEvaluationRequest& request,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    ForcePipelineTimings* timings) {
-  if (protocol.spin_mode == 0 || protocol.charge_mode != 0) {
-    throw std::invalid_argument(
-        "spin execution pipeline accepts spin models without charge only");
-  }
-  run_force_pipeline(
-      protocol, request, atom_count, box, model, workspace, true, timings);
+  require_supported_model(protocol);
+  execute_force_pipeline(
+      protocol, request, atom_count, box, model, workspace, timings);
 }
 
 }  // namespace nep_adapters::cuda_backend

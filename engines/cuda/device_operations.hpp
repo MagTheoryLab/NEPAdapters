@@ -17,6 +17,24 @@ struct LammpsDeviceNeighborCounts {
   int max_angular = 0;
 };
 
+// Internal virial placement used by force launchers. Model/output decisions
+// are made by force_pipeline; kernels only receive the placement they need.
+enum class VirialTarget {
+  none,
+  center_atom,
+  neighbor_atom,
+  neighbor_float_sink,
+};
+
+constexpr bool accumulates_virial(VirialTarget target) {
+  return target != VirialTarget::none;
+}
+
+constexpr bool virial_targets_neighbor(VirialTarget target) {
+  return target == VirialTarget::neighbor_atom ||
+         target == VirialTarget::neighbor_float_sink;
+}
+
 #if defined(__CUDACC__)
 template <typename T>
 __device__ __forceinline__ T warp_sum_equal_atom(
@@ -286,9 +304,8 @@ void accumulate_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial = true,
-    bool clear_outputs = true,
-    bool virial_to_neighbor = false);
+    VirialTarget virial_target = VirialTarget::center_atom,
+    bool clear_outputs = true);
 
 void accumulate_lammps_radial_forces_on_device(
     const ModelProtocol& protocol,
@@ -296,15 +313,7 @@ void accumulate_lammps_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial = true,
-    bool virial_to_neighbor = false);
-
-void accumulate_lammps_radial_forces_to_per_atom_sink(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void accumulate_radial_and_zbl_forces_on_device(
     const ModelProtocol& protocol,
@@ -318,7 +327,7 @@ void accumulate_radial_forces_batched(
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor = false);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void accumulate_l2_angular_forces_on_device(
     const ModelProtocol& protocol,
@@ -326,22 +335,14 @@ void accumulate_l2_angular_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial = true,
-    bool virial_to_neighbor = false);
-
-void accumulate_l2_angular_forces_to_per_atom_sink(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void accumulate_l2_angular_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor = false);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void accumulate_zbl_forces_on_device(
     const ModelProtocol& protocol,
@@ -350,14 +351,14 @@ void accumulate_zbl_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     bool accumulate_energy_virial = true,
-    bool virial_to_neighbor = false);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void accumulate_zbl_forces_batched(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor = false);
+    VirialTarget virial_target = VirialTarget::center_atom);
 
 void prepare_lammps_per_atom_virial_sink(
     int atom_count,

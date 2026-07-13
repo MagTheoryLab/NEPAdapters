@@ -1,4 +1,4 @@
-#include "workspace_plan.hpp"
+#include "device_workspace.hpp"
 
 #include <stdexcept>
 

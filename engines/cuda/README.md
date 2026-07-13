@@ -9,7 +9,9 @@ The directory is organized around a small orchestration interface and separate
 CUDA compilation units:
 
 - `cuda_engine.cpp` owns the engine interface and caller-specific staging.
-- `force_pipeline.*` owns the complete ordinary and spin force dataflow.
+- `force_pipeline.*` owns the complete force dataflow behind one model-driven
+  interface. Callers provide topology and requested outputs; ordinary/spin
+  selection, ZBL composition, and virial placement stay inside the module.
 - `device_operations.hpp` is the single private interface for device staging,
   neighbor construction, descriptors, ANN evaluation, forces, and output.
   Individual `.cu` files remain separate CUDA compilation units; they are not
@@ -21,9 +23,12 @@ CUDA compilation units:
   descriptor dimension is computed from `n_max` plus the newer `l_max ...
   has_q_*` body-channel flags rather than inferred from the `ANN` line.
 - `model_protocol.*` owns protocol parsing and parameter counts.
-  `model_parameters.*` owns host-side parameter packing. `workspace_plan.*`
-  owns high-level device buffer sizing and names. Kernel code should depend on
-  these internal contracts instead of re-parsing text or duplicating size math.
+  `device_model.hpp` groups the model interface; `model_parameters.cpp` and
+  `device_model.cu` implement its host-packing and device-upload halves.
+  `device_workspace.hpp` groups planning, allocation, and view interfaces;
+  `workspace_plan.cpp` and `device_workspace.cu` implement those two halves.
+  Kernel code should depend on these internal contracts instead of re-parsing
+  text or duplicating size math.
 - Parameters are split for future cache locality: `ann_type_major` keeps each
   element type's W0/B0/W1 block contiguous, descriptor coefficients keep radial
   and angular coefficient regions contiguous, and `q_scaler` is uploaded as its
@@ -85,9 +90,9 @@ CUDA compilation units:
   `descriptors` as `atom + atom_capacity * descriptor_index`; the first device
   test covers the same coefficient indexing used by torchnep:
   `(n * (basis_size_radial + 1) + k) * num_type_pairs + type_pair`.
-- Angular basis caching starts in `angular_basis_cache.cu` and mirrors the
-  radial cache layout with `r12_angular`, `fc_angular`, and `fn_angular`.
-- Angular descriptor accumulation lives in `angular_descriptor.cu`. It covers
+- Angular basis caching and descriptor accumulation live together in
+  `angular_descriptor.cu`; the cache mirrors the radial layout with
+  `r12_angular`, `fc_angular`, and `fn_angular`. The descriptor path covers
   ordinary 3-body channels through `L=4` plus the current high-body flags
   `q222`, `q1111`, `q112`, `q123`, `q233`, and `q134`; `sum_fxyz` is staged as
   `atom + atom_capacity * (n * abc_count + abc)` for the later force path.
@@ -111,18 +116,20 @@ CUDA compilation units:
   finite-difference energy/force tests. The direct batch path runs these
   angular and high-body force channels through the same batched workspace used
   by radial/ZBL execution.
-- Batched result preparation lives in `batch_output.cu`. It keeps CUDA backend
-  reductions and layout conversion on the GPU: per-atom forces are packed from
-  SoA to the public AoS layout, per-atom virials are converted to public
-  row-major order, and per-structure energy/virial are reduced before the final
-  public host-result copy.
+- Device result preparation lives in `device_output.cu`. It keeps both batched
+  and LAMMPS reductions/layout conversion on the GPU: per-atom forces are
+  packed from SoA to the public layout, virial order is converted at the output
+  seam, and requested totals are reduced before copyback.
 - The local LAMMPS Kokkos source uses `X_FLOAT*[3]` coordinate views accessed as
   `x(i,0..2)` and Kokkos neighbor views accessed as `neighbors(i,j)`, with layout
   controlled by Kokkos/LAMMPS build macros. A future Kokkos frontend can pass
   device views more directly, but the host-neighbor API should continue to stage
   into this engine-owned execution layout.
-- Ordinary and spin execution use explicit pipelines. Charge-specific device
-  operations remain isolated from both in `qnep_charge.cu`.
+- Ordinary and spin execution share the one `force_pipeline` interface while
+  keeping their implementation stages private. Charge-specific device
+  operations remain isolated in `qnep_charge.cu`; a future charge integration
+  can compose the same structural and short-range stages without changing the
+  caller interface.
 - `find_force_batch` validates the host batch contract and supports the
   device path described above. Other ordinary NEP shapes still return
   `NEPA_STATUS_UNSUPPORTED` until their force paths are verified.

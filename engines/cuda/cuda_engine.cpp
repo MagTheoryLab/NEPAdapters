@@ -5,7 +5,6 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
-#include "model_parameters.hpp"
 #include "force_pipeline.hpp"
 #endif
 
@@ -88,6 +87,16 @@ nep_adapters::cuda_backend::ForceEvaluationRequest make_force_evaluation_request
   request.orthorhombic_batched = orthorhombic_batched;
   request.store_potential = store_potential;
   return request;
+}
+
+nep_adapters::cuda_backend::VirialTarget select_fp64_virial_target(
+    bool virial_requested,
+    bool per_atom_requested) {
+  using nep_adapters::cuda_backend::VirialTarget;
+  if (per_atom_requested) {
+    return VirialTarget::neighbor_atom;
+  }
+  return virial_requested ? VirialTarget::center_atom : VirialTarget::none;
 }
 
 int env_int(const char* name, int fallback) {
@@ -565,7 +574,7 @@ class CudaModel : public nep_adapters::Model {
             true,
             result.virials_per_atom_row_major9 != nullptr,
             orthorhombic_fast_path);
-        nep_adapters::cuda_backend::run_nonspin_pipeline(
+        nep_adapters::cuda_backend::run_force_pipeline(
             protocol_,
             force_request,
             batch.total_atoms,
@@ -671,7 +680,7 @@ class CudaModel : public nep_adapters::Model {
               true,
               true,
               result.virials_per_atom_row_major9 != nullptr);
-          nep_adapters::cuda_backend::run_spin_pipeline(
+          nep_adapters::cuda_backend::run_force_pipeline(
               protocol_,
               force_request,
               atom_count,
@@ -700,15 +709,17 @@ class CudaModel : public nep_adapters::Model {
               protocol_,
               atom_count,
               workspace);
+          const auto charge_virial_target = select_fp64_virial_target(
+              true,
+              result.virials_per_atom_row_major9 != nullptr);
           nep_adapters::cuda_backend::accumulate_radial_forces_on_device(
               protocol_,
               atom_count,
               box,
               device_,
               workspace,
-              true,
-              false,
-              result.virials_per_atom_row_major9 != nullptr);
+              charge_virial_target,
+              false);
           if (has_angular) {
             nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
                 protocol_,
@@ -716,8 +727,7 @@ class CudaModel : public nep_adapters::Model {
                 box,
                 device_,
                 workspace,
-                true,
-                result.virials_per_atom_row_major9 != nullptr);
+                charge_virial_target);
           }
           if (protocol_.has_zbl) {
             nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
@@ -727,7 +737,7 @@ class CudaModel : public nep_adapters::Model {
                 device_,
                 workspace,
                 true,
-                result.virials_per_atom_row_major9 != nullptr);
+                charge_virial_target);
           }
         }
 
@@ -988,23 +998,13 @@ class CudaModel : public nep_adapters::Model {
           true,
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr);
-      if (protocol_.spin_mode != 0) {
-        nep_adapters::cuda_backend::run_spin_pipeline(
-            protocol_,
-            force_request,
-            atom_capacity,
-            box,
-            device_,
-            workspace);
-      } else {
-        nep_adapters::cuda_backend::run_nonspin_pipeline(
-            protocol_,
-            force_request,
-            atom_capacity,
-            box,
-            device_,
-            workspace);
-      }
+      nep_adapters::cuda_backend::run_force_pipeline(
+          protocol_,
+          force_request,
+          atom_capacity,
+          box,
+          device_,
+          workspace);
 
       const std::vector<double> potential =
           copy_device_doubles(view.potential, view.atom_capacity);
@@ -1227,17 +1227,8 @@ class CudaModel : public nep_adapters::Model {
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr);
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
-      if (external_protocol.spin_mode != 0) {
-        nep_adapters::cuda_backend::run_spin_pipeline(
-            external_protocol,
-            force_request,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            profiler.enabled() ? &pipeline_timings : nullptr);
-      } else if (external_protocol.charge_mode == 0) {
-        nep_adapters::cuda_backend::run_nonspin_pipeline(
+      if (external_protocol.charge_mode == 0) {
+        nep_adapters::cuda_backend::run_force_pipeline(
             external_protocol,
             force_request,
             input.nlocal,
@@ -1246,6 +1237,9 @@ class CudaModel : public nep_adapters::Model {
             workspace,
             profiler.enabled() ? &pipeline_timings : nullptr);
       } else {
+        const auto charge_virial_target = select_fp64_virial_target(
+            accumulate_virial,
+            result.virials_per_atom9 != nullptr);
         build_charge_descriptors_and_ann_stage(
             external_protocol,
             input.nlocal,
@@ -1260,8 +1254,7 @@ class CudaModel : public nep_adapters::Model {
             box,
             device_,
             workspace,
-            accumulate_virial,
-            result.virials_per_atom9 != nullptr);
+            charge_virial_target);
         profiler.split(radial_force_ms);
         if (has_angular) {
           nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
@@ -1270,8 +1263,7 @@ class CudaModel : public nep_adapters::Model {
               box,
               device_,
               workspace,
-              accumulate_virial,
-              result.virials_per_atom9 != nullptr);
+              charge_virial_target);
         }
         profiler.split(angular_force_ms);
         if (external_protocol.has_zbl) {
@@ -1282,7 +1274,7 @@ class CudaModel : public nep_adapters::Model {
               device_,
               workspace,
               store_potential || accumulate_virial,
-              result.virials_per_atom9 != nullptr);
+              charge_virial_target);
         }
         profiler.split(zbl_force_ms);
       }

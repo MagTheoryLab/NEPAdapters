@@ -391,7 +391,12 @@ void accumulate_zbl_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     bool accumulate_energy_virial,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
+  require(
+      virial_target != VirialTarget::neighbor_float_sink,
+      "ZBL forces do not support the float virial sink");
+  const bool virial_to_neighbor =
+      virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
   require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
@@ -459,7 +464,13 @@ void accumulate_zbl_forces_batched(
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
+  require(
+      virial_target == VirialTarget::center_atom ||
+          virial_target == VirialTarget::neighbor_atom,
+      "batched ZBL forces require an FP64 virial target");
+  const bool virial_to_neighbor =
+      virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
   require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");

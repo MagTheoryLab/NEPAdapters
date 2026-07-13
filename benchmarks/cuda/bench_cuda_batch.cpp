@@ -5,8 +5,6 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
-#include "model_parameters.hpp"
-#include "workspace_plan.hpp"
 
 #include <cuda_runtime.h>
 #endif

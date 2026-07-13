@@ -3,8 +3,8 @@
 #include "nep_adapters/engines/cuda.hpp"
 
 #include "host_staging.hpp"
-#include "model_parameters.hpp"
-#include "workspace_plan.hpp"
+#include "device_model.hpp"
+#include "device_workspace.hpp"
 
 #include <cmath>
 #include <cstdlib>

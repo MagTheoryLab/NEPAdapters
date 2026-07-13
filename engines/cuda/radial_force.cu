@@ -725,9 +725,14 @@ void accumulate_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial,
-    bool clear_outputs,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target,
+    bool clear_outputs) {
+  require(
+      virial_target != VirialTarget::neighbor_float_sink,
+      "internal radial forces do not support the float virial sink");
+  const bool accumulate_virial = accumulates_virial(virial_target);
+  const bool virial_to_neighbor =
+      virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
@@ -829,8 +834,8 @@ void accumulate_lammps_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
+  const bool accumulate_virial = accumulates_virial(virial_target);
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
@@ -849,6 +854,10 @@ void accumulate_lammps_radial_forces_on_device(
   require(view.force_soa3 != nullptr, "workspace missing force output");
   if (accumulate_virial) {
     require(view.virial_soa9 != nullptr, "workspace missing virial output");
+  }
+  if (virial_target == VirialTarget::neighbor_float_sink) {
+    require(view.per_atom_virial_float_soa9 != nullptr,
+            "workspace missing per-atom virial sink");
   }
   require(model_view.descriptor_coefficients_type_pair_major != nullptr,
           "model missing type-pair-major descriptor coefficients");
@@ -871,10 +880,11 @@ void accumulate_lammps_radial_forces_on_device(
   const int threads = 64;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    const auto launch = [&](auto virial_to_neighbor_tag) {
+    const auto launch = [&](auto virial_to_neighbor_tag, auto float_sink_tag) {
       constexpr bool kVirialToNeighbor =
           decltype(virial_to_neighbor_tag)::value;
-      accumulate_lammps_radial_forces<kVirialToNeighbor, false>
+      constexpr bool kFloatSink = decltype(float_sink_tag)::value;
+      accumulate_lammps_radial_forces<kVirialToNeighbor, kFloatSink>
           <<<blocks, threads>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
@@ -889,87 +899,25 @@ void accumulate_lammps_radial_forces_on_device(
           view.nl_radial_slot_major,
           view.fp,
           model_view.descriptor_coefficients_type_pair_major,
-          nullptr,
+          kFloatSink ? view.per_atom_virial_float_soa9 : nullptr,
           view.force_soa3,
           view.virial_soa9,
           accumulate_virial ? 1 : 0);
     };
-    if (virial_to_neighbor) {
-      launch(std::true_type{});
-    } else {
-      launch(std::false_type{});
+    switch (virial_target) {
+      case VirialTarget::none:
+      case VirialTarget::center_atom:
+        launch(std::false_type{}, std::false_type{});
+        break;
+      case VirialTarget::neighbor_atom:
+        launch(std::true_type{}, std::false_type{});
+        break;
+      case VirialTarget::neighbor_float_sink:
+        launch(std::false_type{}, std::true_type{});
+        break;
     }
   }
   check_cuda(cudaGetLastError(), "accumulate LAMMPS radial forces kernel launch failed");
-}
-
-void accumulate_lammps_radial_forces_to_per_atom_sink(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace) {
-  require(atom_count >= 0, "atom_count must be non-negative");
-  require(protocol.num_types > 0, "num_types must be positive");
-  require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
-  require(protocol.basis_size_radial >= 0,
-          "basis_size_radial must be non-negative");
-  require(protocol.cutoff_radial > 0.0, "radial cutoff must be positive");
-
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView view = workspace.view();
-  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(view.types != nullptr && view.positions_soa3 != nullptr,
-          "workspace missing radial force atom inputs");
-  require(view.nn_radial != nullptr && view.nl_radial_slot_major != nullptr,
-          "workspace missing radial neighbors");
-  require(view.fp != nullptr && view.force_soa3 != nullptr &&
-              view.virial_soa9 != nullptr,
-          "workspace missing radial sink inputs or outputs");
-  require(view.per_atom_virial_float_soa9 != nullptr,
-          "workspace missing per-atom virial sink");
-  require(model_view.descriptor_coefficients_type_pair_major != nullptr,
-          "model missing type-pair-major descriptor coefficients");
-
-  check_cuda(
-      cudaMemset(
-          view.force_soa3,
-          0,
-          view.atom_capacity * 3 * sizeof(double)),
-      "clear force output");
-  check_cuda(
-      cudaMemset(
-          view.virial_soa9,
-          0,
-          view.atom_capacity * 9 * sizeof(double)),
-      "clear virial output");
-
-  const int threads = 64;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    accumulate_lammps_radial_forces<false, true><<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.num_types,
-        protocol.n_max_radial,
-        protocol.basis_size_radial,
-        static_cast<float>(protocol.cutoff_radial),
-        box,
-        view.types,
-        view.positions_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        model_view.descriptor_coefficients_type_pair_major,
-        view.per_atom_virial_float_soa9,
-        view.force_soa3,
-        view.virial_soa9,
-        1);
-  }
-  check_cuda(
-      cudaGetLastError(),
-      "accumulate LAMMPS radial forces to per-atom sink failed");
 }
 
 void accumulate_radial_and_zbl_forces_on_device(
@@ -1052,7 +1000,13 @@ void accumulate_radial_forces_batched(
     int atom_count,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool virial_to_neighbor) {
+    VirialTarget virial_target) {
+  require(
+      virial_target == VirialTarget::center_atom ||
+          virial_target == VirialTarget::neighbor_atom,
+      "batched radial forces require an FP64 virial target");
+  const bool virial_to_neighbor =
+      virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");

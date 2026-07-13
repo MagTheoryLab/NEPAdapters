@@ -1,6 +1,6 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cuda.hpp"
-#include "workspace_plan.hpp"
+#include "device_workspace.hpp"
 
 #include <cuda_runtime.h>
 

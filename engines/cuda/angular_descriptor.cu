@@ -37,6 +37,77 @@ void require(bool condition, const char* message) {
   }
 }
 
+__device__ __forceinline__ void write_zero_angular_basis(
+    int atom_stride,
+    int angular_capacity,
+    int offset,
+    int basis_size,
+    float* fn_angular) {
+  for (int k = 0; k <= basis_size; ++k) {
+    fn_angular[offset + atom_stride * angular_capacity * k] = 0.0f;
+  }
+}
+
+__global__ void build_angular_basis_cache_kernel(
+    int atom_count,
+    int atom_stride,
+    int angular_capacity,
+    int basis_size,
+    float rc,
+    const int* __restrict__ nn_angular,
+    const float* __restrict__ f12x,
+    const float* __restrict__ f12y,
+    const float* __restrict__ f12z,
+    float* __restrict__ r12_angular,
+    float* __restrict__ fc_angular,
+    float* __restrict__ fn_angular) {
+  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+
+  const float rcinv = 1.0f / rc;
+  const int count = nn_angular[atom];
+  for (int slot = 0; slot < angular_capacity; ++slot) {
+    const int offset = atom + atom_stride * slot;
+    if (slot >= count) {
+      r12_angular[offset] = 0.0f;
+      fc_angular[offset] = 0.0f;
+      write_zero_angular_basis(
+          atom_stride, angular_capacity, offset, basis_size, fn_angular);
+      continue;
+    }
+
+    const float dx = f12x[offset];
+    const float dy = f12y[offset];
+    const float dz = f12z[offset];
+    const float r = sqrtf(dx * dx + dy * dy + dz * dz);
+    const float fc = angular_cutoff(rc, rcinv, r);
+    r12_angular[offset] = r;
+    fc_angular[offset] = fc;
+
+    const float x = 2.0f * (r * rcinv - 1.0f) *
+            (r * rcinv - 1.0f) -
+        1.0f;
+    const float half_fc = 0.5f * fc;
+    fn_angular[offset] = fc;
+    if (basis_size >= 1) {
+      fn_angular[offset + atom_stride * angular_capacity] =
+          (x + 1.0f) * half_fc;
+    }
+
+    float t_minus_2 = 1.0f;
+    float t_minus_1 = x;
+    for (int k = 2; k <= basis_size; ++k) {
+      const float t = 2.0f * x * t_minus_1 - t_minus_2;
+      t_minus_2 = t_minus_1;
+      t_minus_1 = t;
+      fn_angular[offset + atom_stride * angular_capacity * k] =
+          (t + 1.0f) * half_fc;
+    }
+  }
+}
+
 __device__ __forceinline__ void accumulate_s_l1(
     float x,
     float y,
@@ -1235,10 +1306,13 @@ __global__ void build_descriptor_core_from_positions(
     float* __restrict__ descriptors,
     double* __restrict__ potential,
     float* __restrict__ fp) {
-  extern __shared__ float radial_basis_sums[];
+  extern __shared__ float shared_storage[];
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   const int radial_basis_size = basis_size_radial + 1;
   const int radial_basis_channels = num_types * radial_basis_size;
+  float* radial_basis_sums = shared_storage;
+  float* ann_hidden_delta =
+      shared_storage + radial_basis_channels * blockDim.x;
   for (int channel = 0; channel < radial_basis_channels; ++channel) {
     radial_basis_sums[channel * blockDim.x + threadIdx.x] = 0.0f;
   }
@@ -1304,10 +1378,8 @@ __global__ void build_descriptor_core_from_positions(
   const int descriptor_count =
       DescriptorDim > 0 ? DescriptorDim : descriptor_dim;
   float q[kDescriptorCapacity];
-  float fp_local[kDescriptorCapacity];
   for (int d = 0; d < descriptor_count; ++d) {
     q[d] = 0.0f;
-    fp_local[d] = 0.0f;
   }
 
   build_structural_descriptor_core<false, HasAngular>(
@@ -1367,10 +1439,10 @@ __global__ void build_descriptor_core_from_positions(
     if constexpr (StorePotential) {
       energy += w1[neuron] * x1;
     }
-    for (int d = 0; d < descriptor_count; ++d) {
-      fp_local[d] += w1[neuron] * tanh_derivative *
-                     w0[neuron * descriptor_dim + d];
-    }
+    // Each neuron row is thread-contiguous and therefore bank-conflict free.
+    // A thread reads back only its own column, so no block barrier is required.
+    ann_hidden_delta[neuron * blockDim.x + threadIdx.x] =
+        w1[neuron] * tanh_derivative;
   }
 
   if constexpr (StorePotential) {
@@ -1378,11 +1450,67 @@ __global__ void build_descriptor_core_from_positions(
     potential[atom] = static_cast<double>(energy - type_bias - b1[0]);
   }
   for (int d = 0; d < descriptor_count; ++d) {
-    fp[atom + atom_stride * d] = fp_local[d];
+    float fp_value = 0.0f;
+    for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
+      fp_value +=
+          ann_hidden_delta[neuron * blockDim.x + threadIdx.x] *
+          w0[neuron * descriptor_dim + d];
+    }
+    fp[atom + atom_stride * d] = fp_value;
   }
 }
 
 }  // namespace
+
+void build_angular_basis_cache_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    DeviceWorkspace& workspace) {
+  require(atom_count >= 0, "atom_count must be non-negative");
+  require(protocol.cutoff_angular > 0.0, "angular cutoff must be positive");
+  require(protocol.basis_size_angular >= 0,
+          "angular basis size must be non-negative");
+  require(protocol.neighbor_capacity_angular > 0,
+          "angular neighbor capacity must be positive");
+
+  const DeviceWorkspaceView view = workspace.view();
+  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
+          "atom_count exceeds workspace atom capacity");
+  require(view.nn_angular != nullptr,
+          "workspace missing angular neighbor counts");
+  require(view.f12x != nullptr && view.f12y != nullptr &&
+              view.f12z != nullptr,
+          "workspace missing angular pair geometry");
+  require(view.r12_angular != nullptr,
+          "workspace missing angular distance cache");
+  require(view.fc_angular != nullptr,
+          "workspace missing angular cutoff cache");
+  require(view.fn_angular != nullptr,
+          "workspace missing angular basis cache");
+
+  const int threads = 128;
+  const int blocks = (atom_count + threads - 1) / threads;
+  if (blocks > 0) {
+    build_angular_basis_cache_kernel<<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.neighbor_capacity_angular,
+        protocol.basis_size_angular,
+        static_cast<float>(protocol.cutoff_angular),
+        view.nn_angular,
+        view.f12x,
+        view.f12y,
+        view.f12z,
+        view.r12_angular,
+        view.fc_angular,
+        view.fn_angular);
+  }
+  check_cuda(
+      cudaGetLastError(),
+      "build angular basis cache kernel launch failed");
+  check_cuda(cudaDeviceSynchronize(),
+             "build angular basis cache kernel failed");
+}
 
 void build_angular_descriptors_on_device(
     const ModelProtocol& protocol,
@@ -1750,19 +1878,27 @@ bool try_build_descriptor_core_from_positions_on_device(
       static_cast<std::size_t>(threads) *
       static_cast<std::size_t>(protocol.num_types) *
       static_cast<std::size_t>(protocol.basis_size_radial + 1) * sizeof(float);
+  const std::size_t ann_hidden_delta_shared_bytes = evaluate_ann
+      ? static_cast<std::size_t>(threads) *
+          static_cast<std::size_t>(protocol.hidden_neurons) * sizeof(float)
+      : 0;
+  const std::size_t shared_bytes =
+      radial_basis_sum_shared_bytes + ann_hidden_delta_shared_bytes;
   const bool needs_shared_memory_optin =
-      radial_basis_sum_shared_bytes > kDefaultDynamicSharedMemoryBytes;
+      shared_bytes > kDefaultDynamicSharedMemoryBytes;
   if (needs_shared_memory_optin) {
     int device = 0;
-    check_cuda(cudaGetDevice(&device), "get CUDA device for radial basis sum");
+    check_cuda(
+        cudaGetDevice(&device),
+        "get CUDA device for descriptor core shared memory");
     cudaDeviceProp device_properties{};
     check_cuda(
         cudaGetDeviceProperties(&device_properties, device),
-        "get CUDA device properties for radial basis sum");
+        "get CUDA device properties for descriptor core shared memory");
     const std::size_t optin_shared_bytes = std::max(
         static_cast<std::size_t>(device_properties.sharedMemPerBlock),
         static_cast<std::size_t>(device_properties.sharedMemPerBlockOptin));
-    if (radial_basis_sum_shared_bytes > optin_shared_bytes) {
+    if (shared_bytes > optin_shared_bytes) {
       return false;
     }
   }
@@ -1788,8 +1924,8 @@ bool try_build_descriptor_core_from_positions_on_device(
                     kBatched,
                     kHasAngular>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                static_cast<int>(radial_basis_sum_shared_bytes)),
-            "configure descriptor core radial basis-sum shared memory");
+                static_cast<int>(shared_bytes)),
+            "configure descriptor core shared memory");
       }
       build_descriptor_core_from_positions<
           kStoreDescriptors,
@@ -1797,7 +1933,7 @@ bool try_build_descriptor_core_from_positions_on_device(
           kDescriptorDim,
           kBatched,
           kHasAngular>
-          <<<blocks, threads, radial_basis_sum_shared_bytes>>>(
+          <<<blocks, threads, shared_bytes>>>(
           atom_count,
           static_cast<int>(workspace_view.atom_capacity),
           protocol.version,
