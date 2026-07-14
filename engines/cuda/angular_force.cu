@@ -42,48 +42,6 @@ __device__ __forceinline__ void find_fc_and_fcp(
   }
 }
 
-__device__ __forceinline__ void find_fn_and_fnp(
-    int n,
-    float rcinv,
-    float r,
-    float fc,
-    float fcp,
-    float& fn,
-    float& fnp) {
-  if (n == 0) {
-    fn = fc;
-    fnp = fcp;
-    return;
-  }
-
-  const float r_scaled = r * rcinv;
-  const float x = 2.0f * (r_scaled - 1.0f) * (r_scaled - 1.0f) - 1.0f;
-  if (n == 1) {
-    fn = (x + 1.0f) * 0.5f;
-    fnp = 2.0f * (r_scaled - 1.0f) * rcinv * fc + fn * fcp;
-    fn *= fc;
-    return;
-  }
-
-  float t0 = 1.0f;
-  float t1 = x;
-  float t2 = x;
-  float u0 = 1.0f;
-  float u1 = 2.0f * x;
-  for (int m = 2; m <= n; ++m) {
-    t2 = 2.0f * x * t1 - t0;
-    t0 = t1;
-    t1 = t2;
-    const float u2 = 2.0f * x * u1 - u0;
-    u0 = u1;
-    u1 = u2;
-  }
-  fn = (t2 + 1.0f) * 0.5f;
-  fnp = n * u0 * 2.0f * (r_scaled - 1.0f) * rcinv;
-  fnp = fnp * fc + fn * fcp;
-  fn *= fc;
-}
-
 __device__ __forceinline__ void add_unit_spherical_derivative_accumulated(
     float gn_scale,
     float gnp_scale,
@@ -831,6 +789,23 @@ __device__ __forceinline__ void accumulate_angular_component(
 // Keep the model-size specialization inside reusable fixed-extent primitives;
 // the pull construction and edge traversal remain one algorithm.
 template <int NCount>
+__device__ __forceinline__ void accumulate_angular_radial_basis(
+    int basis_count,
+    int k,
+    float fn,
+    float fnp,
+    const float* coefficient_pair,
+    float (&gn)[NCount],
+    float (&gnp)[NCount]) {
+#pragma unroll
+  for (int n = 0; n < NCount; ++n) {
+    const float coefficient = coefficient_pair[n * basis_count + k];
+    gn[n] += fn * coefficient;
+    gnp[n] += fnp * coefficient;
+  }
+}
+
+template <int NCount>
 __device__ __forceinline__ void evaluate_angular_radial_response(
     int basis_count,
     float cutoff_angular,
@@ -842,16 +817,39 @@ __device__ __forceinline__ void evaluate_angular_radial_response(
   float fc = 0.0f;
   float fcp = 0.0f;
   find_fc_and_fcp(cutoff_angular, rcinv, r, fc, fcp);
-  for (int k = 0; k < basis_count; ++k) {
-    float fn = 0.0f;
-    float fnp = 0.0f;
-    find_fn_and_fnp(k, rcinv, r, fc, fcp, fn, fnp);
-#pragma unroll
-    for (int n = 0; n < NCount; ++n) {
-      const float coefficient = coefficient_pair[n * basis_count + k];
-      gn[n] += fn * coefficient;
-      gnp[n] += fnp * coefficient;
-    }
+  accumulate_angular_radial_basis<NCount>(
+      basis_count, 0, fc, fcp, coefficient_pair, gn, gnp);
+  if (basis_count == 1) {
+    return;
+  }
+
+  const float r_scaled = r * rcinv;
+  const float radial_offset = r_scaled - 1.0f;
+  const float x = 2.0f * radial_offset * radial_offset - 1.0f;
+  float fn = (x + 1.0f) * 0.5f;
+  float fnp = 2.0f * radial_offset * rcinv * fc + fn * fcp;
+  fn *= fc;
+  accumulate_angular_radial_basis<NCount>(
+      basis_count, 1, fn, fnp, coefficient_pair, gn, gnp);
+
+  float t0 = 1.0f;
+  float t1 = x;
+  float u0 = 1.0f;
+  float u1 = 2.0f * x;
+  for (int k = 2; k < basis_count; ++k) {
+    const float t2 = 2.0f * x * t1 - t0;
+    fn = (t2 + 1.0f) * 0.5f;
+    fnp = k * u1 * 2.0f * radial_offset * rcinv;
+    fnp = fnp * fc + fn * fcp;
+    fn *= fc;
+    accumulate_angular_radial_basis<NCount>(
+        basis_count, k, fn, fnp, coefficient_pair, gn, gnp);
+
+    t0 = t1;
+    t1 = t2;
+    const float u2 = 2.0f * x * u1 - u0;
+    u0 = u1;
+    u1 = u2;
   }
 }
 
