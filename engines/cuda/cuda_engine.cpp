@@ -37,7 +37,8 @@ bool valid_batch(const NepaStructureBatch& batch) {
 }
 
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-bool supports_batch_force(const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+bool supports_cuda_force_protocol(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol) {
   const auto& body = protocol.body_channels;
   return (protocol.version == 4 || protocol.version == 5) &&
          protocol.charge_mode == 0 &&
@@ -52,7 +53,7 @@ bool supports_batch_force(const nep_adapters::cuda_backend::ModelProtocol& proto
 
 bool supports_batched_execution(
     const nep_adapters::cuda_backend::ModelProtocol& protocol) {
-  return supports_batch_force(protocol) && protocol.spin_mode == 0;
+  return supports_cuda_force_protocol(protocol) && protocol.spin_mode == 0;
 }
 
 bool needs_angular_terms(
@@ -75,13 +76,11 @@ nep_adapters::cuda_backend::ForceEvaluationRequest make_force_evaluation_request
     nep_adapters::cuda_backend::ForceNeighborTopology topology,
     bool store_potential,
     bool total_virial_requested,
-    bool per_atom_virial_requested,
-    bool orthorhombic_batched = false) {
+    bool per_atom_virial_requested) {
   nep_adapters::cuda_backend::ForceEvaluationRequest request;
   request.topology = topology;
   request.virial = select_virial_output_mode(
       total_virial_requested, per_atom_virial_requested);
-  request.orthorhombic_batched = orthorhombic_batched;
   request.store_potential = store_potential;
   return request;
 }
@@ -180,7 +179,6 @@ class LammpsDevicePairProfiler {
       float angular_force_ms,
       float zbl_force_ms,
       float spin_onsite_ms,
-      float spin_scalar_ms,
       float spin_density_ms,
       float spin_chiral_ms,
       float output_ms) const {
@@ -189,15 +187,14 @@ class LammpsDevicePairProfiler {
     }
     const float total_ms =
         stage_ms + clear_ms + descriptor_ann_ms + radial_force_ms +
-        angular_force_ms + zbl_force_ms + spin_onsite_ms + spin_scalar_ms +
-        spin_density_ms + spin_chiral_ms + output_ms;
+        angular_force_ms + zbl_force_ms + spin_onsite_ms + spin_density_ms +
+        spin_chiral_ms + output_ms;
     std::fprintf(
         stderr,
         "NEPA_PAIR_PROFILE sample=%d nlocal=%d rebuild=%d "
         "stage_ms=%.3f clear_ms=%.3f descriptor_ann_ms=%.3f "
         "radial_force_ms=%.3f angular_force_ms=%.3f zbl_force_ms=%.3f "
-        "spin_onsite_ms=%.3f spin_scalar_ms=%.3f spin_density_ms=%.3f "
-        "spin_chiral_ms=%.3f "
+        "spin_onsite_ms=%.3f spin_density_ms=%.3f spin_chiral_ms=%.3f "
         "output_ms=%.3f total_ms=%.3f\n",
         sample_,
         nlocal_,
@@ -209,7 +206,6 @@ class LammpsDevicePairProfiler {
         angular_force_ms,
         zbl_force_ms,
         spin_onsite_ms,
-        spin_scalar_ms,
         spin_density_ms,
         spin_chiral_ms,
         output_ms,
@@ -224,40 +220,6 @@ class LammpsDevicePairProfiler {
   cudaEvent_t mark_ = nullptr;
   cudaEvent_t now_ = nullptr;
 };
-
-void build_structural_descriptor_core_stage(
-    const nep_adapters::cuda_backend::ModelProtocol& protocol,
-    int atom_count,
-    const nep_adapters::cuda_backend::SimulationBox& box,
-    const nep_adapters::cuda_backend::DeviceModel& device,
-    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    bool has_angular) {
-  nep_adapters::cuda_backend::DescriptorCoreOptions options;
-  options.topology =
-      nep_adapters::cuda_backend::DescriptorCoreTopology::single_box;
-  options.output =
-      nep_adapters::cuda_backend::DescriptorCoreOutput::structural_descriptors;
-  options.has_angular = has_angular;
-  nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
-      protocol, atom_count, box, device, workspace, options);
-}
-
-void build_charge_descriptors_and_ann_stage(
-    const nep_adapters::cuda_backend::ModelProtocol& protocol,
-    int atom_count,
-    const nep_adapters::cuda_backend::SimulationBox& box,
-    const nep_adapters::cuda_backend::DeviceModel& device,
-    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    bool has_angular) {
-  build_structural_descriptor_core_stage(
-      protocol, atom_count, box, device, workspace, has_angular);
-  nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
-      protocol, atom_count, device, workspace);
-  if (has_angular) {
-    nep_adapters::cuda_backend::build_atom_type_schedule_on_device(
-        protocol, atom_count, workspace);
-  }
-}
 
 int lammps_atom_capacity(const NepaLammpsNeighborInput& input) {
   int atom_capacity = input.nlocal;
@@ -427,7 +389,7 @@ class CudaModel : public nep_adapters::Model {
       out.capabilities |= nep_adapters::to_mask(nep_adapters::Capability::spin);
     }
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-    if (supports_batch_force(protocol_)) {
+    if (supports_cuda_force_protocol(protocol_)) {
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
       out.capabilities |=
@@ -465,7 +427,7 @@ class CudaModel : public nep_adapters::Model {
 
     try {
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-      if (!supports_batch_force(protocol_) && protocol_.charge_mode == 0) {
+      if (!supports_cuda_force_protocol(protocol_) && protocol_.charge_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
       }
       if (protocol_.spin_mode != 0 && batch.spins_aos3 == nullptr) {
@@ -498,8 +460,7 @@ class CudaModel : public nep_adapters::Model {
                 ForceNeighborTopology::batched_multi_box,
             true,
             true,
-            result.virials_per_atom_row_major9 != nullptr,
-            orthorhombic_fast_path);
+            result.virials_per_atom_row_major9 != nullptr);
         nep_adapters::cuda_backend::run_force_pipeline(
             protocol_,
             force_request,
@@ -614,13 +575,19 @@ class CudaModel : public nep_adapters::Model {
               device_,
               workspace);
         } else {
-          build_charge_descriptors_and_ann_stage(
+          nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
               protocol_,
               atom_count,
               box,
               device_,
               workspace,
-              has_angular);
+              nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
+          nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
+              protocol_, atom_count, device_, workspace);
+          if (has_angular) {
+            nep_adapters::cuda_backend::build_atom_type_schedule_on_device(
+                protocol_, atom_count, workspace);
+          }
           nep_adapters::cuda_backend::zero_total_charge_on_device(
               atom_count,
               workspace);
@@ -650,7 +617,6 @@ class CudaModel : public nep_adapters::Model {
             nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
                 protocol_,
                 atom_count,
-                box,
                 device_,
                 workspace,
                 charge_virial_target);
@@ -771,7 +737,7 @@ class CudaModel : public nep_adapters::Model {
     }
     try {
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-      if (!supports_batch_force(protocol_)) {
+      if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
       std::size_t max_structure_atoms = 0;
@@ -818,9 +784,13 @@ class CudaModel : public nep_adapters::Model {
             atom_count,
             box,
             workspace);
-        const bool has_angular = needs_angular_terms(protocol_);
-        build_structural_descriptor_core_stage(
-            protocol_, atom_count, box, device_, workspace, has_angular);
+        nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
+            protocol_,
+            atom_count,
+            box,
+            device_,
+            workspace,
+            nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
         if (protocol_.spin_mode != 0) {
           nep_adapters::cuda_backend::build_spin_descriptors_on_device(
               protocol_,
@@ -875,7 +845,7 @@ class CudaModel : public nep_adapters::Model {
     }
     try {
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-      if (!supports_batch_force(protocol_)) {
+      if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
       const int atom_capacity = lammps_atom_capacity(input);
@@ -1038,7 +1008,7 @@ class CudaModel : public nep_adapters::Model {
 
     try {
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-      if (!supports_batch_force(protocol_)) {
+      if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
       auto padded_capacity = [](std::size_t required) {
@@ -1096,7 +1066,6 @@ class CudaModel : public nep_adapters::Model {
       float angular_force_ms = 0.0f;
       float zbl_force_ms = 0.0f;
       float spin_onsite_ms = 0.0f;
-      float spin_scalar_ms = 0.0f;
       float spin_density_ms = 0.0f;
       float spin_chiral_ms = 0.0f;
       float output_ms = 0.0f;
@@ -1133,75 +1102,28 @@ class CudaModel : public nep_adapters::Model {
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
       }
       profiler.split(clear_ms);
-      const bool has_angular = needs_angular_terms(external_protocol);
       const auto force_request = make_force_evaluation_request(
           nep_adapters::cuda_backend::ForceNeighborTopology::external_full,
           store_potential,
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr);
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
-      if (external_protocol.charge_mode == 0) {
-        nep_adapters::cuda_backend::run_force_pipeline(
-            external_protocol,
-            force_request,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            profiler.enabled() ? &pipeline_timings : nullptr);
-      } else {
-        const auto charge_virial_target = select_fp64_virial_target(
-            accumulate_virial,
-            result.virials_per_atom9 != nullptr);
-        build_charge_descriptors_and_ann_stage(
-            external_protocol,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            has_angular);
-        profiler.split(descriptor_ann_ms);
-        nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
-            external_protocol,
-            input.nlocal,
-            box,
-            device_,
-            workspace,
-            charge_virial_target);
-        profiler.split(radial_force_ms);
-        if (has_angular) {
-          nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
-              external_protocol,
-              input.nlocal,
-              box,
-              device_,
-              workspace,
-              charge_virial_target);
-        }
-        profiler.split(angular_force_ms);
-        if (external_protocol.has_zbl) {
-          nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
-              external_protocol,
-              input.nlocal,
-              box,
-              device_,
-              workspace,
-              store_potential || accumulate_virial,
-              charge_virial_target);
-        }
-        profiler.split(zbl_force_ms);
-      }
-      if (external_protocol.charge_mode == 0) {
-        descriptor_ann_ms = pipeline_timings.descriptor_ann_ms;
-        radial_force_ms = pipeline_timings.radial_force_ms;
-        angular_force_ms = pipeline_timings.angular_force_ms;
-        zbl_force_ms = pipeline_timings.zbl_force_ms;
-        spin_onsite_ms = pipeline_timings.spin_onsite_ms;
-        spin_scalar_ms = pipeline_timings.spin_scalar_ms;
-        spin_density_ms = pipeline_timings.spin_density_ms;
-        spin_chiral_ms = pipeline_timings.spin_chiral_ms;
-        profiler.reset();
-      }
+      nep_adapters::cuda_backend::run_force_pipeline(
+          external_protocol,
+          force_request,
+          input.nlocal,
+          box,
+          device_,
+          workspace,
+          profiler.enabled() ? &pipeline_timings : nullptr);
+      descriptor_ann_ms = pipeline_timings.descriptor_ann_ms;
+      radial_force_ms = pipeline_timings.radial_force_ms;
+      angular_force_ms = pipeline_timings.angular_force_ms;
+      zbl_force_ms = pipeline_timings.zbl_force_ms;
+      spin_onsite_ms = pipeline_timings.spin_onsite_ms;
+      spin_density_ms = pipeline_timings.spin_density_ms;
+      spin_chiral_ms = pipeline_timings.spin_chiral_ms;
+      profiler.reset();
       nep_adapters::cuda_backend::write_lammps_device_outputs(
           input,
           result,
@@ -1215,7 +1137,6 @@ class CudaModel : public nep_adapters::Model {
           angular_force_ms,
           zbl_force_ms,
           spin_onsite_ms,
-          spin_scalar_ms,
           spin_density_ms,
           spin_chiral_ms,
           output_ms);
@@ -1253,8 +1174,6 @@ class CudaModel : public nep_adapters::Model {
             protocol,
             atom_capacity,
             active_atom_capacity,
-            false,
-            needs_angular_terms(protocol) || protocol.spin_mode != 0,
             needs_per_atom_virial_sink));
     lammps_device_workspace_ = std::move(workspace);
     lammps_device_atom_capacity_ = atom_capacity;

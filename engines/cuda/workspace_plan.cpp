@@ -150,14 +150,7 @@ void add_cell_list_arrays(WorkspacePlan& plan) {
 
 void add_execution_scratch(
     WorkspacePlan& plan,
-    const ModelProtocol& protocol,
-    bool include_basis_cache,
-    bool include_angular_vectors) {
-  add_array(
-      plan,
-      "parameters_and_q_scaler",
-      ScalarType::float32,
-      protocol.model_parameter_count + protocol.q_scaler_count);
+    const ModelProtocol& protocol) {
   add_array(
       plan,
       "fp",
@@ -187,64 +180,38 @@ void add_execution_scratch(
         (plan.atom_capacity + kTypeScheduleWindowAtoms - 1) /
             kTypeScheduleWindowAtoms);
   }
-  add_array(
-      plan,
-      "sum_fxyz",
-      ScalarType::float32,
-      plan.atom_capacity * (static_cast<std::size_t>(protocol.n_max_angular) + 1) *
-          static_cast<std::size_t>(protocol.body_channels.abc_count()));
-  add_array(
-      plan,
-      "r12_radial",
-      ScalarType::float32,
-      plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_radial));
-  if (include_basis_cache) {
+  if (protocol.body_channels.channel_count() > 0) {
     add_array(
         plan,
-        "fc_radial",
+        "sum_fxyz",
         ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_radial));
+        plan.atom_capacity *
+            (static_cast<std::size_t>(protocol.n_max_angular) + 1) *
+            static_cast<std::size_t>(protocol.body_channels.abc_count()));
     add_array(
         plan,
-        "fn_radial",
+        "r12_angular",
         ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_radial) *
-            (static_cast<std::size_t>(protocol.basis_size_radial) + 1));
-  }
-  add_array(
-      plan,
-      "r12_angular",
-      ScalarType::float32,
-      plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular));
-  if (include_basis_cache) {
-    add_array(
-        plan,
-        "fc_angular",
-        ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular));
-    add_array(
-        plan,
-        "fn_angular",
-        ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular) *
-            (static_cast<std::size_t>(protocol.basis_size_angular) + 1));
-  }
-  if (include_angular_vectors) {
+        plan.atom_capacity *
+            static_cast<std::size_t>(protocol.neighbor_capacity_angular));
     add_array(
         plan,
         "f12x",
         ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular));
+        plan.atom_capacity *
+            static_cast<std::size_t>(protocol.neighbor_capacity_angular));
     add_array(
         plan,
         "f12y",
         ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular));
+        plan.atom_capacity *
+            static_cast<std::size_t>(protocol.neighbor_capacity_angular));
     add_array(
         plan,
         "f12z",
         ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(protocol.neighbor_capacity_angular));
+        plan.atom_capacity *
+            static_cast<std::size_t>(protocol.neighbor_capacity_angular));
   }
 }
 
@@ -277,12 +244,6 @@ const DeviceArrayPlan* WorkspacePlan::find_array(const std::string& name) const 
     }
   }
   return nullptr;
-}
-
-WorkspacePlan make_workspace_plan(
-    const ModelProtocol& protocol,
-    std::size_t atom_capacity) {
-  return make_internal_neighbor_workspace_plan(protocol, atom_capacity, 1);
 }
 
 WorkspacePlan make_internal_neighbor_workspace_plan(
@@ -329,7 +290,7 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
   add_cell_list_arrays(plan);
   add_array(plan, "structure_cell_offsets", ScalarType::int32, structure_capacity + 1);
   add_array(plan, "structure_cell_dims4", ScalarType::int32, structure_capacity * 4);
-  add_execution_scratch(plan, protocol, true, true);
+  add_execution_scratch(plan, protocol);
 
   return plan;
 }
@@ -338,8 +299,6 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
-    bool include_basis_cache,
-    bool include_angular_vectors,
     bool include_per_atom_virial_sink) {
   if (atom_capacity == 0) {
     throw std::runtime_error("atom_capacity must be positive");
@@ -365,36 +324,11 @@ WorkspacePlan make_external_neighbor_workspace_plan(
       ScalarType::float64,
       7 * ((atom_capacity + kLammpsReductionThreads - 1) /
            kLammpsReductionThreads));
-  add_execution_scratch(
-      plan,
-      protocol,
-      include_basis_cache,
-      include_angular_vectors);
+  add_execution_scratch(plan, protocol);
   if (include_per_atom_virial_sink) {
     add_per_atom_virial_sink_scratch(plan);
   }
 
-  return plan;
-}
-
-WorkspacePlan make_model_workspace_plan(const ModelProtocol& protocol) {
-  WorkspacePlan plan;
-  plan.atom_capacity = 0;
-  add_array(
-      plan,
-      "ann_type_major",
-      ScalarType::float32,
-      protocol.ann_parameter_count);
-  add_array(
-      plan,
-      "descriptor_coefficients",
-      ScalarType::float32,
-      protocol.descriptor_parameter_count);
-  add_array(
-      plan,
-      "q_scaler",
-      ScalarType::float32,
-      protocol.q_scaler_count);
   return plan;
 }
 

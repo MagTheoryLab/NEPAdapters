@@ -183,18 +183,6 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   return *this;
 }
 
-const float* DeviceModel::ann_type_major_device() const {
-  return ann_type_major_device_;
-}
-
-const float* DeviceModel::descriptor_coefficients_device() const {
-  return descriptor_coefficients_device_;
-}
-
-const float* DeviceModel::q_scaler_device() const {
-  return q_scaler_device_;
-}
-
 DeviceModelView DeviceModel::view() const {
   return view_;
 }

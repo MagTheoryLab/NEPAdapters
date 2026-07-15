@@ -88,9 +88,6 @@ class DeviceModel {
   DeviceModel(DeviceModel&& other) noexcept;
   DeviceModel& operator=(DeviceModel&& other) noexcept;
 
-  const float* ann_type_major_device() const;
-  const float* descriptor_coefficients_device() const;
-  const float* q_scaler_device() const;
   DeviceModelView view() const;
   DeviceModelUploadSummary upload_summary() const;
 

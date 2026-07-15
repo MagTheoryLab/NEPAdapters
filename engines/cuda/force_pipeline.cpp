@@ -22,56 +22,6 @@ bool has_angular_terms(const ModelProtocol& protocol) {
   return protocol.body_channels.channel_count() > 0;
 }
 
-DescriptorCoreOptions make_descriptor_options(
-    const ForceEvaluationRequest& request,
-    bool has_angular,
-    DescriptorCoreOutput output) {
-  DescriptorCoreOptions options;
-  options.topology =
-      request.topology == ForceNeighborTopology::batched_multi_box
-          ? DescriptorCoreTopology::batched_multi_box
-          : DescriptorCoreTopology::single_box;
-  options.output = output;
-  options.has_angular = has_angular;
-  options.store_potential = request.store_potential;
-  return options;
-}
-
-void build_ordinary_descriptors_and_ann(
-    const ModelProtocol& protocol,
-    const ForceEvaluationRequest& request,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool has_angular) {
-  const DescriptorCoreOptions options = make_descriptor_options(
-      request,
-      has_angular,
-      DescriptorCoreOutput::ann_energy_and_derivatives);
-  build_descriptor_core_from_positions_on_device(
-      protocol, atom_count, box, model, workspace, options);
-}
-
-void build_spin_descriptors_and_ann(
-    const ModelProtocol& protocol,
-    const ForceEvaluationRequest& request,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool has_angular) {
-  DescriptorCoreOptions options = make_descriptor_options(
-      request,
-      has_angular,
-      DescriptorCoreOutput::structural_descriptors);
-  build_descriptor_core_from_positions_on_device(
-      protocol, atom_count, box, model, workspace, options);
-  build_spin_descriptors_on_device(
-      protocol, atom_count, box, model, workspace);
-  evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-}
-
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 class PhaseTimer {
  public:
@@ -164,13 +114,17 @@ void execute_force_pipeline(
         "spin execution pipeline does not support batched neighbor topology");
   }
 
+  const DescriptorCoreTopology descriptor_topology =
+      request.topology == ForceNeighborTopology::batched_multi_box
+          ? DescriptorCoreTopology::batched_multi_box
+          : DescriptorCoreTopology::single_box;
+  build_descriptor_core_from_positions_on_device(
+      protocol, atom_count, box, model, workspace, descriptor_topology);
   if (spin_model) {
-    build_spin_descriptors_and_ann(
-        protocol, request, atom_count, box, model, workspace, has_angular);
-  } else {
-    build_ordinary_descriptors_and_ann(
-        protocol, request, atom_count, box, model, workspace, has_angular);
+    build_spin_descriptors_on_device(
+        protocol, atom_count, box, model, workspace);
   }
+  evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
   timer.split(measured.descriptor_ann_ms);
 
   const VirialTarget virial_target =
@@ -233,7 +187,6 @@ void execute_force_pipeline(
       accumulate_l2_angular_forces_on_device(
           protocol,
           atom_count,
-          box,
           model,
           workspace,
           virial_target);
@@ -277,7 +230,6 @@ void execute_force_pipeline(
         virial_targets_neighbor(virial_target),
         timings == nullptr ? nullptr : &spin_timings);
     measured.spin_onsite_ms = spin_timings.onsite_ms;
-    measured.spin_scalar_ms = spin_timings.scalar_ms;
     measured.spin_density_ms = spin_timings.density_ms;
     measured.spin_chiral_ms = spin_timings.chiral_ms;
   }

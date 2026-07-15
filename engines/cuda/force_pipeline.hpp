@@ -23,13 +23,8 @@ struct ForceEvaluationRequest {
   ForceNeighborTopology topology =
       ForceNeighborTopology::single_box_symmetric;
   VirialOutputMode virial = VirialOutputMode::total_only;
-  bool orthorhombic_batched = false;
   bool store_potential = true;
 };
-
-constexpr bool requests_virial(const ForceEvaluationRequest& request) {
-  return request.virial != VirialOutputMode::none;
-}
 
 constexpr bool requests_per_atom_virial(
     const ForceEvaluationRequest& request) {
@@ -42,7 +37,6 @@ struct ForcePipelineTimings {
   float angular_force_ms = 0.0f;
   float zbl_force_ms = 0.0f;
   float spin_onsite_ms = 0.0f;
-  float spin_scalar_ms = 0.0f;
   float spin_density_ms = 0.0f;
   float spin_chiral_ms = 0.0f;
 };

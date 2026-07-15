@@ -94,8 +94,6 @@ void set_view_pointer(
     view.structure_cell_dims4 = static_cast<int*>(device);
   } else if (name == "neighbor_overflow") {
     view.neighbor_overflow = static_cast<int*>(device);
-  } else if (name == "parameters_and_q_scaler") {
-    view.parameters_and_q_scaler = static_cast<float*>(device);
   } else if (name == "fp") {
     view.fp = static_cast<float*>(device);
   } else if (name == "charge_derivative") {
@@ -106,18 +104,8 @@ void set_view_pointer(
     view.d_real = static_cast<float*>(device);
   } else if (name == "sum_fxyz") {
     view.sum_fxyz = static_cast<float*>(device);
-  } else if (name == "r12_radial") {
-    view.r12_radial = static_cast<float*>(device);
-  } else if (name == "fc_radial") {
-    view.fc_radial = static_cast<float*>(device);
-  } else if (name == "fn_radial") {
-    view.fn_radial = static_cast<float*>(device);
   } else if (name == "r12_angular") {
     view.r12_angular = static_cast<float*>(device);
-  } else if (name == "fc_angular") {
-    view.fc_angular = static_cast<float*>(device);
-  } else if (name == "fn_angular") {
-    view.fn_angular = static_cast<float*>(device);
   } else if (name == "f12x") {
     view.f12x = static_cast<float*>(device);
   } else if (name == "f12y") {
@@ -242,67 +230,6 @@ void DeviceWorkspace::override_types(int* device_types) {
 
 void DeviceWorkspace::override_positions_soa3(double* device_positions_soa3) {
   view_.positions_soa3 = device_positions_soa3;
-}
-
-void DeviceWorkspace::copy_int_to_device(
-    const std::string& name,
-    const std::vector<int>& host) {
-  Allocation* allocation = find_allocation(name);
-  if (allocation == nullptr || allocation->type != ScalarType::int32 ||
-      allocation->element_count != host.size()) {
-    throw std::runtime_error("int workspace copy shape mismatch: " + name);
-  }
-  check_cuda(
-      cudaMemcpy(
-          allocation->device,
-          host.data(),
-          host.size() * sizeof(int),
-          cudaMemcpyHostToDevice),
-      name.c_str());
-}
-
-void DeviceWorkspace::copy_double_to_device(
-    const std::string& name,
-    const std::vector<double>& host) {
-  Allocation* allocation = find_allocation(name);
-  if (allocation == nullptr || allocation->type != ScalarType::float64 ||
-      allocation->element_count != host.size()) {
-    throw std::runtime_error("double workspace copy shape mismatch: " + name);
-  }
-  check_cuda(
-      cudaMemcpy(
-          allocation->device,
-          host.data(),
-          host.size() * sizeof(double),
-          cudaMemcpyHostToDevice),
-      name.c_str());
-}
-
-void DeviceWorkspace::copy_float_to_device(
-    const std::string& name,
-    const std::vector<float>& host) {
-  Allocation* allocation = find_allocation(name);
-  if (allocation == nullptr || allocation->type != ScalarType::float32 ||
-      allocation->element_count != host.size()) {
-    throw std::runtime_error("float workspace copy shape mismatch: " + name);
-  }
-  check_cuda(
-      cudaMemcpy(
-          allocation->device,
-          host.data(),
-          host.size() * sizeof(float),
-          cudaMemcpyHostToDevice),
-      name.c_str());
-}
-
-DeviceWorkspace::Allocation* DeviceWorkspace::find_allocation(
-    const std::string& name) {
-  for (Allocation& allocation : allocations_) {
-    if (allocation.name == name) {
-      return &allocation;
-    }
-  }
-  return nullptr;
 }
 
 const DeviceWorkspace::Allocation* DeviceWorkspace::find_allocation(

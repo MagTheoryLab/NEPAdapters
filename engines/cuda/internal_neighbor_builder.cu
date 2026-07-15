@@ -626,10 +626,6 @@ __global__ void build_neighbors_from_batched_orthorhombic_cells(
     int* nl_radial_slot_major,
     int* nn_angular,
     int* nl_angular_slot_major,
-    float* r12_radial,
-    float* f12x,
-    float* f12y,
-    float* f12z,
     int* overflow) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
@@ -729,7 +725,6 @@ __global__ void build_neighbors_from_batched_orthorhombic_cells(
             if (radial_count < radial_capacity) {
               const int radial_offset = atom + atom_stride * radial_count;
               nl_radial_slot_major[radial_offset] = neighbor;
-              r12_radial[radial_offset] = static_cast<float>(sqrt(rsq));
             } else {
               atomicExch(overflow, 1);
             }
@@ -739,9 +734,6 @@ __global__ void build_neighbors_from_batched_orthorhombic_cells(
             if (angular_count < angular_capacity) {
               const int angular_offset = atom + atom_stride * angular_count;
               nl_angular_slot_major[angular_offset] = neighbor;
-              f12x[angular_offset] = -dxij;
-              f12y[angular_offset] = -dyij;
-              f12z[angular_offset] = -dzij;
             } else {
               atomicExch(overflow, 1);
             }
@@ -921,11 +913,6 @@ void build_internal_neighbors_batched(
   require(view.nl_radial_slot_major != nullptr, "workspace missing radial neighbors");
   require(view.nn_angular != nullptr, "workspace missing angular counts");
   require(view.nl_angular_slot_major != nullptr, "workspace missing angular neighbors");
-  if (orthorhombic_fast_path) {
-    require(view.r12_radial != nullptr, "workspace missing radial distance cache");
-    require(view.f12x != nullptr && view.f12y != nullptr && view.f12z != nullptr,
-            "workspace missing angular delta cache");
-  }
   require(view.cell_counts != nullptr, "workspace missing cell counts");
   require(view.cell_offsets != nullptr, "workspace missing cell offsets");
   require(view.cell_fill != nullptr, "workspace missing cell fill");
@@ -1086,10 +1073,6 @@ void build_internal_neighbors_batched(
         view.nl_radial_slot_major,
         view.nn_angular,
         view.nl_angular_slot_major,
-        view.r12_radial,
-        view.f12x,
-        view.f12y,
-        view.f12z,
         view.neighbor_overflow);
   } else {
     build_neighbors_from_batched_cells<<<blocks, kBlockSize>>>(

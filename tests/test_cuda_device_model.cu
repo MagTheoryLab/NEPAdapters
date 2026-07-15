@@ -42,39 +42,6 @@ std::vector<int> copy_ints(const int* device, std::size_t count) {
   return actual;
 }
 
-std::vector<float> copy_floats(const float* device, std::size_t count) {
-  std::vector<float> actual(count, 0.0f);
-  const cudaError_t status = cudaMemcpy(
-      actual.data(),
-      device,
-      actual.size() * sizeof(float),
-      cudaMemcpyDeviceToHost);
-  if (status != cudaSuccess) {
-    return {};
-  }
-  return actual;
-}
-
-std::vector<double> copy_doubles(const double* device, std::size_t count) {
-  std::vector<double> actual(count, 0.0);
-  const cudaError_t status = cudaMemcpy(
-      actual.data(),
-      device,
-      actual.size() * sizeof(double),
-      cudaMemcpyDeviceToHost);
-  if (status != cudaSuccess) {
-    return {};
-  }
-  return actual;
-}
-
-double minimum_image_delta(double delta, double length, int pbc) {
-  if (!pbc) {
-    return delta;
-  }
-  return delta - std::nearbyint(delta / length) * length;
-}
-
 bool invert_row_major3(const double* matrix, double* inverse) {
   const double det =
       matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
@@ -173,97 +140,6 @@ std::vector<std::vector<int>> brute_force_neighbors(
   return neighbors;
 }
 
-std::vector<std::vector<int>> brute_force_neighbors(
-    const std::vector<double>& positions_aos3,
-    double cutoff,
-    double lx,
-    double ly,
-    double lz,
-    int pbc_x,
-    int pbc_y,
-    int pbc_z) {
-  const int atom_count = static_cast<int>(positions_aos3.size() / 3);
-  std::vector<std::vector<int>> neighbors(static_cast<std::size_t>(atom_count));
-  const double cutoff_sq = cutoff * cutoff;
-  for (int i = 0; i < atom_count; ++i) {
-    for (int j = 0; j < atom_count; ++j) {
-      if (i == j) {
-        continue;
-      }
-      double dx = positions_aos3[3 * static_cast<std::size_t>(i)] -
-                  positions_aos3[3 * static_cast<std::size_t>(j)];
-      double dy = positions_aos3[3 * static_cast<std::size_t>(i) + 1] -
-                  positions_aos3[3 * static_cast<std::size_t>(j) + 1];
-      double dz = positions_aos3[3 * static_cast<std::size_t>(i) + 2] -
-                  positions_aos3[3 * static_cast<std::size_t>(j) + 2];
-      dx = minimum_image_delta(dx, lx, pbc_x);
-      dy = minimum_image_delta(dy, ly, pbc_y);
-      dz = minimum_image_delta(dz, lz, pbc_z);
-      if (dx * dx + dy * dy + dz * dz < cutoff_sq) {
-        neighbors[static_cast<std::size_t>(i)].push_back(j);
-      }
-    }
-    std::sort(
-        neighbors[static_cast<std::size_t>(i)].begin(),
-        neighbors[static_cast<std::size_t>(i)].end());
-  }
-  return neighbors;
-}
-
-std::vector<double> minimum_image_delta_aos3(
-    const std::vector<double>& positions_aos3,
-    int center,
-    int neighbor,
-    double lx,
-    double ly,
-    double lz,
-    int pbc_x,
-    int pbc_y,
-    int pbc_z) {
-  double dx = positions_aos3[3 * static_cast<std::size_t>(neighbor)] -
-              positions_aos3[3 * static_cast<std::size_t>(center)];
-  double dy = positions_aos3[3 * static_cast<std::size_t>(neighbor) + 1] -
-              positions_aos3[3 * static_cast<std::size_t>(center) + 1];
-  double dz = positions_aos3[3 * static_cast<std::size_t>(neighbor) + 2] -
-              positions_aos3[3 * static_cast<std::size_t>(center) + 2];
-  dx = minimum_image_delta(dx, lx, pbc_x);
-  dy = minimum_image_delta(dy, ly, pbc_y);
-  dz = minimum_image_delta(dz, lz, pbc_z);
-  return {dx, dy, dz};
-}
-
-bool close_float(float lhs, double rhs) {
-  const double scale = std::max(1.0, std::abs(rhs));
-  return std::abs(static_cast<double>(lhs) - rhs) < 1.0e-5 * scale;
-}
-
-float radial_cutoff(float rc, float r) {
-  if (r >= rc) {
-    return 0.0f;
-  }
-  return 0.5f * std::cos(3.1415927f * r / rc) + 0.5f;
-}
-
-std::vector<float> radial_basis_values(float rc, int basis_size, float r) {
-  std::vector<float> values(static_cast<std::size_t>(basis_size) + 1, 0.0f);
-  const float fc = radial_cutoff(rc, r);
-  const float rcinv = 1.0f / rc;
-  const float x = 2.0f * (r * rcinv - 1.0f) * (r * rcinv - 1.0f) - 1.0f;
-  values[0] = fc;
-  if (basis_size >= 1) {
-    values[1] = (x + 1.0f) * 0.5f * fc;
-  }
-  float t_minus_2 = 1.0f;
-  float t_minus_1 = x;
-  for (int k = 2; k <= basis_size; ++k) {
-    const float t = 2.0f * x * t_minus_1 - t_minus_2;
-    t_minus_2 = t_minus_1;
-    t_minus_1 = t;
-    values[static_cast<std::size_t>(k)] = (t + 1.0f) * 0.5f * fc;
-  }
-  return values;
-}
-
 bool neighbor_sets_match(
     const std::vector<int>& counts,
     const std::vector<int>& slot_major_neighbors,
@@ -285,705 +161,6 @@ bool neighbor_sets_match(
     std::sort(actual.begin(), actual.end());
     if (actual != expected[atom]) {
       return false;
-    }
-  }
-  return true;
-}
-
-bool geometry_cache_matches(
-    const std::vector<double>& positions_aos3,
-    const std::vector<int>& radial_counts,
-    const std::vector<int>& radial_neighbors,
-    const std::vector<float>& r12_radial,
-    const std::vector<int>& angular_counts,
-    const std::vector<int>& angular_neighbors,
-    const std::vector<float>& f12x,
-    const std::vector<float>& f12y,
-    const std::vector<float>& f12z,
-    int atom_stride,
-    double lx,
-    double ly,
-    double lz,
-    int pbc_x,
-    int pbc_y,
-    int pbc_z) {
-  const int atom_count = static_cast<int>(positions_aos3.size() / 3);
-  for (int atom = 0; atom < atom_count; ++atom) {
-    for (int slot = 0; slot < radial_counts[static_cast<std::size_t>(atom)]; ++slot) {
-      const int neighbor =
-          radial_neighbors[static_cast<std::size_t>(atom + atom_stride * slot)];
-      const std::vector<double> delta = minimum_image_delta_aos3(
-          positions_aos3,
-          atom,
-          neighbor,
-          lx,
-          ly,
-          lz,
-          pbc_x,
-          pbc_y,
-          pbc_z);
-      const double r = std::sqrt(
-          delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-      if (!close_float(r12_radial[static_cast<std::size_t>(atom + atom_stride * slot)], r)) {
-        return false;
-      }
-    }
-    for (int slot = 0; slot < angular_counts[static_cast<std::size_t>(atom)]; ++slot) {
-      const int neighbor =
-          angular_neighbors[static_cast<std::size_t>(atom + atom_stride * slot)];
-      const std::vector<double> delta = minimum_image_delta_aos3(
-          positions_aos3,
-          atom,
-          neighbor,
-          lx,
-          ly,
-          lz,
-          pbc_x,
-          pbc_y,
-          pbc_z);
-      const std::size_t offset = static_cast<std::size_t>(atom + atom_stride * slot);
-      if (!close_float(f12x[offset], delta[0]) ||
-          !close_float(f12y[offset], delta[1]) ||
-          !close_float(f12z[offset], delta[2])) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-bool geometry_cache_matches(
-    const std::vector<double>& positions_aos3,
-    const std::vector<int>& radial_counts,
-    const std::vector<int>& radial_neighbors,
-    const std::vector<float>& r12_radial,
-    const std::vector<int>& angular_counts,
-    const std::vector<int>& angular_neighbors,
-    const std::vector<float>& f12x,
-    const std::vector<float>& f12y,
-    const std::vector<float>& f12z,
-    int atom_stride,
-    const nep_adapters::cuda_backend::SimulationBox& box) {
-  const int atom_count = static_cast<int>(positions_aos3.size() / 3);
-  for (int atom = 0; atom < atom_count; ++atom) {
-    for (int slot = 0; slot < radial_counts[static_cast<std::size_t>(atom)]; ++slot) {
-      const int neighbor =
-          radial_neighbors[static_cast<std::size_t>(atom + atom_stride * slot)];
-      const std::vector<double> delta =
-          minimum_image_delta_aos3(positions_aos3, atom, neighbor, box);
-      const double r = std::sqrt(
-          delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-      if (!close_float(r12_radial[static_cast<std::size_t>(atom + atom_stride * slot)], r)) {
-        return false;
-      }
-    }
-    for (int slot = 0; slot < angular_counts[static_cast<std::size_t>(atom)]; ++slot) {
-      const int neighbor =
-          angular_neighbors[static_cast<std::size_t>(atom + atom_stride * slot)];
-      const std::vector<double> delta =
-          minimum_image_delta_aos3(positions_aos3, atom, neighbor, box);
-      const std::size_t offset = static_cast<std::size_t>(atom + atom_stride * slot);
-      if (!close_float(f12x[offset], delta[0]) ||
-          !close_float(f12y[offset], delta[1]) ||
-          !close_float(f12z[offset], delta[2])) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-bool radial_basis_cache_matches(
-    const std::vector<int>& radial_counts,
-    const std::vector<int>& radial_neighbors,
-    const std::vector<float>& r12_radial,
-    const std::vector<float>& fc_radial,
-    const std::vector<float>& fn_radial,
-    int atom_count,
-    int atom_stride,
-    int radial_capacity,
-    int basis_size,
-    float cutoff) {
-  for (int atom = 0; atom < atom_count; ++atom) {
-    for (int slot = 0; slot < radial_capacity; ++slot) {
-      const std::size_t slot_offset =
-          static_cast<std::size_t>(atom + atom_stride * slot);
-      if (slot >= radial_counts[static_cast<std::size_t>(atom)]) {
-        if (fc_radial[slot_offset] != 0.0f) {
-          return false;
-        }
-        for (int k = 0; k <= basis_size; ++k) {
-          const std::size_t basis_offset = static_cast<std::size_t>(
-              atom + atom_stride * (slot + radial_capacity * k));
-          if (fn_radial[basis_offset] != 0.0f) {
-            return false;
-          }
-        }
-        continue;
-      }
-
-      if (radial_neighbors[slot_offset] < 0) {
-        return false;
-      }
-      const float r = r12_radial[slot_offset];
-      const float fc = radial_cutoff(cutoff, r);
-      if (!close_float(fc_radial[slot_offset], fc)) {
-        return false;
-      }
-      const std::vector<float> fn = radial_basis_values(cutoff, basis_size, r);
-      for (int k = 0; k <= basis_size; ++k) {
-        const std::size_t basis_offset = static_cast<std::size_t>(
-            atom + atom_stride * (slot + radial_capacity * k));
-        if (!close_float(fn_radial[basis_offset], fn[static_cast<std::size_t>(k)])) {
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-bool angular_basis_cache_matches(
-    const std::vector<int>& angular_counts,
-    const std::vector<float>& f12x,
-    const std::vector<float>& f12y,
-    const std::vector<float>& f12z,
-    const std::vector<float>& r12_angular,
-    const std::vector<float>& fc_angular,
-    const std::vector<float>& fn_angular,
-    int atom_count,
-    int atom_stride,
-    int angular_capacity,
-    int basis_size,
-    float cutoff) {
-  for (int atom = 0; atom < atom_count; ++atom) {
-    for (int slot = 0; slot < angular_capacity; ++slot) {
-      const std::size_t slot_offset =
-          static_cast<std::size_t>(atom + atom_stride * slot);
-      if (slot >= angular_counts[static_cast<std::size_t>(atom)]) {
-        if (r12_angular[slot_offset] != 0.0f || fc_angular[slot_offset] != 0.0f) {
-          std::fprintf(stderr, "unused angular basis mismatch atom=%d slot=%d\n", atom, slot);
-          return false;
-        }
-        for (int k = 0; k <= basis_size; ++k) {
-          const std::size_t basis_offset = static_cast<std::size_t>(
-              atom + atom_stride * (slot + angular_capacity * k));
-          if (fn_angular[basis_offset] != 0.0f) {
-            std::fprintf(stderr, "unused angular fn mismatch atom=%d slot=%d k=%d\n", atom, slot, k);
-            return false;
-          }
-        }
-        continue;
-      }
-
-      const float r = std::sqrt(
-          f12x[slot_offset] * f12x[slot_offset] +
-          f12y[slot_offset] * f12y[slot_offset] +
-          f12z[slot_offset] * f12z[slot_offset]);
-      const float fc = radial_cutoff(cutoff, r);
-      if (!close_float(r12_angular[slot_offset], r) ||
-          !close_float(fc_angular[slot_offset], fc)) {
-        std::fprintf(
-            stderr,
-            "angular basis scalar mismatch atom=%d slot=%d r=%g actual_r=%g fc=%g actual_fc=%g\n",
-            atom,
-            slot,
-            static_cast<double>(r),
-            static_cast<double>(r12_angular[slot_offset]),
-            static_cast<double>(fc),
-            static_cast<double>(fc_angular[slot_offset]));
-        return false;
-      }
-      const std::vector<float> fn = radial_basis_values(cutoff, basis_size, r);
-      for (int k = 0; k <= basis_size; ++k) {
-        const std::size_t basis_offset = static_cast<std::size_t>(
-            atom + atom_stride * (slot + angular_capacity * k));
-        if (!close_float(fn_angular[basis_offset], fn[static_cast<std::size_t>(k)])) {
-          std::fprintf(
-              stderr,
-              "angular fn mismatch atom=%d slot=%d k=%d expected=%g actual=%g\n",
-              atom,
-              slot,
-              k,
-              static_cast<double>(fn[static_cast<std::size_t>(k)]),
-              static_cast<double>(fn_angular[basis_offset]));
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-bool radial_descriptors_match(
-    const nep_adapters::cuda_backend::HostModelParameters& host,
-    const std::vector<int>& types,
-    const std::vector<int>& radial_counts,
-    const std::vector<int>& radial_neighbors,
-    const std::vector<float>& fn_radial,
-    const std::vector<float>& descriptors,
-    int atom_count,
-    int atom_stride) {
-  const auto& protocol = host.protocol;
-  const int radial_capacity = protocol.neighbor_capacity_radial;
-  const int type_pairs = protocol.num_types * protocol.num_types;
-  for (int atom = 0; atom < atom_count; ++atom) {
-    const int type1 = types[static_cast<std::size_t>(atom)];
-    for (int n = 0; n <= protocol.n_max_radial; ++n) {
-      float expected = 0.0f;
-      for (int slot = 0; slot < radial_counts[static_cast<std::size_t>(atom)]; ++slot) {
-        const std::size_t neighbor_offset =
-            static_cast<std::size_t>(atom + atom_stride * slot);
-        const int neighbor = radial_neighbors[neighbor_offset];
-        const int type2 = types[static_cast<std::size_t>(neighbor)];
-        const int type_pair = type1 * protocol.num_types + type2;
-        for (int k = 0; k <= protocol.basis_size_radial; ++k) {
-          const std::size_t coefficient_index = static_cast<std::size_t>(
-              (n * (protocol.basis_size_radial + 1) + k) * type_pairs + type_pair);
-          const std::size_t fn_index = static_cast<std::size_t>(
-              atom + atom_stride * (slot + radial_capacity * k));
-          expected += fn_radial[fn_index] *
-                      host.descriptor_coefficients[coefficient_index];
-        }
-      }
-      const std::size_t descriptor_offset =
-          static_cast<std::size_t>(atom + atom_stride * n);
-      if (!close_float(descriptors[descriptor_offset], expected)) {
-        return false;
-      }
-    }
-    for (int d = protocol.n_max_radial + 1; d < protocol.descriptor_dim; ++d) {
-      const std::size_t descriptor_offset =
-          static_cast<std::size_t>(atom + atom_stride * d);
-      if (descriptors[descriptor_offset] != 0.0f) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-void accumulate_s_l1(float x, float y, float z, float gn, float* s) {
-  s[0] += z * gn;
-  s[1] += x * gn;
-  s[2] += y * gn;
-}
-
-void accumulate_s_l2(float x, float y, float z, float gn, float* s) {
-  s[3] += (-1.0f + 3.0f * z * z) * gn;
-  s[4] += z * x * gn;
-  s[5] += z * y * gn;
-  s[6] += (x * x - y * y) * gn;
-  s[7] += (2.0f * x * y) * gn;
-}
-
-void accumulate_s_l3(float x, float y, float z, float gn, float* s) {
-  const float x2_minus_y2 = x * x - y * y;
-  const float two_xy = 2.0f * x * y;
-  const float x3_minus_3xy2 = x * x2_minus_y2 - y * two_xy;
-  const float three_x2y_minus_y3 = x * two_xy + y * x2_minus_y2;
-  s[8] += (-3.0f * z + 5.0f * z * z * z) * gn;
-  s[9] += (-1.0f + 5.0f * z * z) * x * gn;
-  s[10] += (-1.0f + 5.0f * z * z) * y * gn;
-  s[11] += z * x2_minus_y2 * gn;
-  s[12] += z * two_xy * gn;
-  s[13] += x3_minus_3xy2 * gn;
-  s[14] += three_x2y_minus_y3 * gn;
-}
-
-void accumulate_s_l4(float x, float y, float z, float gn, float* s) {
-  const float z2 = z * z;
-  const float x2_minus_y2 = x * x - y * y;
-  const float two_xy = 2.0f * x * y;
-  const float x3_minus_3xy2 = x * x2_minus_y2 - y * two_xy;
-  const float three_x2y_minus_y3 = x * two_xy + y * x2_minus_y2;
-  const float x4_minus_6x2y2_plus_y4 =
-      x * x3_minus_3xy2 - y * three_x2y_minus_y3;
-  const float four_x3y_minus_4xy3 =
-      x * three_x2y_minus_y3 + y * x3_minus_3xy2;
-  s[15] += (3.0f - 30.0f * z2 + 35.0f * z2 * z2) * gn;
-  s[16] += (-3.0f * z + 7.0f * z * z2) * x * gn;
-  s[17] += (-3.0f * z + 7.0f * z * z2) * y * gn;
-  s[18] += (-1.0f + 7.0f * z2) * x2_minus_y2 * gn;
-  s[19] += (-1.0f + 7.0f * z2) * two_xy * gn;
-  s[20] += z * x3_minus_3xy2 * gn;
-  s[21] += z * three_x2y_minus_y3 * gn;
-  s[22] += x4_minus_6x2y2_plus_y4 * gn;
-  s[23] += four_x3y_minus_4xy3 * gn;
-}
-
-float find_q_l1(const float* s) {
-  return 0.238732414637843f * s[0] * s[0] +
-         2.0f *
-             (0.119366207318922f * s[1] * s[1] +
-              0.119366207318922f * s[2] * s[2]);
-}
-
-float find_q_l2(const float* s) {
-  return 0.099471839432435f * s[3] * s[3] +
-         2.0f *
-             (0.596831036594608f * s[4] * s[4] +
-              0.596831036594608f * s[5] * s[5] +
-              0.149207759148652f * s[6] * s[6] +
-              0.149207759148652f * s[7] * s[7]);
-}
-
-float find_q_l3(const float* s) {
-  return 0.139260575205408f * s[8] * s[8] +
-         2.0f *
-             (0.104445431404056f * s[9] * s[9] +
-              0.104445431404056f * s[10] * s[10] +
-              1.044454314040563f * s[11] * s[11] +
-              1.044454314040563f * s[12] * s[12] +
-              0.174075719006761f * s[13] * s[13] +
-              0.174075719006761f * s[14] * s[14]);
-}
-
-float find_q_l4(const float* s) {
-  return 0.011190581936149f * s[15] * s[15] +
-         2.0f *
-             (0.223811638722978f * s[16] * s[16] +
-              0.223811638722978f * s[17] * s[17] +
-              0.111905819361489f * s[18] * s[18] +
-              0.111905819361489f * s[19] * s[19] +
-              1.566681471060845f * s[20] * s[20] +
-              1.566681471060845f * s[21] * s[21] +
-              0.195835183882606f * s[22] * s[22] +
-              0.195835183882606f * s[23] * s[23]);
-}
-
-float find_q_222(const float* s) {
-  return -0.007499480826664f * s[3] * s[3] * s[3] +
-         -0.134990654879954f * s[3] * (s[4] * s[4] + s[5] * s[5]) +
-         0.067495327439977f * s[3] * (s[6] * s[6] + s[7] * s[7]) +
-         0.404971964639861f * s[6] * (s[5] * s[5] - s[4] * s[4]) +
-         -0.809943929279723f * s[4] * s[5] * s[7];
-}
-
-float find_q_1111(const float* s) {
-  const float s0_sq = s[0] * s[0];
-  const float s12_sq = s[1] * s[1] + s[2] * s[2];
-  return 0.026596810706114f * s0_sq * s0_sq +
-         0.053193621412227f * s0_sq * s12_sq +
-         0.026596810706114f * s12_sq * s12_sq;
-}
-
-float find_q_112(const float* s) {
-  return 0.027493550848847f * s[0] * s[0] * s[3] +
-         0.164961305093080f * s[0] * (s[1] * s[4] + s[2] * s[5]) +
-         -0.013746775424423f * s[3] * (s[1] * s[1] + s[2] * s[2]) +
-         0.041240326273270f * s[6] * (s[1] * s[1] - s[2] * s[2]) +
-         0.082480652546540f * s[1] * s[2] * s[7];
-}
-
-float find_q_123(const float* s) {
-  float value = 0.0f;
-  value += -0.168362926992344f *
-           (s[12] * s[2] * s[4] - s[11] * s[2] * s[5] +
-            s[1] * s[11] * s[4] + s[1] * s[12] * s[5]);
-  value += -0.084181463496172f * (s[0] * s[11] * s[6] + s[0] * s[12] * s[7]);
-  value += -0.042090731748086f *
-           (s[14] * s[2] * s[6] - s[13] * s[2] * s[7] +
-            s[1] * s[13] * s[6] + s[1] * s[14] * s[7]);
-  value += -0.067345170796937f * (s[10] * s[0] * s[5] + s[0] * s[4] * s[9]);
-  value += -0.016836292699234f *
-           (s[10] * s[2] * s[3] + s[0] * s[3] * s[8] +
-            s[1] * s[3] * s[9]);
-  value += -0.008418146349617f *
-           (s[10] * s[2] * s[6] - s[10] * s[1] * s[7] -
-            s[2] * s[7] * s[9] - s[1] * s[6] * s[9]);
-  value += -0.033672585398469f * (-s[2] * s[5] * s[8] - s[1] * s[4] * s[8]);
-  return value;
-}
-
-float find_q_233(const float* s) {
-  float value = 0.0f;
-  value += 0.008572620635186f * (s[3] * s[8] * s[8]);
-  value += 0.009644198214584f * (s[10] * s[10] * s[3] + s[3] * s[9] * s[9]);
-  value += 0.019288396429168f * (-s[10] * s[10] * s[6] + s[6] * s[9] * s[9]);
-  value += 0.025717861905558f * (s[4] * s[8] * s[9] + s[10] * s[5] * s[8]);
-  value += 0.026789439484956f * (-s[13] * s[13] * s[3] - s[14] * s[14] * s[3]);
-  value += 0.032147327381947f *
-           (-s[14] * s[7] * s[9] - s[13] * s[6] * s[9] -
-            s[10] * s[14] * s[6] + s[10] * s[13] * s[7]);
-  value += 0.038576792858337f * (s[10] * s[7] * s[9]);
-  value += 0.128589309527790f * (-s[11] * s[6] * s[8] - s[12] * s[7] * s[8]);
-  value += 0.192883964291685f *
-           (s[11] * s[4] * s[9] + s[12] * s[5] * s[9] +
-            s[10] * s[12] * s[4] - s[10] * s[11] * s[5]);
-  value += 0.321473273819474f *
-           (s[12] * s[14] * s[4] + s[11] * s[14] * s[5] +
-            s[13] * s[11] * s[4] - s[13] * s[12] * s[5]);
-  return value;
-}
-
-float find_q_134(const float* s) {
-  return 0.003645164295772f * (-s[10] * s[15] * s[2] - s[1] * s[15] * s[9]) +
-         0.004860219061029f * (s[0] * s[15] * s[8]) +
-         0.006075273826286f *
-             (-s[1] * s[13] * s[18] - s[1] * s[14] * s[19] -
-              s[2] * s[14] * s[18] + s[2] * s[13] * s[19]) +
-         0.018225821478859f *
-             (-s[10] * s[18] * s[2] + s[1] * s[10] * s[19] +
-              s[1] * s[18] * s[9] + s[2] * s[19] * s[9]) +
-         0.024301095305146f * (s[1] * s[16] * s[8] + s[2] * s[17] * s[8]) +
-         0.036451642957719f *
-             (s[0] * s[10] * s[17] + s[0] * s[16] * s[9] -
-              s[1] * s[11] * s[16] - s[1] * s[12] * s[17] -
-              s[2] * s[12] * s[16] + s[2] * s[11] * s[17]) +
-         0.042526916784005f *
-             (s[1] * s[13] * s[22] + s[1] * s[14] * s[23] -
-              s[2] * s[14] * s[22] + s[2] * s[13] * s[23]) +
-         0.072903285915437f * (s[0] * s[11] * s[18] + s[0] * s[12] * s[19]) +
-         0.085053833568010f * (s[0] * s[13] * s[20] + s[0] * s[14] * s[21]) +
-         0.255161500704030f *
-             (s[1] * s[11] * s[20] + s[1] * s[12] * s[21] -
-              s[2] * s[12] * s[20] + s[2] * s[11] * s[21]);
-}
-
-bool angular_descriptors_match(
-    const nep_adapters::cuda_backend::HostModelParameters& host,
-    const std::vector<int>& types,
-    const std::vector<int>& angular_counts,
-    const std::vector<int>& angular_neighbors,
-    const std::vector<float>& f12x,
-    const std::vector<float>& f12y,
-    const std::vector<float>& f12z,
-    const std::vector<float>& r12_angular,
-    const std::vector<float>& fn_angular,
-    const std::vector<float>& sum_fxyz,
-    const std::vector<float>& descriptors,
-    int atom_count,
-    int atom_stride) {
-  const auto& protocol = host.protocol;
-  const int angular_capacity = protocol.neighbor_capacity_angular;
-  const int type_pairs = protocol.num_types * protocol.num_types;
-  const int radial_dim = protocol.n_max_radial + 1;
-  const int abc_count = protocol.body_channels.abc_count();
-  const std::size_t angular_offset = host.descriptor_layout.angular_offset;
-  for (int atom = 0; atom < atom_count; ++atom) {
-    const int type1 = types[static_cast<std::size_t>(atom)];
-    for (int n = 0; n <= protocol.n_max_angular; ++n) {
-      float s[24] = {0.0f};
-      for (int slot = 0; slot < angular_counts[static_cast<std::size_t>(atom)]; ++slot) {
-        const std::size_t slot_offset =
-            static_cast<std::size_t>(atom + atom_stride * slot);
-        const int neighbor = angular_neighbors[slot_offset];
-        const int type2 = types[static_cast<std::size_t>(neighbor)];
-        const int type_pair = type1 * protocol.num_types + type2;
-        float gn = 0.0f;
-        for (int k = 0; k <= protocol.basis_size_angular; ++k) {
-          const std::size_t coefficient_index =
-              angular_offset +
-              static_cast<std::size_t>(
-                  (n * (protocol.basis_size_angular + 1) + k) * type_pairs +
-                  type_pair);
-          const std::size_t fn_index = static_cast<std::size_t>(
-              atom + atom_stride * (slot + angular_capacity * k));
-          gn += fn_angular[fn_index] *
-                host.descriptor_coefficients[coefficient_index];
-        }
-        const float rinv = 1.0f / r12_angular[slot_offset];
-        const float x = f12x[slot_offset] * rinv;
-        const float y = f12y[slot_offset] * rinv;
-        const float z = f12z[slot_offset] * rinv;
-        accumulate_s_l1(x, y, z, gn, s);
-        accumulate_s_l2(x, y, z, gn, s);
-        accumulate_s_l3(x, y, z, gn, s);
-        accumulate_s_l4(x, y, z, gn, s);
-      }
-      for (int abc = 0; abc < abc_count; ++abc) {
-        const std::size_t offset =
-            static_cast<std::size_t>(atom + atom_stride * (n * abc_count + abc));
-        if (!close_float(sum_fxyz[offset], s[abc])) {
-          std::fprintf(
-              stderr,
-              "sum_fxyz mismatch atom=%d n=%d abc=%d expected=%g actual=%g\n",
-              atom,
-              n,
-              abc,
-              static_cast<double>(s[abc]),
-              static_cast<double>(sum_fxyz[offset]));
-          return false;
-        }
-      }
-      const std::size_t l1_offset =
-          static_cast<std::size_t>(atom + atom_stride * (radial_dim + n));
-      const std::size_t l2_offset = static_cast<std::size_t>(
-          atom + atom_stride * (radial_dim + (protocol.n_max_angular + 1) + n));
-      if (!close_float(descriptors[l1_offset], find_q_l1(s)) ||
-          !close_float(descriptors[l2_offset], find_q_l2(s))) {
-        std::fprintf(
-            stderr,
-            "angular descriptor mismatch atom=%d n=%d l1 expected=%g actual=%g l2 expected=%g actual=%g\n",
-            atom,
-            n,
-            static_cast<double>(find_q_l1(s)),
-            static_cast<double>(descriptors[l1_offset]),
-            static_cast<double>(find_q_l2(s)),
-            static_cast<double>(descriptors[l2_offset]));
-        return false;
-      }
-      const std::size_t l3_offset = static_cast<std::size_t>(
-          atom + atom_stride * (radial_dim + 2 * (protocol.n_max_angular + 1) + n));
-      const std::size_t l4_offset = static_cast<std::size_t>(
-          atom + atom_stride * (radial_dim + 3 * (protocol.n_max_angular + 1) + n));
-      if (!close_float(descriptors[l3_offset], find_q_l3(s)) ||
-          !close_float(descriptors[l4_offset], find_q_l4(s))) {
-        std::fprintf(
-            stderr,
-            "angular L3/L4 mismatch atom=%d n=%d l3 expected=%g actual=%g l4 expected=%g actual=%g\n",
-            atom,
-            n,
-            static_cast<double>(find_q_l3(s)),
-            static_cast<double>(descriptors[l3_offset]),
-            static_cast<double>(find_q_l4(s)),
-            static_cast<double>(descriptors[l4_offset]));
-        return false;
-      }
-      int channel = protocol.body_channels.l_max_3body;
-      if (protocol.body_channels.has_q_222) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_222(s))) {
-          std::fprintf(
-              stderr,
-              "q222 mismatch atom=%d n=%d expected=%g actual=%g\n",
-              atom,
-              n,
-              static_cast<double>(find_q_222(s)),
-              static_cast<double>(descriptors[offset]));
-          return false;
-        }
-        ++channel;
-      }
-      if (protocol.body_channels.has_q_1111) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_1111(s))) {
-          std::fprintf(
-              stderr,
-              "q1111 mismatch atom=%d n=%d expected=%g actual=%g\n",
-              atom,
-              n,
-              static_cast<double>(find_q_1111(s)),
-              static_cast<double>(descriptors[offset]));
-          return false;
-        }
-        ++channel;
-      }
-      if (protocol.body_channels.has_q_112) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_112(s))) {
-          std::fprintf(stderr, "q112 mismatch atom=%d n=%d\n", atom, n);
-          return false;
-        }
-        ++channel;
-      }
-      if (protocol.body_channels.has_q_123) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_123(s))) {
-          std::fprintf(stderr, "q123 mismatch atom=%d n=%d\n", atom, n);
-          return false;
-        }
-        ++channel;
-      }
-      if (protocol.body_channels.has_q_233) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_233(s))) {
-          std::fprintf(stderr, "q233 mismatch atom=%d n=%d\n", atom, n);
-          return false;
-        }
-        ++channel;
-      }
-      if (protocol.body_channels.has_q_134) {
-        const std::size_t offset = static_cast<std::size_t>(
-            atom + atom_stride *
-                       (radial_dim + channel * (protocol.n_max_angular + 1) + n));
-        if (!close_float(descriptors[offset], find_q_134(s))) {
-          std::fprintf(stderr, "q134 mismatch atom=%d n=%d\n", atom, n);
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-bool ann_energy_matches(
-    const nep_adapters::cuda_backend::HostModelParameters& host,
-    const std::vector<int>& types,
-    const std::vector<float>& descriptors,
-    const std::vector<double>& potential,
-    const std::vector<float>& fp,
-    int atom_count,
-    int atom_stride) {
-  const auto& protocol = host.protocol;
-  const int descriptor_dim = protocol.descriptor_dim;
-  const int hidden = protocol.hidden_neurons;
-  const int type_block_size =
-      hidden * descriptor_dim + hidden + hidden;
-  const float* b1 = host.ann_type_major.data() +
-                    protocol.num_types * static_cast<std::size_t>(type_block_size);
-
-  for (int atom = 0; atom < atom_count; ++atom) {
-    const int type = types[static_cast<std::size_t>(atom)];
-    const float* w0 = host.ann_type_major.data() +
-                      type * static_cast<std::size_t>(type_block_size);
-    const float* b0 = w0 + hidden * descriptor_dim;
-    const float* w1 = b0 + hidden;
-    float expected_energy = 0.0f;
-    std::vector<float> expected_fp(static_cast<std::size_t>(descriptor_dim), 0.0f);
-
-    for (int neuron = 0; neuron < hidden; ++neuron) {
-      float w0_times_q = 0.0f;
-      for (int d = 0; d < descriptor_dim; ++d) {
-        const float q = descriptors[static_cast<std::size_t>(atom + atom_stride * d)] *
-                        host.q_scaler[static_cast<std::size_t>(d)];
-        w0_times_q += w0[neuron * descriptor_dim + d] * q;
-      }
-      const float x1 = std::tanh(w0_times_q - b0[neuron]);
-      const float tanh_derivative = 1.0f - x1 * x1;
-      expected_energy += w1[neuron] * x1;
-      for (int d = 0; d < descriptor_dim; ++d) {
-        expected_fp[static_cast<std::size_t>(d)] +=
-            w1[neuron] * tanh_derivative * w0[neuron * descriptor_dim + d] *
-            host.q_scaler[static_cast<std::size_t>(d)];
-      }
-    }
-    expected_energy -= b1[0];
-
-    if (!close_float(static_cast<float>(potential[static_cast<std::size_t>(atom)]),
-                     expected_energy)) {
-      std::fprintf(
-          stderr,
-          "ANN energy mismatch atom=%d expected=%g actual=%g\n",
-          atom,
-          static_cast<double>(expected_energy),
-          potential[static_cast<std::size_t>(atom)]);
-      return false;
-    }
-    for (int d = 0; d < descriptor_dim; ++d) {
-      const std::size_t offset =
-          static_cast<std::size_t>(atom + atom_stride * d);
-      if (!close_float(fp[offset], expected_fp[static_cast<std::size_t>(d)])) {
-        std::fprintf(
-            stderr,
-            "ANN fp mismatch atom=%d d=%d expected=%g actual=%g\n",
-            atom,
-            d,
-            static_cast<double>(expected_fp[static_cast<std::size_t>(d)]),
-            static_cast<double>(fp[offset]));
-        return false;
-      }
     }
   }
   return true;
@@ -1093,12 +270,12 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  if (!copy_matches(device.ann_type_major_device(), host.ann_type_major) ||
+  if (!copy_matches(device.view().ann_type_major, host.ann_type_major) ||
       !copy_matches(
           device.view().ann_type_major_qscaled,
           host.ann_type_major_qscaled) ||
       !copy_matches(
-          device.descriptor_coefficients_device(),
+          device.view().descriptor_coefficients,
           host.descriptor_coefficients) ||
       !copy_matches(
           device.view().descriptor_coefficients_type_pair_major,
@@ -1106,7 +283,7 @@ int main() {
       !copy_matches(
           device.view().angular_coefficients_center_type_major,
           host.angular_coefficients_center_type_major) ||
-      !copy_matches(device.q_scaler_device(), host.q_scaler) ||
+      !copy_matches(device.view().q_scaler, host.q_scaler) ||
       copy_ints(device.view().atomic_numbers, host.atomic_numbers.size()) !=
           host.atomic_numbers) {
     std::fprintf(stderr, "device model upload copy contract failed\n");
@@ -1177,18 +354,29 @@ int main() {
   batch.boxes_row_major9 = batch_boxes;
   batch.pbc_flags3 = batch_pbc;
   nep_adapters::cuda_backend::stage_batch_on_device(batch, internal_workspace);
-  internal_workspace.copy_int_to_device("nn_radial", {2, 1, 0, 0});
-  internal_workspace.copy_int_to_device(
-      "nl_radial_slot_major",
-      {1, 0, 0, 0, 2, 0, 0, 0,
-       0, 0, 0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0, 0, 0,
-       0, 0, 0, 0, 0, 0, 0, 0});
-  std::vector<float> internal_fp(
-      internal_plan.find_array("fp")->element_count,
-      0.0f);
-  internal_workspace.copy_float_to_device("fp", internal_fp);
+  const nep_adapters::cuda_backend::DeviceWorkspaceView internal_view =
+      internal_workspace.view();
+  const int internal_radial_counts[] = {2, 1, 0, 0};
+  const int internal_radial_neighbors[] = {
+      1, 0, 0, 0, 2, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0};
+  if (cudaMemcpy(
+          internal_view.nn_radial,
+          internal_radial_counts,
+          sizeof(internal_radial_counts),
+          cudaMemcpyHostToDevice) != cudaSuccess ||
+      cudaMemcpy(
+          internal_view.nl_radial_slot_major,
+          internal_radial_neighbors,
+          sizeof(internal_radial_neighbors),
+          cudaMemcpyHostToDevice) != cudaSuccess) {
+    std::fprintf(stderr, "internal workspace smoke setup failed\n");
+    cudaFree(device_output);
+    return EXIT_FAILURE;
+  }
 
   internal_workspace_smoke_kernel<<<1, 32>>>(
       device.view(),
@@ -1253,11 +441,6 @@ int main() {
       lmp_input,
       host.protocol,
       external_workspace);
-  std::vector<float> external_fp(
-      external_plan.find_array("fp")->element_count,
-      0.0f);
-  external_workspace.copy_float_to_device("fp", external_fp);
-
   external_workspace_smoke_kernel<<<1, 32>>>(
       device.view(),
       external_workspace.view(),
@@ -1283,10 +466,10 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  const std::string radial_model_path =
-      (std::filesystem::temp_directory_path() / "cuda_radial_descriptor.nep").string();
+  const std::string neighbor_model_path =
+      (std::filesystem::temp_directory_path() / "cuda_neighbor_builder.nep").string();
   {
-    std::ofstream out(radial_model_path);
+    std::ofstream out(neighbor_model_path);
     out << "nep4 1 C\n"
         << "cutoff 5 4 8 6\n"
         << "n_max 1 1\n"
@@ -1297,14 +480,11 @@ int main() {
       out << value << "\n";
     }
   }
-  const nep_adapters::cuda_backend::HostModelParameters radial_host =
-      nep_adapters::cuda_backend::load_host_model_parameters(radial_model_path);
-  nep_adapters::cuda_backend::DeviceModel radial_device(radial_host);
-  const nep_adapters::cuda_backend::ModelProtocol& radial_protocol =
-      radial_host.protocol;
+  const nep_adapters::cuda_backend::ModelProtocol neighbor_protocol =
+      nep_adapters::cuda_backend::parse_model_protocol(neighbor_model_path);
   const nep_adapters::cuda_backend::WorkspacePlan neighbor_plan =
       nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
-          radial_protocol, 8, 1);
+          neighbor_protocol, 8, 1);
   nep_adapters::cuda_backend::DeviceWorkspace neighbor_workspace(neighbor_plan);
   int neighbor_batch_count[] = {4};
   int neighbor_batch_offset[] = {0};
@@ -1336,7 +516,7 @@ int main() {
   const nep_adapters::cuda_backend::SimulationBox neighbor_simulation_box =
       make_simulation_box(neighbor_box, neighbor_pbc);
   nep_adapters::cuda_backend::build_internal_neighbors_on_device(
-      radial_protocol,
+      neighbor_protocol,
       4,
       neighbor_simulation_box,
       neighbor_workspace);
@@ -1348,33 +528,21 @@ int main() {
   const std::vector<int> angular_counts = copy_ints(neighbor_view.nn_angular, 4);
   const std::vector<int> radial_neighbors = copy_ints(
       neighbor_view.nl_radial_slot_major,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial));
+      8 * static_cast<std::size_t>(neighbor_protocol.neighbor_capacity_radial));
   const std::vector<int> angular_neighbors = copy_ints(
       neighbor_view.nl_angular_slot_major,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
+      8 * static_cast<std::size_t>(neighbor_protocol.neighbor_capacity_angular));
   const std::vector<double> neighbor_positions_vec(
       neighbor_positions,
       neighbor_positions + 12);
-  const std::vector<std::vector<int>> expected_radial =
-      brute_force_neighbors(
-          neighbor_positions_vec,
-          radial_protocol.cutoff_radial,
-          12.0,
-          12.0,
-          12.0,
-          1,
-          1,
-          1);
-  const std::vector<std::vector<int>> expected_angular =
-      brute_force_neighbors(
-          neighbor_positions_vec,
-          radial_protocol.cutoff_angular,
-          12.0,
-          12.0,
-          12.0,
-          1,
-          1,
-          1);
+  const std::vector<std::vector<int>> expected_radial = brute_force_neighbors(
+      neighbor_positions_vec,
+      neighbor_protocol.cutoff_radial,
+      neighbor_simulation_box);
+  const std::vector<std::vector<int>> expected_angular = brute_force_neighbors(
+      neighbor_positions_vec,
+      neighbor_protocol.cutoff_angular,
+      neighbor_simulation_box);
   if (cell_dims.size() != 4 || cell_dims[0] != 2 || cell_dims[1] != 2 ||
       cell_dims[2] != 2 || cell_dims[3] != 8 ||
       !neighbor_sets_match(radial_counts, radial_neighbors, 8, expected_radial) ||
@@ -1383,45 +551,6 @@ int main() {
     cudaFree(device_output);
     return EXIT_FAILURE;
   }
-  nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-      radial_protocol,
-      4,
-      neighbor_simulation_box,
-      neighbor_workspace);
-  const std::vector<float> r12_radial = copy_floats(
-      neighbor_view.r12_radial,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial));
-  const std::vector<float> f12x = copy_floats(
-      neighbor_view.f12x,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> f12y = copy_floats(
-      neighbor_view.f12y,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> f12z = copy_floats(
-      neighbor_view.f12z,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  if (!geometry_cache_matches(
-          neighbor_positions_vec,
-          radial_counts,
-          radial_neighbors,
-          r12_radial,
-          angular_counts,
-          angular_neighbors,
-          f12x,
-          f12y,
-          f12z,
-          8,
-          12.0,
-          12.0,
-          12.0,
-          1,
-          1,
-          1)) {
-    std::fprintf(stderr, "orthorhombic geometry cache contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-
   const double triclinic_box[] = {
       12.0, 2.0, 1.0,
       0.0, 11.0, 1.5,
@@ -1441,7 +570,7 @@ int main() {
       neighbor_batch,
       neighbor_workspace);
   nep_adapters::cuda_backend::build_internal_neighbors_on_device(
-      radial_protocol,
+      neighbor_protocol,
       4,
       triclinic_simulation_box,
       neighbor_workspace);
@@ -1451,22 +580,22 @@ int main() {
       copy_ints(neighbor_view.nn_angular, 4);
   const std::vector<int> triclinic_radial_neighbors = copy_ints(
       neighbor_view.nl_radial_slot_major,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial));
+      8 * static_cast<std::size_t>(neighbor_protocol.neighbor_capacity_radial));
   const std::vector<int> triclinic_angular_neighbors = copy_ints(
       neighbor_view.nl_angular_slot_major,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
+      8 * static_cast<std::size_t>(neighbor_protocol.neighbor_capacity_angular));
   const std::vector<double> triclinic_positions_vec(
       triclinic_positions,
       triclinic_positions + 12);
   const std::vector<std::vector<int>> expected_triclinic_radial =
       brute_force_neighbors(
           triclinic_positions_vec,
-          radial_protocol.cutoff_radial,
+          neighbor_protocol.cutoff_radial,
           triclinic_simulation_box);
   const std::vector<std::vector<int>> expected_triclinic_angular =
       brute_force_neighbors(
           triclinic_positions_vec,
-          radial_protocol.cutoff_angular,
+          neighbor_protocol.cutoff_angular,
           triclinic_simulation_box);
   if (!neighbor_sets_match(
           triclinic_radial_counts,
@@ -1482,190 +611,12 @@ int main() {
     cudaFree(device_output);
     return EXIT_FAILURE;
   }
-  nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-      radial_protocol,
-      4,
-      triclinic_simulation_box,
-      neighbor_workspace);
-  const std::vector<float> triclinic_r12_radial = copy_floats(
-      neighbor_view.r12_radial,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial));
-  const std::vector<float> triclinic_f12x = copy_floats(
-      neighbor_view.f12x,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> triclinic_f12y = copy_floats(
-      neighbor_view.f12y,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> triclinic_f12z = copy_floats(
-      neighbor_view.f12z,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  if (!geometry_cache_matches(
-          triclinic_positions_vec,
-          triclinic_radial_counts,
-          triclinic_radial_neighbors,
-          triclinic_r12_radial,
-          triclinic_angular_counts,
-          triclinic_angular_neighbors,
-          triclinic_f12x,
-          triclinic_f12y,
-          triclinic_f12z,
-          8,
-          triclinic_simulation_box)) {
-    std::fprintf(stderr, "triclinic geometry cache contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-  neighbor_batch.positions_aos3 = neighbor_positions;
-  neighbor_batch.boxes_row_major9 = neighbor_box;
-  nep_adapters::cuda_backend::stage_batch_on_device(
-      neighbor_batch,
-      neighbor_workspace);
-  nep_adapters::cuda_backend::build_internal_neighbors_on_device(
-      radial_protocol,
-      4,
-      neighbor_simulation_box,
-      neighbor_workspace);
-  nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-      radial_protocol,
-      4,
-      neighbor_simulation_box,
-      neighbor_workspace);
-  nep_adapters::cuda_backend::build_angular_basis_cache_on_device(
-      radial_protocol,
-      4,
-      neighbor_workspace);
-  nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-      radial_protocol,
-      4,
-      neighbor_workspace);
-  const std::vector<float> fc_radial = copy_floats(
-      neighbor_view.fc_radial,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial));
-  const std::vector<float> fn_radial = copy_floats(
-      neighbor_view.fn_radial,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_radial) *
-          (static_cast<std::size_t>(radial_protocol.basis_size_radial) + 1));
-  if (!radial_basis_cache_matches(
-          radial_counts,
-          radial_neighbors,
-          r12_radial,
-          fc_radial,
-          fn_radial,
-          4,
-          8,
-          radial_protocol.neighbor_capacity_radial,
-          radial_protocol.basis_size_radial,
-          static_cast<float>(radial_protocol.cutoff_radial))) {
-    std::fprintf(stderr, "radial basis cache contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-  const std::vector<float> r12_angular = copy_floats(
-      neighbor_view.r12_angular,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> fc_angular = copy_floats(
-      neighbor_view.fc_angular,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular));
-  const std::vector<float> fn_angular = copy_floats(
-      neighbor_view.fn_angular,
-      8 * static_cast<std::size_t>(radial_protocol.neighbor_capacity_angular) *
-          (static_cast<std::size_t>(radial_protocol.basis_size_angular) + 1));
-  if (!angular_basis_cache_matches(
-          angular_counts,
-          f12x,
-          f12y,
-          f12z,
-          r12_angular,
-          fc_angular,
-          fn_angular,
-          4,
-          8,
-          radial_protocol.neighbor_capacity_angular,
-          radial_protocol.basis_size_angular,
-          static_cast<float>(radial_protocol.cutoff_angular))) {
-    std::fprintf(stderr, "angular basis cache contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-  nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-      radial_protocol,
-      4,
-      radial_device,
-      neighbor_workspace);
-  const std::vector<int> radial_types = copy_ints(neighbor_view.types, 4);
-  const std::vector<float> descriptors = copy_floats(
-      neighbor_view.descriptors,
-      8 * static_cast<std::size_t>(radial_protocol.descriptor_dim));
-  if (!radial_descriptors_match(
-          radial_host,
-          radial_types,
-          radial_counts,
-          radial_neighbors,
-          fn_radial,
-          descriptors,
-          4,
-          8)) {
-    std::fprintf(stderr, "radial descriptor contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-  nep_adapters::cuda_backend::build_angular_descriptors_on_device(
-      radial_protocol,
-      4,
-      radial_device,
-      neighbor_workspace);
-  const std::vector<float> descriptors_with_angular = copy_floats(
-      neighbor_view.descriptors,
-      8 * static_cast<std::size_t>(radial_protocol.descriptor_dim));
-  const std::vector<float> sum_fxyz = copy_floats(
-      neighbor_view.sum_fxyz,
-      8 * (static_cast<std::size_t>(radial_protocol.n_max_angular) + 1) *
-          static_cast<std::size_t>(radial_protocol.body_channels.abc_count()));
-  if (!angular_descriptors_match(
-          radial_host,
-          radial_types,
-          angular_counts,
-          angular_neighbors,
-          f12x,
-          f12y,
-          f12z,
-          r12_angular,
-          fn_angular,
-          sum_fxyz,
-          descriptors_with_angular,
-          4,
-          8)) {
-    std::fprintf(stderr, "angular descriptor contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
-  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-      radial_protocol,
-      4,
-      radial_device,
-      neighbor_workspace);
-  const std::vector<double> potential = copy_doubles(neighbor_view.potential, 4);
-  const std::vector<float> fp = copy_floats(
-      neighbor_view.fp,
-      8 * static_cast<std::size_t>(radial_protocol.descriptor_dim));
-  if (!ann_energy_matches(
-          radial_host,
-          radial_types,
-          descriptors_with_angular,
-          potential,
-          fp,
-          4,
-          8)) {
-    std::fprintf(stderr, "ANN energy contract failed\n");
-    cudaFree(device_output);
-    return EXIT_FAILURE;
-  }
   cudaFree(device_output);
 
   nep_adapters::cuda_backend::DeviceModel moved(std::move(device));
-  if (moved.ann_type_major_device() == nullptr ||
-      moved.descriptor_coefficients_device() == nullptr ||
-      moved.q_scaler_device() == nullptr) {
+  if (moved.view().ann_type_major == nullptr ||
+      moved.view().descriptor_coefficients == nullptr ||
+      moved.view().q_scaler == nullptr) {
     std::fprintf(stderr, "moved device model lost pointers\n");
     return EXIT_FAILURE;
   }

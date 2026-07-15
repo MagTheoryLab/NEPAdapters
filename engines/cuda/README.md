@@ -67,35 +67,24 @@ CUDA compilation units:
   keep per-slot center threads contiguous.
 - The internal-neighbor builder supports orthorhombic and triclinic boxes with
   PBC. It bins atoms in fractional coordinates, keeps the production path
-  cell-list based, and computes Cartesian pair vectors from the full 3x3 box
-  before descriptor and force kernels consume them.
+  cell-list based, and leaves pair geometry to the descriptor core so neighbor
+  construction does not materialize data that the next stage would overwrite.
 - Neighbor-list correctness is checked against a self-contained brute-force
   PBC oracle in the CUDA device test, including a tilted triclinic box. The
   production builder stays cell-list based; the all-pairs path is only a
   small-test oracle so descriptor and force work does not inherit an unvalidated
   neighbor contract.
-- Pair geometry caching starts in `pair_geometry_cache.cu`. It consumes the
-  validated slot-major neighbor lists and writes radial pair distances plus
-  angular minimum-image deltas. Angular deltas are defined as
-  `neighbor_position - center_position`; the CUDA device test compares these
-  cached values against the same brute-force PBC oracle used for neighbor sets.
-- Radial basis caching starts in `radial_basis_cache.cu`. It consumes
-  `r12_radial` and writes `fc_radial` plus `fn_radial` using the current
-  torchnep cutoff and Chebyshev radial basis formulas. `fn_radial` is laid out as
-  `atom + atom_capacity * (slot + radial_capacity * basis_index)` so a future
-  descriptor kernel can keep center atoms contiguous for a fixed slot and basis
-  channel.
-- Radial descriptor accumulation starts in `radial_descriptor.cu`. It consumes
-  the radial basis cache plus packed descriptor coefficients and writes
-  `descriptors` as `atom + atom_capacity * descriptor_index`; the first device
-  test covers the same coefficient indexing used by torchnep:
-  `(n * (basis_size_radial + 1) + k) * num_type_pairs + type_pair`.
-- Angular basis caching and descriptor accumulation live together in
-  `angular_descriptor.cu`; the cache mirrors the radial layout with
-  `r12_angular`, `fc_angular`, and `fn_angular`. The descriptor path covers
-  ordinary 3-body channels through `L=4` plus the current high-body flags
-  `q222`, `q1111`, `q112`, `q123`, `q233`, and `q134`; `sum_fxyz` is staged as
-  `atom + atom_capacity * (n * abc_count + abc)` for the later force path.
+- `angular_descriptor.cu` owns the shared structural descriptor core. It reads
+  positions and slot-major neighbor lists directly, forms radial basis sums in
+  per-block scratch, and accumulates angular tiles without global radial or
+  angular basis-cache arrays. The same core serves ordinary, spin, and charge
+  orchestration; model-specific descriptor additions and ANN evaluation remain
+  explicit following stages.
+- The descriptor core writes `descriptors` as
+  `atom + atom_capacity * descriptor_index`. For angular models it also keeps
+  only the state needed by force backpropagation: minimum-image pair vectors,
+  distances, and `sum_fxyz`. Supported channels are ordinary 3-body terms
+  through `L=4` plus `q222`, `q1111`, `q112`, `q123`, `q233`, and `q134`.
 - ANN energy evaluation starts in `ann_energy.cu`. The kernel handles packed
   NEP4/NEP5 one-hidden-layer layouts, writes per-atom `potential`, and stages
   descriptor derivatives in `fp` so force backpropagation can be added without

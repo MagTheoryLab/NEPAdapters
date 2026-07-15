@@ -5,6 +5,7 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
+#include "force_pipeline.hpp"
 
 #include <cuda_runtime.h>
 #endif
@@ -349,56 +350,18 @@ void run_device_pipeline(
       atom_count,
       workspace,
       orthorhombic_fast_path);
-  if (!orthorhombic_fast_path) {
-    nep_adapters::cuda_backend::build_pair_geometry_cache_batched(
-        protocol,
-        atom_count,
-        workspace);
-  }
-  nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
+  nep_adapters::cuda_backend::ForceEvaluationRequest request;
+  request.topology =
+      nep_adapters::cuda_backend::ForceNeighborTopology::batched_multi_box;
+  request.virial = nep_adapters::cuda_backend::VirialOutputMode::total_only;
+  request.store_potential = true;
+  nep_adapters::cuda_backend::run_force_pipeline(
       protocol,
+      request,
       atom_count,
-      workspace);
-  nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-      protocol,
-      atom_count,
+      nep_adapters::cuda_backend::SimulationBox{},
       model,
       workspace);
-  if (protocol.body_channels.l_max_3body > 0) {
-    nep_adapters::cuda_backend::build_angular_basis_cache_on_device(
-        protocol,
-        atom_count,
-        workspace);
-    nep_adapters::cuda_backend::build_angular_descriptors_on_device(
-        protocol,
-        atom_count,
-        model,
-        workspace);
-  }
-  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-      protocol,
-      atom_count,
-      model,
-      workspace);
-  nep_adapters::cuda_backend::accumulate_radial_forces_batched(
-      protocol,
-      atom_count,
-      model,
-      workspace);
-  if (protocol.body_channels.l_max_3body > 0) {
-    nep_adapters::cuda_backend::accumulate_l2_angular_forces_batched(
-        protocol,
-        atom_count,
-        model,
-        workspace);
-  }
-  if (protocol.has_zbl) {
-    nep_adapters::cuda_backend::accumulate_zbl_forces_batched(
-        protocol,
-        atom_count,
-        model,
-        workspace);
-  }
   nep_adapters::cuda_backend::prepare_batched_outputs(
       structure_count,
       atom_count,

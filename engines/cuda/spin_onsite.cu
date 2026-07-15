@@ -597,9 +597,6 @@ void accumulate_spin_forces_on_device(
   accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
   timer.split(measured.onsite_ms);
 
-  measured.scalar_ms = 0.0f;
-  timer.split(measured.scalar_ms);
-
   accumulate_spin_density_forces_impl(
       protocol, atom_count, box, model, workspace, virial_mode);
   timer.split(measured.density_ms);

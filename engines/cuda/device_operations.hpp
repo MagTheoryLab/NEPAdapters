@@ -12,11 +12,6 @@ namespace nep_adapters::cuda_backend {
 // Internal device-operation interface used by CUDA orchestration and focused
 // kernel tests. The public engine interface remains outside engines/cuda.
 
-struct LammpsDeviceNeighborCounts {
-  int max_radial = 0;
-  int max_angular = 0;
-};
-
 // Internal virial placement used by force launchers. Model/output decisions
 // are made by force_pipeline; kernels only receive the placement they need.
 enum class VirialTarget {
@@ -163,15 +158,11 @@ void stage_lammps_external_neighbors_on_device(
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace);
 
-LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
+void stage_lammps_device_neighbors_on_device(
     const NepaLammpsDeviceNeighborInput& input,
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace,
     bool check_overflow = true);
-
-LammpsDeviceNeighborCounts count_lammps_device_neighbors_on_device(
-    const NepaLammpsDeviceNeighborInput& input,
-    const ModelProtocol& protocol);
 
 void build_internal_neighbors_on_device(
     const ModelProtocol& protocol,
@@ -196,69 +187,20 @@ void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborResult& result,
     DeviceWorkspace& workspace);
 
-void build_pair_geometry_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    DeviceWorkspace& workspace);
-
-void build_pair_geometry_cache_batched(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace);
-
-void build_radial_basis_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace);
-
-void build_radial_geometry_basis_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    DeviceWorkspace& workspace);
-
-void build_angular_basis_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace);
-
-void build_radial_descriptors_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
-
-void build_angular_descriptors_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
-
 enum class DescriptorCoreTopology {
   single_box,
   batched_multi_box,
 };
 
-enum class DescriptorCoreOutput {
-  structural_descriptors,
-  ann_energy_and_derivatives,
-};
-
-struct DescriptorCoreOptions {
-  DescriptorCoreTopology topology = DescriptorCoreTopology::single_box;
-  DescriptorCoreOutput output = DescriptorCoreOutput::structural_descriptors;
-  bool has_angular = true;
-  bool store_potential = true;
-};
-
+// Builds only the shared structural descriptor. ANN and model-family-specific
+// descriptor stages remain explicit in the force-pipeline implementation.
 void build_descriptor_core_from_positions_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    const DescriptorCoreOptions& options);
+    DescriptorCoreTopology topology);
 
 void evaluate_ann_energy_on_device(
     const ModelProtocol& protocol,
@@ -320,7 +262,6 @@ void accumulate_radial_forces_batched(
 void accumulate_l2_angular_forces_on_device(
     const ModelProtocol& protocol,
     int atom_count,
-    const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target = VirialTarget::center_atom);
@@ -373,7 +314,6 @@ void build_spin_descriptors_on_device(
 
 struct SpinForceTimings {
   float onsite_ms = 0.0f;
-  float scalar_ms = 0.0f;
   float density_ms = 0.0f;
   float chiral_ms = 0.0f;
 };

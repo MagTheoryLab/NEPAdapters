@@ -990,18 +990,15 @@ void run_reused_workspace_once(
     clear_potential(workspace);
   }
   const bool has_angular = protocol.body_channels.channel_count() > 0;
-  nep_adapters::cuda_backend::DescriptorCoreOptions descriptor_options;
-  descriptor_options.output = nep_adapters::cuda_backend::
-      DescriptorCoreOutput::ann_energy_and_derivatives;
-  descriptor_options.has_angular = has_angular;
-  descriptor_options.store_potential = store_potential;
   nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
       protocol,
       storage.atom_count,
       box,
       model,
       workspace,
-      descriptor_options);
+      nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
+  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
+      protocol, storage.atom_count, model, workspace);
   const bool accumulate_virial = options.write_totals || options.write_per_atom;
   const bool zbl_outputs = options.write_totals || options.write_per_atom;
   const auto virial_target = accumulate_virial
@@ -1018,7 +1015,6 @@ void run_reused_workspace_once(
     nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
         protocol,
         storage.atom_count,
-        box,
         model,
         workspace,
         virial_target);
@@ -1079,11 +1075,6 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
     }
   });
   const bool has_angular = protocol.body_channels.channel_count() > 0;
-  nep_adapters::cuda_backend::DescriptorCoreOptions descriptor_options;
-  descriptor_options.output = nep_adapters::cuda_backend::
-      DescriptorCoreOutput::ann_energy_and_derivatives;
-  descriptor_options.has_angular = has_angular;
-  descriptor_options.store_potential = store_potential;
   timing.descriptor_ms = time_synchronized_phase([&]() {
     nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
         protocol,
@@ -1091,9 +1082,12 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
         box,
         model,
         workspace,
-        descriptor_options);
+        nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
   });
-  timing.ann_ms = 0.0;
+  timing.ann_ms = time_synchronized_phase([&]() {
+    nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
+        protocol, storage.atom_count, model, workspace);
+  });
   timing.force_ms = time_synchronized_phase([&]() {
     const bool accumulate_virial =
         options.write_totals || options.write_per_atom;
@@ -1112,7 +1106,6 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
       nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
           protocol,
           storage.atom_count,
-          box,
           model,
           workspace,
           virial_target);

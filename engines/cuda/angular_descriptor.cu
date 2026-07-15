@@ -38,77 +38,6 @@ void require(bool condition, const char* message) {
   }
 }
 
-__device__ __forceinline__ void write_zero_angular_basis(
-    int atom_stride,
-    int angular_capacity,
-    int offset,
-    int basis_size,
-    float* fn_angular) {
-  for (int k = 0; k <= basis_size; ++k) {
-    fn_angular[offset + atom_stride * angular_capacity * k] = 0.0f;
-  }
-}
-
-__global__ void build_angular_basis_cache_kernel(
-    int atom_count,
-    int atom_stride,
-    int angular_capacity,
-    int basis_size,
-    float rc,
-    const int* __restrict__ nn_angular,
-    const float* __restrict__ f12x,
-    const float* __restrict__ f12y,
-    const float* __restrict__ f12z,
-    float* __restrict__ r12_angular,
-    float* __restrict__ fc_angular,
-    float* __restrict__ fn_angular) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const float rcinv = 1.0f / rc;
-  const int count = nn_angular[atom];
-  for (int slot = 0; slot < angular_capacity; ++slot) {
-    const int offset = atom + atom_stride * slot;
-    if (slot >= count) {
-      r12_angular[offset] = 0.0f;
-      fc_angular[offset] = 0.0f;
-      write_zero_angular_basis(
-          atom_stride, angular_capacity, offset, basis_size, fn_angular);
-      continue;
-    }
-
-    const float dx = f12x[offset];
-    const float dy = f12y[offset];
-    const float dz = f12z[offset];
-    const float r = sqrtf(dx * dx + dy * dy + dz * dz);
-    const float fc = angular_cutoff(rc, rcinv, r);
-    r12_angular[offset] = r;
-    fc_angular[offset] = fc;
-
-    const float x = 2.0f * (r * rcinv - 1.0f) *
-            (r * rcinv - 1.0f) -
-        1.0f;
-    const float half_fc = 0.5f * fc;
-    fn_angular[offset] = fc;
-    if (basis_size >= 1) {
-      fn_angular[offset + atom_stride * angular_capacity] =
-          (x + 1.0f) * half_fc;
-    }
-
-    float t_minus_2 = 1.0f;
-    float t_minus_1 = x;
-    for (int k = 2; k <= basis_size; ++k) {
-      const float t = 2.0f * x * t_minus_1 - t_minus_2;
-      t_minus_2 = t_minus_1;
-      t_minus_1 = t;
-      fn_angular[offset + atom_stride * angular_capacity * k] =
-          (t + 1.0f) * half_fc;
-    }
-  }
-}
-
 __device__ __forceinline__ void accumulate_s_l1(
     float x,
     float y,
@@ -307,173 +236,15 @@ __device__ __forceinline__ float find_q_134(const float* s) {
               s[2] * s[12] * s[20] + s[2] * s[11] * s[21]);
 }
 
-__global__ void build_angular_descriptors(
-    int atom_count,
-    int atom_stride,
-    int descriptor_dim,
-    int num_types,
-    int num_type_pairs,
-    int n_max_radial,
-    int basis_size_radial,
-    int n_max_angular,
-    int basis_size_angular,
-    int l_max_3body,
-    int has_q_222,
-    int has_q_1111,
-    int has_q_112,
-    int has_q_123,
-    int has_q_233,
-    int has_q_134,
-    int angular_capacity,
-    int abc_count,
-    const int* __restrict__ types,
-    const int* __restrict__ nn_angular,
-    const int* __restrict__ nl_angular,
-    const float* __restrict__ f12x,
-    const float* __restrict__ f12y,
-    const float* __restrict__ f12z,
-    const float* __restrict__ r12_angular,
-    const float* __restrict__ fn_angular,
-    const float* __restrict__ descriptor_coefficients,
-    float* __restrict__ sum_fxyz,
-    float* __restrict__ descriptors) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const int radial_dim = n_max_radial + 1;
-  const int angular_coefficient_offset =
-      num_type_pairs * (n_max_radial + 1) * (basis_size_radial + 1);
-  const int type1 = types[atom];
-  const int angular_count = nn_angular[atom];
-
-  for (int n = 0; n <= n_max_angular; ++n) {
-    float s[24] = {0.0f};
-    for (int slot = 0; slot < angular_count; ++slot) {
-      const int offset = atom + atom_stride * slot;
-      const int neighbor = nl_angular[offset];
-      const int type2 = types[neighbor];
-      const int type_pair = type1 * num_types + type2;
-      float gn = 0.0f;
-      for (int k = 0; k <= basis_size_angular; ++k) {
-        const int coefficient_index =
-            angular_coefficient_offset +
-            (n * (basis_size_angular + 1) + k) * num_type_pairs + type_pair;
-        const int fn_index = offset + atom_stride * angular_capacity * k;
-        gn += fn_angular[fn_index] * descriptor_coefficients[coefficient_index];
-      }
-
-      const float r = r12_angular[offset];
-      if (r <= 0.0f) {
-        continue;
-      }
-      const float rinv = 1.0f / r;
-      const float x = f12x[offset] * rinv;
-      const float y = f12y[offset] * rinv;
-      const float z = f12z[offset] * rinv;
-      if (l_max_3body >= 1) {
-        accumulate_s_l1(x, y, z, gn, s);
-      }
-      if (l_max_3body >= 2) {
-        accumulate_s_l2(x, y, z, gn, s);
-      }
-      if (l_max_3body >= 3) {
-        accumulate_s_l3(x, y, z, gn, s);
-      }
-      if (l_max_3body >= 4) {
-        accumulate_s_l4(x, y, z, gn, s);
-      }
-    }
-
-    for (int abc = 0; abc < abc_count; ++abc) {
-      const int s_index = atom + atom_stride * (n * abc_count + abc);
-      sum_fxyz[s_index] = abc < 24 ? s[abc] : 0.0f;
-    }
-
-    if (l_max_3body >= 1) {
-      const int descriptor_index = radial_dim + n;
-      descriptors[atom + atom_stride * descriptor_index] = find_q_l1(s);
-    }
-    if (l_max_3body >= 2) {
-      const int descriptor_index = radial_dim + (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_l2(s);
-      }
-    }
-    if (l_max_3body >= 3) {
-      const int descriptor_index = radial_dim + 2 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_l3(s);
-      }
-    }
-    if (l_max_3body >= 4) {
-      const int descriptor_index = radial_dim + 3 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_l4(s);
-      }
-    }
-    int channel = l_max_3body;
-    if (has_q_222) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_222(s);
-      }
-      ++channel;
-    }
-    if (has_q_1111) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_1111(s);
-      }
-      ++channel;
-    }
-    if (has_q_112) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_112(s);
-      }
-      ++channel;
-    }
-    if (has_q_123) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_123(s);
-      }
-      ++channel;
-    }
-    if (has_q_233) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_233(s);
-      }
-      ++channel;
-    }
-    if (has_q_134) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        descriptors[atom + atom_stride * descriptor_index] = find_q_134(s);
-      }
-    }
-  }
-}
-
-template <bool StoreDescriptors>
 __device__ __forceinline__ void write_descriptor_value(
     int atom,
     int atom_stride,
     int descriptor_index,
     float value,
-    float* q,
     float* descriptors) {
-  if constexpr (StoreDescriptors) {
-    descriptors[atom + atom_stride * descriptor_index] = value;
-  } else {
-    q[descriptor_index] = value;
-  }
+  descriptors[atom + atom_stride * descriptor_index] = value;
 }
 
-template <bool StoreDescriptors>
 __device__ __forceinline__ void flush_radial_type_run(
     int atom,
     int atom_stride,
@@ -485,7 +256,6 @@ __device__ __forceinline__ void flush_radial_type_run(
     int radial_basis_count,
     const float* __restrict__ descriptor_coefficients,
     const float* __restrict__ radial_basis_sums,
-    float* q,
     float* __restrict__ descriptors) {
   const int type_pair = type1 * num_types + type2;
   for (int n = 0; n <= n_max_radial; ++n) {
@@ -496,15 +266,11 @@ __device__ __forceinline__ void flush_radial_type_run(
       value += radial_basis_sums[k * blockDim.x + threadIdx.x] *
                descriptor_coefficients[coefficient_base + k];
     }
-    if constexpr (StoreDescriptors) {
-      descriptors[atom + atom_stride * n] += value;
-    } else {
-      q[n] += value;
-    }
+    descriptors[atom + atom_stride * n] += value;
   }
 }
 
-template <bool StoreDescriptors, bool HasAngular>
+template <bool HasAngular>
 __device__ __forceinline__ void build_structural_descriptor_core(
     int atom,
     int atom_stride,
@@ -538,7 +304,6 @@ __device__ __forceinline__ void build_structural_descriptor_core(
     float* __restrict__ f12z,
     const float* __restrict__ descriptor_coefficients,
     float* __restrict__ radial_basis_sums,
-    float* q,
     float* __restrict__ sum_fxyz,
     float* __restrict__ descriptors) {
   const int type1 = types[atom];
@@ -550,10 +315,8 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   const float radial_rcinv = 1.0f / cutoff_radial;
   const int radial_count = nn_radial[atom];
 
-  if constexpr (StoreDescriptors) {
-    for (int n = 0; n <= n_max_radial; ++n) {
-      descriptors[atom + atom_stride * n] = 0.0f;
-    }
+  for (int n = 0; n <= n_max_radial; ++n) {
+    descriptors[atom + atom_stride * n] = 0.0f;
   }
 
   int radial_run_type = -1;
@@ -563,7 +326,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
     const int type2 = types[neighbor];
     if (type2 != radial_run_type) {
       if (radial_run_type >= 0) {
-        flush_radial_type_run<StoreDescriptors>(
+        flush_radial_type_run(
             atom,
             atom_stride,
             type1,
@@ -574,7 +337,6 @@ __device__ __forceinline__ void build_structural_descriptor_core(
             radial_basis_count,
             descriptor_coefficients,
             radial_basis_sums,
-            q,
             descriptors);
       }
       for (int k = 0; k < radial_basis_size; ++k) {
@@ -616,7 +378,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   }
 
   if (radial_run_type >= 0) {
-    flush_radial_type_run<StoreDescriptors>(
+    flush_radial_type_run(
         atom,
         atom_stride,
         type1,
@@ -627,7 +389,6 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         radial_basis_count,
         descriptor_coefficients,
         radial_basis_sums,
-        q,
         descriptors);
   }
 
@@ -676,27 +437,15 @@ __device__ __forceinline__ void build_structural_descriptor_core(
             dx,
             dy,
             dz);
-        if (f12x != nullptr) {
-          f12x[offset] = dx;
-          f12y[offset] = dy;
-          f12z[offset] = dz;
-        }
+        f12x[offset] = dx;
+        f12y[offset] = dy;
+        f12z[offset] = dz;
         r = sqrtf(dx * dx + dy * dy + dz * dz);
         r12_angular[offset] = r;
-      } else if (f12x != nullptr) {
+      } else {
         dx = f12x[offset];
         dy = f12y[offset];
         dz = f12z[offset];
-        r = r12_angular[offset];
-      } else {
-        minimum_image_delta(
-            box,
-            positions_soa3[neighbor] - xi,
-            positions_soa3[atom_stride + neighbor] - yi,
-            positions_soa3[2 * atom_stride + neighbor] - zi,
-            dx,
-            dy,
-            dz);
         r = r12_angular[offset];
       }
       if (r <= 0.0f) {
@@ -770,23 +519,21 @@ __device__ __forceinline__ void build_structural_descriptor_core(
       }
 
       if (l_max_3body >= 1) {
-        write_descriptor_value<StoreDescriptors>(
+        write_descriptor_value(
             atom,
             atom_stride,
             radial_dim + n,
             find_q_l1(s_order),
-            q,
             descriptors);
       }
       if (l_max_3body >= 2) {
         const int descriptor_index = radial_dim + angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_l2(s_order),
-              q,
               descriptors);
         }
       }
@@ -794,12 +541,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + 2 * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_l3(s_order),
-              q,
               descriptors);
         }
       }
@@ -807,12 +553,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + 3 * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_l4(s_order),
-              q,
               descriptors);
         }
       }
@@ -821,12 +566,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_222(s_order),
-              q,
               descriptors);
         }
         ++channel;
@@ -835,12 +579,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_1111(s_order),
-              q,
               descriptors);
         }
         ++channel;
@@ -849,12 +592,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_112(s_order),
-              q,
               descriptors);
         }
         ++channel;
@@ -863,12 +605,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_123(s_order),
-              q,
               descriptors);
         }
         ++channel;
@@ -877,12 +618,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_233(s_order),
-              q,
               descriptors);
         }
         ++channel;
@@ -891,12 +631,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         const int descriptor_index =
             radial_dim + channel * angular_order_count + n;
         if (descriptor_index < descriptor_dim) {
-          write_descriptor_value<StoreDescriptors>(
+          write_descriptor_value(
               atom,
               atom_stride,
               descriptor_index,
               find_q_134(s_order),
-              q,
               descriptors);
         }
       }
@@ -967,7 +706,7 @@ __global__ void build_descriptor_core_from_positions(
         pbc_flags3);
   }
 
-  build_structural_descriptor_core<true, HasAngular>(
+  build_structural_descriptor_core<HasAngular>(
       atom,
       atom_stride,
       descriptor_dim,
@@ -1000,147 +739,11 @@ __global__ void build_descriptor_core_from_positions(
       f12z,
       descriptor_coefficients,
       radial_basis_sums,
-      nullptr,
       sum_fxyz,
       descriptors);
 }
 
 }  // namespace
-
-void build_angular_basis_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace) {
-  require(atom_count >= 0, "atom_count must be non-negative");
-  require(protocol.cutoff_angular > 0.0, "angular cutoff must be positive");
-  require(protocol.basis_size_angular >= 0,
-          "angular basis size must be non-negative");
-  require(protocol.neighbor_capacity_angular > 0,
-          "angular neighbor capacity must be positive");
-
-  const DeviceWorkspaceView view = workspace.view();
-  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(view.nn_angular != nullptr,
-          "workspace missing angular neighbor counts");
-  require(view.f12x != nullptr && view.f12y != nullptr &&
-              view.f12z != nullptr,
-          "workspace missing angular pair geometry");
-  require(view.r12_angular != nullptr,
-          "workspace missing angular distance cache");
-  require(view.fc_angular != nullptr,
-          "workspace missing angular cutoff cache");
-  require(view.fn_angular != nullptr,
-          "workspace missing angular basis cache");
-
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    build_angular_basis_cache_kernel<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.neighbor_capacity_angular,
-        protocol.basis_size_angular,
-        static_cast<float>(protocol.cutoff_angular),
-        view.nn_angular,
-        view.f12x,
-        view.f12y,
-        view.f12z,
-        view.r12_angular,
-        view.fc_angular,
-        view.fn_angular);
-  }
-  check_cuda(
-      cudaGetLastError(),
-      "build angular basis cache kernel launch failed");
-  check_cuda(cudaDeviceSynchronize(),
-             "build angular basis cache kernel failed");
-}
-
-void build_angular_descriptors_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace) {
-  require(atom_count >= 0, "atom_count must be non-negative");
-  require(protocol.num_types > 0, "num_types must be positive");
-  require(protocol.descriptor_dim > 0, "descriptor_dim must be positive");
-  require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
-  require(protocol.n_max_angular >= 0, "n_max_angular must be non-negative");
-  require(protocol.basis_size_radial >= 0, "radial basis size must be non-negative");
-  require(protocol.basis_size_angular >= 0, "angular basis size must be non-negative");
-  require(protocol.neighbor_capacity_angular > 0,
-          "angular neighbor capacity must be positive");
-  require(protocol.body_channels.l_max_3body <= 4,
-          "angular descriptor kernel supports l_max_3body <= 4");
-  require(!protocol.body_channels.has_q_222 || protocol.body_channels.l_max_3body >= 2,
-          "q_222 requires l_max_3body >= 2");
-  require(!protocol.body_channels.has_q_112 || protocol.body_channels.l_max_3body >= 2,
-          "q_112 requires l_max_3body >= 2");
-  require(!protocol.body_channels.has_q_123 || protocol.body_channels.l_max_3body >= 3,
-          "q_123 requires l_max_3body >= 3");
-  require(!protocol.body_channels.has_q_233 || protocol.body_channels.l_max_3body >= 3,
-          "q_233 requires l_max_3body >= 3");
-  require(!protocol.body_channels.has_q_134 || protocol.body_channels.l_max_3body >= 4,
-          "q_134 requires l_max_3body >= 4");
-
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView workspace_view = workspace.view();
-  require(static_cast<std::size_t>(atom_count) <= workspace_view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(model_view.descriptor_coefficients != nullptr,
-          "model missing descriptor coefficients");
-  require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
-          "model descriptor coefficient buffer is too small");
-  require(workspace_view.types != nullptr, "workspace missing atom types");
-  require(workspace_view.nn_angular != nullptr, "workspace missing angular counts");
-  require(workspace_view.nl_angular_slot_major != nullptr,
-          "workspace missing angular neighbor list");
-  require(workspace_view.f12x != nullptr && workspace_view.f12y != nullptr &&
-              workspace_view.f12z != nullptr,
-          "workspace missing angular pair geometry");
-  require(workspace_view.r12_angular != nullptr,
-          "workspace missing angular distance cache");
-  require(workspace_view.sum_fxyz != nullptr, "workspace missing sum_fxyz cache");
-  require(workspace_view.descriptors != nullptr, "workspace missing descriptor cache");
-
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    build_angular_descriptors<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(workspace_view.atom_capacity),
-        protocol.descriptor_dim,
-        protocol.num_types,
-        protocol.num_types * protocol.num_types,
-        protocol.n_max_radial,
-        protocol.basis_size_radial,
-        protocol.n_max_angular,
-        protocol.basis_size_angular,
-        protocol.body_channels.l_max_3body,
-        protocol.body_channels.has_q_222 ? 1 : 0,
-        protocol.body_channels.has_q_1111 ? 1 : 0,
-        protocol.body_channels.has_q_112 ? 1 : 0,
-        protocol.body_channels.has_q_123 ? 1 : 0,
-        protocol.body_channels.has_q_233 ? 1 : 0,
-        protocol.body_channels.has_q_134 ? 1 : 0,
-        protocol.neighbor_capacity_angular,
-        protocol.body_channels.abc_count(),
-        workspace_view.types,
-        workspace_view.nn_angular,
-        workspace_view.nl_angular_slot_major,
-        workspace_view.f12x,
-        workspace_view.f12y,
-        workspace_view.f12z,
-        workspace_view.r12_angular,
-        workspace_view.fn_angular,
-        model_view.descriptor_coefficients,
-        workspace_view.sum_fxyz,
-        workspace_view.descriptors);
-  }
-  check_cuda(cudaGetLastError(), "build angular descriptors kernel launch failed");
-  check_cuda(cudaDeviceSynchronize(), "build angular descriptors kernel failed");
-}
 
 void build_descriptor_core_from_positions_on_device(
     const ModelProtocol& protocol,
@@ -1148,7 +751,7 @@ void build_descriptor_core_from_positions_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    const DescriptorCoreOptions& options) {
+    DescriptorCoreTopology topology) {
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.descriptor_dim > 0, "descriptor_dim must be positive");
@@ -1157,11 +760,8 @@ void build_descriptor_core_from_positions_on_device(
   require(protocol.cutoff_radial > 0.0, "radial cutoff must be positive");
   require(protocol.neighbor_capacity_radial > 0,
           "radial neighbor capacity must be positive");
-  const bool protocol_has_angular = protocol.body_channels.channel_count() > 0;
-  require(
-      options.has_angular == protocol_has_angular,
-      "descriptor core angular option does not match the model protocol");
-  if (options.has_angular) {
+  const bool has_angular = protocol.body_channels.channel_count() > 0;
+  if (has_angular) {
     require(protocol.n_max_angular >= 0, "n_max_angular must be non-negative");
     require(protocol.basis_size_angular >= 0,
             "angular basis size must be non-negative");
@@ -1171,16 +771,6 @@ void build_descriptor_core_from_positions_on_device(
     require(protocol.body_channels.l_max_3body <= 4,
             "angular descriptor kernel supports l_max_3body <= 4");
   }
-  const bool evaluate_ann =
-      options.output == DescriptorCoreOutput::ann_energy_and_derivatives;
-  if (evaluate_ann) {
-    require(protocol.version == 4 || protocol.version == 5,
-            "descriptor core ANN supports NEP4/NEP5");
-    require(protocol.spin_mode == 0 && protocol.charge_mode == 0,
-            "descriptor core ANN only accepts ordinary models");
-    require(protocol.hidden_neurons > 0, "hidden_neurons must be positive");
-  }
-
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView workspace_view = workspace.view();
   require(static_cast<std::size_t>(atom_count) <= workspace_view.atom_capacity,
@@ -1195,17 +785,20 @@ void build_descriptor_core_from_positions_on_device(
   require(workspace_view.nn_radial != nullptr, "workspace missing radial counts");
   require(workspace_view.nl_radial_slot_major != nullptr,
           "workspace missing radial neighbor list");
-  if (options.has_angular) {
+  if (has_angular) {
     require(workspace_view.nn_angular != nullptr,
             "workspace missing angular counts");
     require(workspace_view.nl_angular_slot_major != nullptr,
             "workspace missing angular neighbor list");
     require(workspace_view.r12_angular != nullptr,
             "workspace missing angular distance cache");
+    require(workspace_view.f12x != nullptr && workspace_view.f12y != nullptr &&
+                workspace_view.f12z != nullptr,
+            "workspace missing angular pair geometry");
     require(workspace_view.sum_fxyz != nullptr,
             "workspace missing sum_fxyz cache");
   }
-  if (options.topology == DescriptorCoreTopology::batched_multi_box) {
+  if (topology == DescriptorCoreTopology::batched_multi_box) {
     require(workspace_view.atom_to_structure != nullptr,
             "workspace missing atom_to_structure");
     require(workspace_view.boxes_row_major9 != nullptr,
@@ -1214,18 +807,6 @@ void build_descriptor_core_from_positions_on_device(
             "workspace missing box inverses");
     require(workspace_view.pbc_flags3 != nullptr,
             "workspace missing PBC flags");
-  }
-  if (evaluate_ann) {
-    require(model_view.ann_type_major_qscaled != nullptr,
-            "model missing q-scaled ANN parameters");
-    require(model_view.ann_type_major_qscaled_count >= protocol.ann_parameter_count,
-            "q-scaled ANN parameter buffer is too small");
-    require(workspace_view.fp != nullptr,
-            "workspace missing descriptor derivative cache");
-    if (options.store_potential) {
-      require(workspace_view.potential != nullptr,
-              "workspace missing potential output");
-    }
   }
   require(workspace_view.descriptors != nullptr,
           "workspace missing descriptor cache");
@@ -1318,14 +899,14 @@ void build_descriptor_core_from_positions_on_device(
           workspace_view.descriptors);
     };
 
-    if (options.topology == DescriptorCoreTopology::batched_multi_box) {
-      if (options.has_angular) {
+    if (topology == DescriptorCoreTopology::batched_multi_box) {
+      if (has_angular) {
         launch(std::true_type{}, std::true_type{});
       } else {
         launch(std::true_type{}, std::false_type{});
       }
     } else {
-      if (options.has_angular) {
+      if (has_angular) {
         launch(std::false_type{}, std::true_type{});
       } else {
         launch(std::false_type{}, std::false_type{});
@@ -1334,9 +915,6 @@ void build_descriptor_core_from_positions_on_device(
   }
   check_cuda(cudaGetLastError(),
              "build descriptor core kernel launch failed");
-  if (evaluate_ann) {
-    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-  }
 }
 
 }  // namespace nep_adapters::cuda_backend

@@ -382,84 +382,6 @@ __global__ void stage_lammps_device_neighbors_dual_slot_major(
   }
 }
 
-__global__ void count_lammps_device_neighbors_compact(
-    int active_count,
-    int local_atom_count,
-    int valid_atom_count,
-    int neighbor_rows,
-    int numneigh_length,
-    int input_neighbor_capacity,
-    int stage_angular,
-    const int* active_atom_indices,
-    const int* row_counts,
-    const int* neighbors,
-    const int* neighbor_owner,
-    int neighbor_atom_stride,
-    int neighbor_slot_stride,
-    const double* positions,
-    int position_atom_stride,
-    int position_component_stride,
-    double radial_cutoff_sq,
-    double angular_cutoff_sq,
-    int* overflow) {
-  const int active = blockIdx.x * blockDim.x + threadIdx.x;
-  if (active >= active_count) {
-    return;
-  }
-  const int atom = active_atom_indices[active];
-  if (atom < 0 || atom >= local_atom_count) {
-    atomicOr(overflow, kLammpsOverflowActiveAtom);
-    return;
-  }
-  if (atom >= neighbor_rows || atom >= numneigh_length) {
-    atomicOr(overflow, kLammpsOverflowInputRowCount);
-    return;
-  }
-  const int count = row_counts[atom];
-  if (count < 0 || count > input_neighbor_capacity) {
-    atomicOr(overflow, kLammpsOverflowInputRowCount);
-  }
-  const int safe_count =
-      count < 0 ? 0 : (count > input_neighbor_capacity ? input_neighbor_capacity : count);
-  const double xi = positions[atom * position_atom_stride];
-  const double yi =
-      positions[atom * position_atom_stride + position_component_stride];
-  const double zi =
-      positions[atom * position_atom_stride + 2 * position_component_stride];
-  (void)neighbor_owner;
-  int radial_count = 0;
-  int angular_count = 0;
-  for (int slot = 0; slot < safe_count; ++slot) {
-    const int neighbor =
-        neighbors[atom * neighbor_atom_stride + slot * neighbor_slot_stride] &
-        kLammpsNeighborMask;
-    if (neighbor == atom) {
-      continue;
-    }
-    if (neighbor < 0 || neighbor >= valid_atom_count) {
-      atomicOr(overflow, kLammpsOverflowNeighborIndex);
-      continue;
-    }
-    const double dx = positions[neighbor * position_atom_stride] - xi;
-    const double dy =
-        positions[neighbor * position_atom_stride + position_component_stride] -
-        yi;
-    const double dz =
-        positions[neighbor * position_atom_stride +
-                  2 * position_component_stride] -
-        zi;
-    const double distance_sq = dx * dx + dy * dy + dz * dz;
-    if (distance_sq <= radial_cutoff_sq) {
-      ++radial_count;
-    }
-    if (stage_angular && distance_sq <= angular_cutoff_sq) {
-      ++angular_count;
-    }
-  }
-  atomicMax(overflow + 1, radial_count);
-  atomicMax(overflow + 2, angular_count);
-}
-
 void validate_batch_for_device_staging(
     const NepaStructureBatch& batch,
     const DeviceWorkspaceView& view) {
@@ -867,101 +789,7 @@ void stage_lammps_external_neighbors_on_device(
   free_temp(angular_device);
 }
 
-LammpsDeviceNeighborCounts count_lammps_device_neighbors_on_device(
-    const NepaLammpsDeviceNeighborInput& input,
-    const ModelProtocol& protocol) {
-  require(input.nlocal >= 0, "negative nlocal");
-  require(input.nall >= input.nlocal, "nall must be at least nlocal");
-  require(input.inum > 0, "device LAMMPS input must have active atoms");
-  require(input.max_neighbors >= 0, "negative max_neighbors");
-  require(input.neighbor_rows > 0, "invalid device neighbor row count");
-  require(input.numneigh_length > 0, "invalid device numneigh length");
-  require(input.ilist != nullptr, "missing device ilist");
-  require(input.numneigh != nullptr, "missing device numneigh");
-  require(input.neighbors != nullptr, "missing device neighbors");
-  require(input.neighbor_atom_stride > 0, "invalid neighbor atom stride");
-  require(input.neighbor_slot_stride > 0, "invalid neighbor slot stride");
-  require(input.positions != nullptr, "missing device positions");
-  require(input.position_atom_stride > 0, "invalid position atom stride");
-  require(input.position_component_stride > 0, "invalid position component stride");
-  if (protocol.spin_mode != 0) {
-    require(input.spins != nullptr, "spin model requires device spins");
-    require(input.spin_atom_stride > 0, "invalid spin atom stride");
-    require(input.spin_component_stride > 0, "invalid spin component stride");
-  }
-  require(input.nlocal <= input.neighbor_rows,
-          "device LAMMPS local atoms exceed neighbor rows");
-  require(input.nlocal <= input.numneigh_length,
-          "device LAMMPS local atoms exceed numneigh length");
-
-  int* overflow = nullptr;
-  check_cuda(
-      cudaMalloc(reinterpret_cast<void**>(&overflow), 3 * sizeof(int)),
-      "allocate compact neighbor count scratch");
-  try {
-    check_cuda(
-        cudaMemset(overflow, 0, 3 * sizeof(int)),
-        "zero compact neighbor count scratch");
-    const bool stage_angular = protocol.body_channels.channel_count() > 0;
-    const int active_blocks = (input.inum + kBlockSize - 1) / kBlockSize;
-    count_lammps_device_neighbors_compact<<<active_blocks, kBlockSize>>>(
-        input.inum,
-        input.nlocal,
-        input.nall,
-        input.neighbor_rows,
-        input.numneigh_length,
-        input.max_neighbors,
-        stage_angular ? 1 : 0,
-        input.ilist,
-        input.numneigh,
-        input.neighbors,
-        input.neighbor_owner,
-        input.neighbor_atom_stride,
-        input.neighbor_slot_stride,
-        input.positions,
-        input.position_atom_stride,
-        input.position_component_stride,
-        std::max(protocol.cutoff_radial, protocol.zbl_outer) *
-            std::max(protocol.cutoff_radial, protocol.zbl_outer),
-        protocol.cutoff_angular * protocol.cutoff_angular,
-        overflow);
-    check_cuda(cudaGetLastError(), "count compact device LAMMPS neighbors");
-    int host_overflow[3] = {};
-    check_cuda(
-        cudaMemcpy(
-            host_overflow,
-            overflow,
-            3 * sizeof(int),
-            cudaMemcpyDeviceToHost),
-        "copy compact device LAMMPS neighbor counts");
-    if (host_overflow[0] != 0) {
-      std::string message = "invalid device LAMMPS neighbor input:";
-      if ((host_overflow[0] & kLammpsOverflowActiveAtom) != 0) {
-        message += " active atom index out of range";
-      }
-      if ((host_overflow[0] & kLammpsOverflowInputRowCount) != 0) {
-        message += " input row count out of range";
-      }
-      if ((host_overflow[0] & kLammpsOverflowNeighborIndex) != 0) {
-        message += " neighbor index out of range";
-      }
-      cudaFree(overflow);
-      overflow = nullptr;
-      throw std::runtime_error(message);
-    }
-    LammpsDeviceNeighborCounts counts{};
-    counts.max_radial = host_overflow[1];
-    counts.max_angular = host_overflow[2];
-    cudaFree(overflow);
-    overflow = nullptr;
-    return counts;
-  } catch (...) {
-    cudaFree(overflow);
-    throw;
-  }
-}
-
-LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
+void stage_lammps_device_neighbors_on_device(
     const NepaLammpsDeviceNeighborInput& input,
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace,
@@ -1107,7 +935,7 @@ LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
   check_cuda(cudaGetLastError(), "stage device LAMMPS neighbors");
 
   if (!check_overflow) {
-    return {protocol.neighbor_capacity_radial, protocol.neighbor_capacity_angular};
+    return;
   }
 
   int host_overflow[3] = {};
@@ -1151,7 +979,6 @@ LammpsDeviceNeighborCounts stage_lammps_device_neighbors_on_device(
     message += " cutoff_angular=" + std::to_string(protocol.cutoff_angular);
     throw std::runtime_error(message);
   }
-  return {host_overflow[1], host_overflow[2]};
 }
 
 }  // namespace nep_adapters::cuda_backend

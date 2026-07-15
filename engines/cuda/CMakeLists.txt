@@ -19,11 +19,8 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     device_workspace.cu
     internal_neighbor_builder.cu
     device_output.cu
-    pair_geometry_cache.cu
     qnep_charge.cu
     radial_force.cu
-    radial_descriptor.cu
-    radial_basis_cache.cu
     spin_onsite.cu
     spin_onsite_descriptors.cuh
     spin_onsite_forces.cuh
@@ -38,11 +35,8 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     device_workspace.cu
     internal_neighbor_builder.cu
     device_output.cu
-    pair_geometry_cache.cu
     qnep_charge.cu
     radial_force.cu
-    radial_descriptor.cu
-    radial_basis_cache.cu
     spin_onsite.cu
     zbl_force.cu
     PROPERTIES LANGUAGE CUDA)

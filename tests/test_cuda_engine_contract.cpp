@@ -199,30 +199,20 @@ int main() {
   const nep_adapters::cuda_backend::WorkspacePlan external_workspace =
       nep_adapters::cuda_backend::make_external_neighbor_workspace_plan(
           protocol, 6, 4);
-  const nep_adapters::cuda_backend::WorkspacePlan model_workspace =
-      nep_adapters::cuda_backend::make_model_workspace_plan(protocol);
   const nep_adapters::cuda_backend::DeviceArrayPlan* atom_to_structure =
       workspace.find_array("atom_to_structure");
   const nep_adapters::cuda_backend::DeviceArrayPlan* workspace_boxes =
       workspace.find_array("boxes_row_major9");
-  const nep_adapters::cuda_backend::DeviceArrayPlan* parameters =
-      workspace.find_array("parameters_and_q_scaler");
   const nep_adapters::cuda_backend::DeviceArrayPlan* fp =
       workspace.find_array("fp");
   const nep_adapters::cuda_backend::DeviceArrayPlan* descriptors =
       workspace.find_array("descriptors");
   const nep_adapters::cuda_backend::DeviceArrayPlan* sum_fxyz =
       workspace.find_array("sum_fxyz");
-  const nep_adapters::cuda_backend::DeviceArrayPlan* fc_radial =
-      workspace.find_array("fc_radial");
-  const nep_adapters::cuda_backend::DeviceArrayPlan* fn_radial =
-      workspace.find_array("fn_radial");
   const nep_adapters::cuda_backend::DeviceArrayPlan* r12_angular =
       workspace.find_array("r12_angular");
-  const nep_adapters::cuda_backend::DeviceArrayPlan* fc_angular =
-      workspace.find_array("fc_angular");
-  const nep_adapters::cuda_backend::DeviceArrayPlan* fn_angular =
-      workspace.find_array("fn_angular");
+  const nep_adapters::cuda_backend::DeviceArrayPlan* f12x =
+      workspace.find_array("f12x");
   const nep_adapters::cuda_backend::DeviceArrayPlan* nl_angular =
       workspace.find_array("nl_angular_slot_major");
   if (workspace.neighbor_source !=
@@ -231,16 +221,20 @@ int main() {
       workspace.active_atom_capacity != 4 ||
       atom_to_structure == nullptr || atom_to_structure->element_count != 4 ||
       workspace_boxes == nullptr || workspace_boxes->element_count != 18 ||
-      parameters == nullptr || parameters->element_count != 139 ||
       fp == nullptr || fp->element_count != 56 ||
       descriptors == nullptr || descriptors->element_count != 56 ||
       sum_fxyz == nullptr || sum_fxyz->element_count != 64 ||
-      fc_radial == nullptr || fc_radial->element_count != 40 ||
-      fn_radial == nullptr || fn_radial->element_count != 120 ||
       r12_angular == nullptr || r12_angular->element_count != 32 ||
-      fc_angular == nullptr || fc_angular->element_count != 32 ||
-      fn_angular == nullptr || fn_angular->element_count != 96 ||
+      f12x == nullptr || f12x->element_count != 32 ||
       nl_angular == nullptr || nl_angular->element_count != 32) {
+    return EXIT_FAILURE;
+  }
+  if (workspace.find_array("parameters_and_q_scaler") != nullptr ||
+      workspace.find_array("r12_radial") != nullptr ||
+      workspace.find_array("fc_radial") != nullptr ||
+      workspace.find_array("fn_radial") != nullptr ||
+      workspace.find_array("fc_angular") != nullptr ||
+      workspace.find_array("fn_angular") != nullptr) {
     return EXIT_FAILURE;
   }
   if (external_workspace.neighbor_source !=
@@ -253,12 +247,6 @@ int main() {
           6 * static_cast<std::size_t>(protocol.neighbor_capacity_radial)) {
     return EXIT_FAILURE;
   }
-  if (model_workspace.find_array("ann_type_major")->element_count != 113 ||
-      model_workspace.find_array("descriptor_coefficients")->element_count != 12 ||
-      model_workspace.find_array("q_scaler")->element_count != 14) {
-    return EXIT_FAILURE;
-  }
-
   int staged_atom_counts[] = {2, 2};
   int staged_atom_offsets[] = {0, 2};
   int staged_types[] = {0, 1, 1, 0};

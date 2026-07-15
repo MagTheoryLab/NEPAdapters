@@ -1047,12 +1047,9 @@ struct AngularVirialOutput<true> {
   }
 };
 
-// Cached geometry is a compiler seam: removing the reconstruction state from
-// the common path keeps its register footprint at the lean tile level.
 template <
     bool AccumulateVirial,
     bool FloatVirialSink,
-    bool UseCachedGeometry,
     int NCount,
     int AtomsPerWarp,
     int EdgesPerAtomBatch>
@@ -1071,15 +1068,9 @@ __global__ void accumulate_angular_forces_pull_tile(
     int has_q_134,
     int abc_count,
     float cutoff_angular,
-    SimulationBox single_box,
-    const int* __restrict__ atom_to_structure,
-    const double* __restrict__ boxes_row_major9,
-    const double* __restrict__ box_inverse_row_major9,
-    const int* __restrict__ pbc_flags3,
     const int* __restrict__ types,
     const int* __restrict__ scheduled_atoms,
     const int* __restrict__ schedule_active_type_counts,
-    const double* __restrict__ positions_soa3,
     const int* __restrict__ nn_angular,
     const int* __restrict__ nl_angular,
     const float* __restrict__ r12_angular,
@@ -1141,22 +1132,6 @@ __global__ void accumulate_angular_forces_pull_tile(
   const int radial_dim = n_max_radial + 1;
   const int channel_count = l_max_3body + has_q_222 + has_q_1111 +
       has_q_112 + has_q_123 + has_q_233 + has_q_134;
-  SimulationBox atom_box = single_box;
-  double xi = 0.0;
-  double yi = 0.0;
-  double zi = 0.0;
-  if constexpr (!UseCachedGeometry) {
-    if (atom_to_structure != nullptr) {
-      atom_box = load_structure_box(
-          atom_to_structure[atom],
-          boxes_row_major9,
-          box_inverse_row_major9,
-          pbc_flags3);
-    }
-    xi = positions_soa3[atom];
-    yi = positions_soa3[atom_stride + atom];
-    zi = positions_soa3[2 * atom_stride + atom];
-  }
 
   __shared__ float tile_sum[AtomsPerWarp * kSumPerAtom];
   __shared__ float tile_fp[AtomsPerWarp * kFpPerAtom];
@@ -1269,20 +1244,9 @@ __global__ void accumulate_angular_forces_pull_tile(
       r = r12_angular[pair_offset];
       active_edge = r > 0.0f;
       if (active_edge) {
-        if constexpr (UseCachedGeometry) {
-          x12 = f12x[pair_offset];
-          y12 = f12y[pair_offset];
-          z12 = f12z[pair_offset];
-        } else {
-          minimum_image_delta(
-              atom_box,
-              positions_soa3[neighbor] - xi,
-              positions_soa3[atom_stride + neighbor] - yi,
-              positions_soa3[2 * atom_stride + neighbor] - zi,
-              x12,
-              y12,
-              z12);
-        }
+        x12 = f12x[pair_offset];
+        y12 = f12y[pair_offset];
+        z12 = f12z[pair_offset];
         rinv = 1.0f / r;
         unit[0] = x12 * rinv;
         unit[1] = y12 * rinv;
@@ -1416,16 +1380,13 @@ __global__ void accumulate_angular_forces_pull_tile(
 template <
     bool AccumulateVirial,
     bool FloatVirialSink,
-    bool UseCachedGeometry,
     int NCount,
     int EdgesPerAtomBatch>
 void launch_angular_pull_tile(
     const ModelProtocol& protocol,
     int atom_count,
-    const SimulationBox& box,
     const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    bool batched,
     bool virial_to_neighbor) {
   constexpr int kAtomsPerWarp = 32 / EdgesPerAtomBatch;
   static_assert(
@@ -1441,7 +1402,6 @@ void launch_angular_pull_tile(
   accumulate_angular_forces_pull_tile<
       AccumulateVirial,
       FloatVirialSink,
-      UseCachedGeometry,
       NCount,
       kAtomsPerWarp,
       EdgesPerAtomBatch>
@@ -1460,17 +1420,11 @@ void launch_angular_pull_tile(
           protocol.body_channels.has_q_134 ? 1 : 0,
           protocol.body_channels.abc_count(),
           static_cast<float>(protocol.cutoff_angular),
-          box,
-          batched ? view.atom_to_structure : nullptr,
-          batched ? view.boxes_row_major9 : nullptr,
-          batched ? view.box_inverse_row_major9 : nullptr,
-          batched ? view.pbc_flags3 : nullptr,
           view.types,
           protocol.num_types > 1 ? view.type_scheduled_atoms : nullptr,
           protocol.num_types > 1
               ? view.type_schedule_active_type_counts
               : nullptr,
-          view.positions_soa3,
           view.nn_angular,
           view.nl_angular_slot_major,
           view.r12_angular,
@@ -1488,100 +1442,68 @@ void launch_angular_pull_tile(
           virial_to_neighbor ? 1 : 0);
 }
 
-template <bool AccumulateVirial, bool FloatVirialSink, bool UseCachedGeometry>
-void dispatch_angular_pull_tile_impl(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModelView& model_view,
-    const DeviceWorkspaceView& view,
-    bool batched,
-    bool virial_to_neighbor) {
-  switch (protocol.n_max_angular) {
-    case 0:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 1, 4>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 1:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 2, 4>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 2:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 3, 8>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 3:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 4, 8>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 4:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 5, 8>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 5:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 6, 8>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 6:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 7, 16>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 7:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 8, 16>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-    case 8:
-      launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, UseCachedGeometry, 9, 16>(
-          protocol, atom_count, box, model_view, view, batched,
-          virial_to_neighbor);
-      break;
-  }
-}
-
 template <bool AccumulateVirial, bool FloatVirialSink>
 void dispatch_angular_pull_tile(
     const ModelProtocol& protocol,
     int atom_count,
-    const SimulationBox& box,
     const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    bool batched,
     bool virial_to_neighbor) {
-  if (view.f12x != nullptr) {
-    dispatch_angular_pull_tile_impl<AccumulateVirial, FloatVirialSink, true>(
-        protocol,
-        atom_count,
-        box,
-        model_view,
-        view,
-        batched,
-        virial_to_neighbor);
-  } else {
-    dispatch_angular_pull_tile_impl<AccumulateVirial, FloatVirialSink, false>(
-        protocol,
-        atom_count,
-        box,
-        model_view,
-        view,
-        batched,
-        virial_to_neighbor);
+  switch (protocol.n_max_angular) {
+    case 0:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 1, 4>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 1:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 2, 4>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 2:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 3, 8>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 3:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 4, 8>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 4:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 5, 8>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 5:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 6, 8>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 6:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 7, 16>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 7:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 8, 16>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
+    case 8:
+      launch_angular_pull_tile<
+          AccumulateVirial, FloatVirialSink, 9, 16>(
+          protocol, atom_count, model_view, view,
+          virial_to_neighbor);
+      break;
   }
 }
 
@@ -1589,8 +1511,7 @@ void validate_angular_force_inputs(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModelView& model_view,
-    const DeviceWorkspaceView& view,
-    bool batched) {
+    const DeviceWorkspaceView& view) {
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.n_max_angular >= 0 && protocol.n_max_angular <= 8,
@@ -1617,14 +1538,6 @@ void validate_angular_force_inputs(
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
 
-  if (batched) {
-    require(view.atom_to_structure != nullptr,
-            "workspace missing atom_to_structure");
-    require(view.boxes_row_major9 != nullptr, "workspace missing boxes");
-    require(view.box_inverse_row_major9 != nullptr,
-            "workspace missing box inverses");
-    require(view.pbc_flags3 != nullptr, "workspace missing pbc flags");
-  }
   require(view.types != nullptr, "workspace missing atom types");
   if (protocol.num_types > 1) {
     require(view.type_scheduled_atoms != nullptr,
@@ -1632,12 +1545,13 @@ void validate_angular_force_inputs(
     require(view.type_schedule_active_type_counts != nullptr,
             "workspace missing atom type schedule active-type counts");
   }
-  require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.nn_angular != nullptr, "workspace missing angular counts");
   require(view.nl_angular_slot_major != nullptr,
           "workspace missing angular neighbors");
   require(view.r12_angular != nullptr,
           "workspace missing angular distance cache");
+  require(view.f12x != nullptr && view.f12y != nullptr && view.f12z != nullptr,
+          "workspace missing angular pair geometry");
   require(view.fp != nullptr, "workspace missing descriptor derivatives");
   require(view.sum_fxyz != nullptr, "workspace missing angular sums");
   require(view.force_soa3 != nullptr, "workspace missing force output");
@@ -1667,34 +1581,32 @@ void validate_angular_force_inputs(
 void accumulate_l2_angular_forces_on_device(
     const ModelProtocol& protocol,
     int atom_count,
-    const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target) {
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
-  validate_angular_force_inputs(
-      protocol, atom_count, model_view, view, false);
+  validate_angular_force_inputs(protocol, atom_count, model_view, view);
 
   if (atom_count > 0) {
     switch (virial_target) {
       case VirialTarget::none:
         dispatch_angular_pull_tile<false, false>(
-            protocol, atom_count, box, model_view, view, false, false);
+            protocol, atom_count, model_view, view, false);
         break;
       case VirialTarget::center_atom:
         dispatch_angular_pull_tile<true, false>(
-            protocol, atom_count, box, model_view, view, false, false);
+            protocol, atom_count, model_view, view, false);
         break;
       case VirialTarget::neighbor_atom:
         dispatch_angular_pull_tile<true, false>(
-            protocol, atom_count, box, model_view, view, false, true);
+            protocol, atom_count, model_view, view, true);
         break;
       case VirialTarget::neighbor_float_sink:
         require(view.per_atom_virial_float_soa9 != nullptr,
                 "workspace missing per-atom virial sink");
         dispatch_angular_pull_tile<true, true>(
-            protocol, atom_count, box, model_view, view, false, false);
+            protocol, atom_count, model_view, view, false);
         break;
     }
   }
@@ -1714,17 +1626,14 @@ void accumulate_l2_angular_forces_batched(
       "batched angular forces require an FP64 virial target");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
-  validate_angular_force_inputs(
-      protocol, atom_count, model_view, view, true);
+  validate_angular_force_inputs(protocol, atom_count, model_view, view);
 
   if (atom_count > 0) {
     dispatch_angular_pull_tile<true, false>(
         protocol,
         atom_count,
-        SimulationBox{},
         model_view,
         view,
-        true,
         virial_target == VirialTarget::neighbor_atom);
   }
   check_cuda(cudaGetLastError(),

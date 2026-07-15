@@ -4,6 +4,7 @@
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
+#include "force_pipeline.hpp"
 #include "simulation_box.hpp"
 
 #include <cuda_runtime.h>
@@ -257,28 +258,13 @@ void run_step(
       total_atoms,
       box,
       workspace);
-  nep_adapters::cuda_backend::build_radial_geometry_basis_cache_on_device(
-      protocol,
-      total_atoms,
-      box,
-      workspace);
-  nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-      protocol,
-      total_atoms,
-      model,
-      workspace);
-  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-      protocol,
-      total_atoms,
-      model,
-      workspace);
-  nep_adapters::cuda_backend::accumulate_radial_forces_on_device(
-      protocol,
-      total_atoms,
-      box,
-      model,
-      workspace,
-      nep_adapters::cuda_backend::VirialTarget::none);
+  nep_adapters::cuda_backend::ForceEvaluationRequest request;
+  request.topology =
+      nep_adapters::cuda_backend::ForceNeighborTopology::single_box_symmetric;
+  request.virial = nep_adapters::cuda_backend::VirialOutputMode::none;
+  request.store_potential = true;
+  nep_adapters::cuda_backend::run_force_pipeline(
+      protocol, request, total_atoms, box, model, workspace);
 
   if (!options.integrate) {
     return;
