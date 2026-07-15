@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -20,10 +21,15 @@ constexpr int kC4L4DescriptorDim = 69;
 constexpr int kFirstDensityDescriptor = 19;
 constexpr int kRaw1DotDescriptor = 55;
 
+std::filesystem::path process_local_model_path(const std::string& label) {
+  return std::filesystem::temp_directory_path() /
+         (label + "_pid" + std::to_string(static_cast<long long>(getpid())) +
+          ".nep");
+}
+
 std::string write_model(int active_dim) {
-  const std::string path =
-      (std::filesystem::temp_directory_path() /
-       ("cuda_spin_density_" + std::to_string(active_dim) + ".nep")).string();
+  const std::string path = process_local_model_path(
+      "cuda_spin_density_" + std::to_string(active_dim)).string();
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
@@ -56,9 +62,8 @@ std::string write_c4_l4_model(
     const std::string& label,
     int max_neighbors,
     int active_descriptor) {
-  const std::string path =
-      (std::filesystem::temp_directory_path() /
-       ("cuda_spin_density_c4_l4_" + label + ".nep")).string();
+  const std::string path = process_local_model_path(
+      "cuda_spin_density_c4_l4_" + label).string();
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
@@ -91,15 +96,18 @@ std::string write_c4_l4_model(
   return path;
 }
 
-std::string write_c4_l4_raw1_dot_model() {
-  // Max-neighbor 64 maps to capacity 80, isolating the raw1 overwrite order.
-  return write_c4_l4_model("raw1_dot_capacity80", 64, kRaw1DotDescriptor);
+std::string write_c4_l4_raw1_dot_model(int max_neighbors) {
+  return write_c4_l4_model(
+      "raw1_dot_capacity" +
+          std::to_string(static_cast<int>(std::ceil(max_neighbors * 1.25))),
+      max_neighbors,
+      kRaw1DotDescriptor);
 }
 
-std::string write_c4_l4_capacity32_density_model() {
-  // Max-neighbor 25 maps to the upper boundary of the <=32 cache variant.
+std::string write_c4_l4_density_model() {
+  // Keep a typical 25-neighbor shape alongside the denser 64/96 cases below.
   return write_c4_l4_model(
-      "density_capacity32", 25, kFirstDensityDescriptor);
+      "density", 25, kFirstDensityDescriptor);
 }
 
 double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& rhs) {
@@ -287,36 +295,46 @@ bool check_dim(int active_dim) {
 }
 
 bool check_c4_l4_raw1_dot() {
-  const std::string model_path = write_c4_l4_raw1_dot_model();
-  NepaModel* cpu = nullptr;
-  NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
-      nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
-    std::cerr << "raw1-dot model load failed: " << nepa_last_error_message() << "\n";
-    return false;
+  // Exercise both one-chunk and multi-chunk workspace capacities through the
+  // same streaming primitive core.
+  for (int max_neighbors : {64, 96}) {
+    const std::string model_path =
+        write_c4_l4_raw1_dot_model(max_neighbors);
+    NepaModel* cpu = nullptr;
+    NepaModel* gpu = nullptr;
+    if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+        nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
+      std::cerr << "raw1-dot model load failed: "
+                << nepa_last_error_message() << "\n";
+      return false;
+    }
+    const BatchResult cpu_oracle = run_batch(cpu);
+    const BatchResult optimized = run_batch(gpu);
+    const double force_diff = max_abs_diff(cpu_oracle.force, optimized.force);
+    const double mforce_diff = max_abs_diff(cpu_oracle.mforce, optimized.mforce);
+    const bool ok = force_diff < 2.0e-4 && mforce_diff < 2.0e-4;
+    if (!ok) {
+      std::cerr << "optimized c4/l4 raw1-dot derivative mismatch"
+                << " max_neighbors=" << max_neighbors
+                << " force=" << force_diff
+                << " mforce=" << mforce_diff << "\n";
+    }
+    nepa_free_model(cpu);
+    nepa_free_model(gpu);
+    if (!ok) {
+      return false;
+    }
   }
-  const BatchResult cpu_oracle = run_batch(cpu);
-  const BatchResult optimized = run_batch(gpu);
-  const double force_diff = max_abs_diff(cpu_oracle.force, optimized.force);
-  const double mforce_diff = max_abs_diff(cpu_oracle.mforce, optimized.mforce);
-  const bool ok = force_diff < 2.0e-4 && mforce_diff < 2.0e-4;
-  if (!ok) {
-    std::cerr << "optimized c4/l4 raw1-dot derivative mismatch"
-              << " force=" << force_diff
-              << " mforce=" << mforce_diff << "\n";
-  }
-  nepa_free_model(cpu);
-  nepa_free_model(gpu);
-  return ok;
+  return true;
 }
 
-bool check_c4_l4_capacity32_density_finalize() {
-  const std::string model_path = write_c4_l4_capacity32_density_model();
+bool check_c4_l4_density_finalize() {
+  const std::string model_path = write_c4_l4_density_model();
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
   if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
       nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
-    std::cerr << "capacity-32 model load failed: "
+    std::cerr << "density model load failed: "
               << nepa_last_error_message() << "\n";
     return false;
   }
@@ -327,7 +345,7 @@ bool check_c4_l4_capacity32_density_finalize() {
   const double energy_diff = std::abs(cpu_oracle.energy - optimized.energy);
   const double force_diff = max_abs_diff(cpu_oracle.force, optimized.force);
   const double mforce_diff = max_abs_diff(cpu_oracle.mforce, optimized.mforce);
-  std::cout << "c4_l4_capacity32_density_oracle"
+  std::cout << "c4_l4_density_oracle"
             << " descriptor=" << descriptor_diff
             << " energy=" << energy_diff
             << " force=" << force_diff
@@ -335,7 +353,7 @@ bool check_c4_l4_capacity32_density_finalize() {
   const bool ok = descriptor_diff < 2.0e-4 && energy_diff < 2.0e-4 &&
                   force_diff < 2.0e-4 && mforce_diff < 2.0e-4;
   if (!ok) {
-    std::cerr << "optimized c4/l4 capacity-32 density mismatch"
+    std::cerr << "optimized c4/l4 density mismatch"
               << " descriptor=" << descriptor_diff
               << " energy=" << energy_diff
               << " force=" << force_diff
@@ -365,7 +383,7 @@ int main() {
   if (!check_c4_l4_raw1_dot()) {
     return EXIT_FAILURE;
   }
-  if (!check_c4_l4_capacity32_density_finalize()) {
+  if (!check_c4_l4_density_finalize()) {
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

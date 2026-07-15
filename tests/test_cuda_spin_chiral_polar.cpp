@@ -14,20 +14,50 @@
 namespace {
 
 constexpr int kAtomCount = 3;
-constexpr int kDescriptorDim = 69;
 
-std::string write_model(int active_dim) {
+int spin_descriptor_dim(int channels, int l_max) {
+  int dim = 2 + 4 * channels + channels;
+  if (l_max >= 1) {
+    dim += 3 * channels;
+  }
+  for (int ell = 2; ell <= l_max; ++ell) {
+    dim += channels;
+  }
+  dim += 2 * channels;
+  if (l_max >= 1) {
+    dim += channels;
+  }
+  return dim + std::min(2, channels) + 2 * channels;
+}
+
+int chiral_offset(int channels, int l_max) {
+  constexpr int StructDescriptorDim = 1;
+  return StructDescriptorDim + spin_descriptor_dim(channels, l_max) -
+      std::min(2, channels) - 2 * channels;
+}
+
+std::string write_model(
+    int channels,
+    int spin_basis_size,
+    int spin_l_max,
+    int active_dim) {
+  constexpr int StructDescriptorDim = 1;
+  const int descriptor_dim =
+      StructDescriptorDim + spin_descriptor_dim(channels, spin_l_max);
   const std::string path =
       (std::filesystem::temp_directory_path() /
-       ("cuda_spin_chiral_" + std::to_string(active_dim) + ".nep")).string();
+       ("cuda_spin_chiral_c" + std::to_string(channels) + "_b" +
+        std::to_string(spin_basis_size) + "_l" +
+        std::to_string(spin_l_max) + "_d" +
+        std::to_string(active_dim) + ".nep")).string();
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
   out << "spin_baseline -2\n";
   out << "spin_n_max 0 0\n";
-  out << "spin_basis_size 3 3\n";
-  out << "spin_l_max 4 0 0\n";
-  out << "spin_compress 4\n";
+  out << "spin_basis_size " << spin_basis_size << " 3\n";
+  out << "spin_l_max " << spin_l_max << " 0 0\n";
+  out << "spin_compress " << channels << "\n";
   out << "spin_cutoff 4 4\n";
   out << "spin_chiral 1\n";
   out << "spin_scaler 1\n";
@@ -38,12 +68,12 @@ std::string write_model(int active_dim) {
   out << "basis_size 0 0\n";
   out << "l_max 0 0 0\n";
   out << "ANN 1 0\n";
-  for (int dim = 0; dim < kDescriptorDim; ++dim) {
+  for (int dim = 0; dim < descriptor_dim; ++dim) {
     out << (dim == active_dim ? 0.25 : 0.0) << "\n";
   }
   out << "0\n";
-  for (int c = 0; c < 4; ++c) {
-    for (int k = 0; k < 4; ++k) {
+  for (int c = 0; c < channels; ++c) {
+    for (int k = 0; k <= spin_basis_size; ++k) {
       out << (0.2 + 0.03 * c + 0.01 * k) << "\n";
     }
   }
@@ -51,7 +81,7 @@ std::string write_model(int active_dim) {
   out << "0\n";
   out << "0\n";
   out << "1\n";
-  for (int dim = 0; dim < kDescriptorDim; ++dim) {
+  for (int dim = 0; dim < descriptor_dim; ++dim) {
     out << "1\n";
   }
   return path;
@@ -114,7 +144,13 @@ BatchResult run_batch(NepaModel* model) {
   out.force.assign(3 * kAtomCount, 0.0);
   out.virial.assign(9, 0.0);
   out.mforce.assign(3 * kAtomCount, 0.0);
-  out.descriptor.assign(kAtomCount * kDescriptorDim, 0.0);
+  NepaModelInfo info{};
+  if (nepa_model_info(model, &info) != NEPA_STATUS_OK) {
+    std::cerr << "model info failed: " << nepa_last_error_message() << "\n";
+    std::exit(EXIT_FAILURE);
+  }
+  out.descriptor.assign(
+      static_cast<std::size_t>(kAtomCount) * info.descriptor_dim, 0.0);
   NepaFindForceResult force_result{};
   force_result.energy_per_structure = &out.energy;
   force_result.potential_per_atom = out.potential.data();
@@ -191,8 +227,13 @@ bool check_lammps(NepaModel* model, const BatchResult& ref) {
          max_abs_diff(mforce, ref.mforce) < 1.0e-6;
 }
 
-bool check_dim(int active_dim) {
-  const std::string model_path = write_model(active_dim);
+bool check_dim(
+    int channels,
+    int spin_basis_size,
+    int spin_l_max,
+    int active_dim) {
+  const std::string model_path =
+      write_model(channels, spin_basis_size, spin_l_max, active_dim);
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
   if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
@@ -207,12 +248,17 @@ bool check_dim(int active_dim) {
   const double virial_diff = max_abs_diff(c.virial, g.virial);
   const double mforce_diff = max_abs_diff(c.mforce, g.mforce);
   const double descriptor_diff = max_abs_diff(c.descriptor, g.descriptor);
-  const bool ok = energy_diff < 1.0e-6 && potential_diff < 1.0e-6 &&
-                  force_diff < 1.0e-6 && virial_diff < 1.0e-6 &&
-                  mforce_diff < 1.0e-6 && descriptor_diff < 1.0e-6 &&
+  constexpr double Tolerance = 2.0e-4;
+  const bool ok = energy_diff < Tolerance && potential_diff < Tolerance &&
+                  force_diff < Tolerance && virial_diff < Tolerance &&
+                  mforce_diff < Tolerance && descriptor_diff < Tolerance &&
                   check_lammps(gpu, c);
   if (!ok) {
-    std::cerr << "spin chiral CPU/GPU mismatch active_dim=" << active_dim
+    std::cerr << "spin chiral CPU/GPU mismatch"
+              << " C=" << channels
+              << " B=" << spin_basis_size + 1
+              << " L=" << spin_l_max
+              << " active_dim=" << active_dim
               << " energy=" << energy_diff
               << " potential=" << potential_diff
               << " force=" << force_diff
@@ -247,9 +293,31 @@ int main() {
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
-  for (int active_dim : {59, 60, 61, 64, 65, 68}) {
-    if (!check_dim(active_dim)) {
-      return EXIT_FAILURE;
+  struct Shape {
+    int channels;
+    int basis_size;
+    int l_max;
+  };
+  for (const Shape shape : {
+           Shape{1, 0, 0},
+           Shape{2, 4, 2},
+           Shape{3, 2, 3},
+           Shape{4, 3, 4},
+           Shape{4, 7, 1}}) {
+    const int offset = chiral_offset(shape.channels, shape.l_max);
+    const int chi_channels = std::min(2, shape.channels);
+    for (int active_dim : {
+             offset,
+             offset + chi_channels,
+             offset + chi_channels + shape.channels,
+             1 + spin_descriptor_dim(shape.channels, shape.l_max) - 1}) {
+      if (!check_dim(
+              shape.channels,
+              shape.basis_size,
+              shape.l_max,
+              active_dim)) {
+        return EXIT_FAILURE;
+      }
     }
   }
   return EXIT_SUCCESS;

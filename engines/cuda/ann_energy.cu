@@ -1,6 +1,5 @@
 #include "device_operations.hpp"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -9,17 +8,16 @@
 namespace nep_adapters::cuda_backend {
 namespace {
 
+constexpr int kWarpSize = 32;
+constexpr int kAnnThreadsPerAtom = 4;
+constexpr int kAnnAtomsPerWarp = kWarpSize / kAnnThreadsPerAtom;
+constexpr int kAnnWarpsPerBlock = 4;
+constexpr unsigned kFullWarpMask = 0xffffffffu;
+
 void check_cuda(cudaError_t status, const char* message) {
   if (status != cudaSuccess) {
     throw std::runtime_error(
         std::string(message) + ": " + cudaGetErrorString(status));
-  }
-}
-
-void check_cublas(cublasStatus_t status, const char* message) {
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    throw std::runtime_error(
-        std::string(message) + ": cublas status " + std::to_string(status));
   }
 }
 
@@ -29,15 +27,15 @@ void require(bool condition, const char* message) {
   }
 }
 
-cublasHandle_t cublas_handle() {
-  static cublasHandle_t handle = nullptr;
-  if (handle == nullptr) {
-    check_cublas(cublasCreate(&handle), "create cublas handle");
+__device__ __forceinline__ float ann_subwarp_sum(float value) {
+  for (int offset = kAnnThreadsPerAtom / 2; offset > 0; offset /= 2) {
+    value += __shfl_down_sync(
+        kFullWarpMask, value, offset, kAnnThreadsPerAtom);
   }
-  return handle;
+  return value;
 }
 
-__global__ void evaluate_ann_energy(
+__global__ void evaluate_ann_energy_subwarp(
     int atom_count,
     int atom_stride,
     int version,
@@ -46,159 +44,94 @@ __global__ void evaluate_ann_energy(
     int num_types,
     const int* __restrict__ types,
     const float* __restrict__ descriptors,
-    const float* __restrict__ q_scaler,
     const float* __restrict__ ann_type_major,
     const float* __restrict__ spin_baseline,
     double* __restrict__ potential,
     float* __restrict__ fp) {
-  (void)q_scaler;
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
+  extern __shared__ float shared_storage[];
+  const int lane = threadIdx.x & (kWarpSize - 1);
+  const int warp = threadIdx.x / kWarpSize;
+  const int warps_per_block = blockDim.x / kWarpSize;
+  const int atom_in_warp = lane / kAnnThreadsPerAtom;
+  const int sublane = lane & (kAnnThreadsPerAtom - 1);
+  const int atoms_per_block = warps_per_block * kAnnAtomsPerWarp;
+  const int warp_atom_base =
+      blockIdx.x * atoms_per_block + warp * kAnnAtomsPerWarp;
+  const int atom = warp_atom_base + atom_in_warp;
 
-  const int type = types[atom];
-  if (type < 0 || type >= num_types) {
-    return;
+  const int shared_stride =
+      kAnnAtomsPerWarp * (descriptor_dim + hidden_neurons);
+  float* descriptor_shared = shared_storage + warp * shared_stride;
+  float* hidden_delta_shared =
+      descriptor_shared + kAnnAtomsPerWarp * descriptor_dim;
+  for (int index = lane;
+       index < kAnnAtomsPerWarp * descriptor_dim;
+       index += kWarpSize) {
+    const int descriptor = index / kAnnAtomsPerWarp;
+    const int atom_offset = index % kAnnAtomsPerWarp;
+    const int source_atom = warp_atom_base + atom_offset;
+    descriptor_shared[index] = source_atom < atom_count
+        ? descriptors[source_atom + atom_stride * descriptor]
+        : 0.0f;
   }
+  __syncwarp();
+
+  const bool atom_is_valid = atom < atom_count;
+  const int type = atom_is_valid ? types[atom] : -1;
+  const bool type_is_valid = type >= 0 && type < num_types;
+  const int safe_type = type_is_valid ? type : 0;
   const int w0_count = hidden_neurons * descriptor_dim;
   const int type_extra_bias_count = version == 5 ? 1 : 0;
   const int type_block_size =
       w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
-  const float* w0 = ann_type_major + type * type_block_size;
+  const float* w0 = ann_type_major + safe_type * type_block_size;
   const float* b0 = w0 + w0_count;
   const float* w1 = b0 + hidden_neurons;
   const float* b1 = ann_type_major + num_types * type_block_size;
 
   float energy = 0.0f;
-  for (int d = 0; d < descriptor_dim; ++d) {
-    fp[atom + atom_stride * d] = 0.0f;
-  }
-
   for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-    float w0_times_q = 0.0f;
-    for (int d = 0; d < descriptor_dim; ++d) {
-      const float q = descriptors[atom + atom_stride * d];
-      w0_times_q += w0[neuron * descriptor_dim + d] * q;
+    float partial = 0.0f;
+    if (type_is_valid) {
+      for (int descriptor = sublane;
+           descriptor < descriptor_dim;
+           descriptor += kAnnThreadsPerAtom) {
+        partial += w0[neuron * descriptor_dim + descriptor] *
+            descriptor_shared[
+                descriptor * kAnnAtomsPerWarp + atom_in_warp];
+      }
     }
-    const float x1 = tanhf(w0_times_q - b0[neuron]);
-    const float tanh_derivative = 1.0f - x1 * x1;
-    energy += w1[neuron] * x1;
-    for (int d = 0; d < descriptor_dim; ++d) {
-      const float derivative = w1[neuron] * tanh_derivative *
-                               w0[neuron * descriptor_dim + d];
-      fp[atom + atom_stride * d] += derivative;
+    const float dot = ann_subwarp_sum(partial);
+    if (sublane == 0 && type_is_valid) {
+      const float value = tanhf(dot - b0[neuron]);
+      energy += w1[neuron] * value;
+      hidden_delta_shared[
+          neuron * kAnnAtomsPerWarp + atom_in_warp] =
+          w1[neuron] * (1.0f - value * value);
     }
   }
-  const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-  const float baseline = spin_baseline != nullptr ? spin_baseline[type] : 0.0f;
-  potential[atom] = static_cast<double>(energy - type_bias - b1[0] + baseline);
-}
+  __syncwarp();
 
-__global__ void finish_single_type_ann_gemm(
-    int atom_count,
-    int version,
-    int descriptor_dim,
-    int hidden_neurons,
-    const float* __restrict__ ann_type_major,
-    const float* __restrict__ spin_baseline,
-    float* __restrict__ hidden_values,
-    double* __restrict__ potential,
-    float* __restrict__ hidden_delta) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
+  if (type_is_valid) {
+    for (int descriptor = sublane;
+         descriptor < descriptor_dim;
+         descriptor += kAnnThreadsPerAtom) {
+      float derivative = 0.0f;
+      for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
+        derivative += hidden_delta_shared[
+            neuron * kAnnAtomsPerWarp + atom_in_warp] *
+            w0[neuron * descriptor_dim + descriptor];
+      }
+      fp[atom + atom_stride * descriptor] = derivative;
+    }
   }
-
-  const int w0_count = hidden_neurons * descriptor_dim;
-  const int type_extra_bias_count = version == 5 ? 1 : 0;
-  const int type_block_size =
-      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
-  const float* b0 = ann_type_major + w0_count;
-  const float* w1 = b0 + hidden_neurons;
-  const float* b1 = ann_type_major + type_block_size;
-
-  float energy = 0.0f;
-  for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-    const int offset = atom + atom_count * neuron;
-    const float x1 = tanhf(hidden_values[offset] - b0[neuron]);
-    const float tanh_derivative = 1.0f - x1 * x1;
-    energy += w1[neuron] * x1;
-    hidden_delta[offset] = w1[neuron] * tanh_derivative;
+  if (sublane == 0 && type_is_valid) {
+    const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
+    const float baseline =
+        spin_baseline != nullptr ? spin_baseline[type] : 0.0f;
+    potential[atom] =
+        static_cast<double>(energy - type_bias - b1[0] + baseline);
   }
-  const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-  const float baseline = spin_baseline != nullptr ? spin_baseline[0] : 0.0f;
-  potential[atom] = static_cast<double>(energy - type_bias - b1[0] + baseline);
-}
-
-bool try_evaluate_single_type_ann_gemm(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModelView& model_view,
-    const DeviceWorkspaceView& workspace_view) {
-  if (protocol.num_types != 1 || protocol.charge_mode != 0 ||
-      workspace_view.ann_hidden_values == nullptr ||
-      workspace_view.ann_hidden_delta == nullptr) {
-    return false;
-  }
-
-  const int descriptor_dim = protocol.descriptor_dim;
-  const int hidden_neurons = protocol.hidden_neurons;
-  const float alpha = 1.0f;
-  const float beta = 0.0f;
-  cublasHandle_t handle = cublas_handle();
-  check_cublas(
-      cublasSgemm(
-          handle,
-          CUBLAS_OP_N,
-          CUBLAS_OP_N,
-          atom_count,
-          hidden_neurons,
-          descriptor_dim,
-          &alpha,
-          workspace_view.descriptors,
-          static_cast<int>(workspace_view.atom_capacity),
-          model_view.ann_type_major_qscaled,
-          descriptor_dim,
-          &beta,
-          workspace_view.ann_hidden_values,
-          atom_count),
-      "ANN GEMM hidden");
-
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    finish_single_type_ann_gemm<<<blocks, threads>>>(
-        atom_count,
-        protocol.version,
-        descriptor_dim,
-        hidden_neurons,
-        model_view.ann_type_major_qscaled,
-        model_view.spin_baseline,
-        workspace_view.ann_hidden_values,
-        workspace_view.potential,
-        workspace_view.ann_hidden_delta);
-  }
-  check_cuda(cudaGetLastError(), "finish ANN GEMM launch failed");
-
-  check_cublas(
-      cublasSgemm(
-          handle,
-          CUBLAS_OP_N,
-          CUBLAS_OP_T,
-          atom_count,
-          descriptor_dim,
-          hidden_neurons,
-          &alpha,
-          workspace_view.ann_hidden_delta,
-          atom_count,
-          model_view.ann_type_major_qscaled,
-          descriptor_dim,
-          &beta,
-          workspace_view.fp,
-          static_cast<int>(workspace_view.atom_capacity)),
-      "ANN GEMM fp");
-  return true;
 }
 
 __global__ void evaluate_qnep_ann(
@@ -331,19 +264,18 @@ void evaluate_ann_energy_on_device(
   require(workspace_view.descriptors != nullptr, "workspace missing descriptors");
   require(workspace_view.potential != nullptr, "workspace missing potential output");
   require(workspace_view.fp != nullptr, "workspace missing descriptor derivative cache");
-
-  if (try_evaluate_single_type_ann_gemm(
-          protocol,
-          atom_count,
-          model_view,
-          workspace_view)) {
-    return;
-  }
-
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
+  const int threads = kWarpSize * kAnnWarpsPerBlock;
+  const int atoms_per_block = kAnnWarpsPerBlock * kAnnAtomsPerWarp;
+  const int blocks =
+      (atom_count + atoms_per_block - 1) / atoms_per_block;
+  const std::size_t shared_bytes =
+      static_cast<std::size_t>(kAnnWarpsPerBlock) *
+      static_cast<std::size_t>(kAnnAtomsPerWarp) *
+      static_cast<std::size_t>(
+          protocol.descriptor_dim + protocol.hidden_neurons) *
+      sizeof(float);
   if (blocks > 0) {
-    evaluate_ann_energy<<<blocks, threads>>>(
+    evaluate_ann_energy_subwarp<<<blocks, threads, shared_bytes>>>(
         atom_count,
         static_cast<int>(workspace_view.atom_capacity),
         protocol.version,
@@ -352,14 +284,12 @@ void evaluate_ann_energy_on_device(
         protocol.num_types,
         workspace_view.types,
         workspace_view.descriptors,
-        model_view.q_scaler,
         model_view.ann_type_major_qscaled,
         model_view.spin_baseline,
         workspace_view.potential,
         workspace_view.fp);
   }
   check_cuda(cudaGetLastError(), "evaluate ANN energy kernel launch failed");
-  check_cuda(cudaDeviceSynchronize(), "evaluate ANN energy kernel failed");
 }
 
 void evaluate_qnep_ann_on_device(

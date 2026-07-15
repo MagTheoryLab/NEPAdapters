@@ -95,8 +95,7 @@ if(TARGET NEPAdapters::cuda)
     target_link_libraries(
       nep_adapters_bench_cuda_lammps_device_layout
       PRIVATE
-        NEPAdapters::cuda
-        CUDA::cublas)
+        NEPAdapters::cuda)
     target_include_directories(
       nep_adapters_bench_cuda_lammps_device_layout
       PRIVATE

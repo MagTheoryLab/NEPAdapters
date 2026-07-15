@@ -246,12 +246,6 @@ void build_angular_descriptors_from_geometry_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace);
 
-bool try_build_angular_descriptors_and_ann_from_geometry_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
-
 enum class DescriptorCoreTopology {
   single_box,
   batched_multi_box,
@@ -269,7 +263,7 @@ struct DescriptorCoreOptions {
   bool store_potential = true;
 };
 
-bool try_build_descriptor_core_from_positions_on_device(
+void build_descriptor_core_from_positions_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,

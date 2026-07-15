@@ -53,7 +53,7 @@ class SpinLmpProfileTest(unittest.TestCase):
   def benchmark_evidence(self, latency=10.0, throughput=2.0):
     return {"spin": {"summary": {
         "nolegacy_ms": {"median": latency},
-        "nolegacy_matom_per_s": {"median": throughput},
+        "nolegacy_Matom_per_s": {"median": throughput},
     }}}
 
   def ncu_evidence(self, duration="100", registers="64", labels=None):
@@ -372,7 +372,7 @@ class SpinLmpProfileTest(unittest.TestCase):
         args,
         "/remote/runs/run",
         "primitive",
-        "build_spin_primitive_cache_c4_l4_warp")
+        "build_spin_descriptor_core_streaming")
 
     self.assertEqual(paths["report"], "/remote/runs/run/ncu_primitive_detailed.ncu-rep")
     self.assertNotIn("report", profile.detailed_ncu_text_artifact_names())
@@ -382,7 +382,7 @@ class SpinLmpProfileTest(unittest.TestCase):
     self.assertIn("--set detailed", script)
     self.assertIn("--import-source yes", script)
     self.assertIn("--metrics " + profile.q(",".join(profile.NCU_SELECTED_METRICS)), script)
-    self.assertIn("--kernel-name regex:build_spin_primitive_cache_c4_l4_warp", script)
+    self.assertIn("--kernel-name regex:build_spin_descriptor_core_streaming", script)
     self.assertIn("--launch-count 1", script)
     self.assertIn("find \"$artifact_dir\" -maxdepth 1 -type f", script)
     self.assertIn("-name \"${artifact_stem}.*\" -delete", script)
@@ -402,7 +402,7 @@ class SpinLmpProfileTest(unittest.TestCase):
         args,
         "/remote/runs/run",
         "primitive",
-        "build_spin_primitive_cache_c4_l4_warp")
+        "build_spin_descriptor_core_streaming")
 
     self.assertIn("set -euo pipefail", script)
     self.assertNotIn("ncu_primitive_detailed.cuda.txt 2>&1", script)
@@ -429,7 +429,7 @@ class SpinLmpProfileTest(unittest.TestCase):
         args,
         "/remote/runs/run",
         "primitive",
-        "build_spin_primitive_cache_c4_l4_warp")
+        "build_spin_descriptor_core_streaming")
 
     self.assertIn("rm -f -- /remote/runs/run/ncu_primitive.csv", script)
     self.assertIn("if [ ! -s /remote/runs/run/ncu_primitive.csv ]; then", script)

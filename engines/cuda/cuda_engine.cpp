@@ -41,16 +41,13 @@ bool supports_batch_force(const nep_adapters::cuda_backend::ModelProtocol& proto
   const auto& body = protocol.body_channels;
   return (protocol.version == 4 || protocol.version == 5) &&
          protocol.charge_mode == 0 &&
+         nep_adapters::cuda_backend::supports_cuda_spin_shape(protocol) &&
          (!protocol.has_zbl ||
           (!protocol.flexible_zbl &&
            protocol.zbl_inner >= 0.0 &&
            protocol.zbl_outer > protocol.zbl_inner &&
            protocol.zbl_outer <= protocol.cutoff_radial)) &&
          body.l_max_3body <= 4;
-}
-
-bool supports_spin_force(const nep_adapters::cuda_backend::ModelProtocol& protocol) {
-  return supports_batch_force(protocol) && protocol.spin_mode != 0;
 }
 
 bool supports_batched_execution(
@@ -228,66 +225,7 @@ class LammpsDevicePairProfiler {
   cudaEvent_t now_ = nullptr;
 };
 
-void build_radial_descriptor_stage(
-    const nep_adapters::cuda_backend::ModelProtocol& protocol,
-    int atom_count,
-    const nep_adapters::cuda_backend::SimulationBox& box,
-    const nep_adapters::cuda_backend::DeviceModel& device,
-    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    bool has_angular) {
-  if (has_angular) {
-    nep_adapters::cuda_backend::build_angular_geometry_cache_on_device(
-        protocol,
-        atom_count,
-        box,
-        workspace);
-    if (nep_adapters::cuda_backend::build_radial_descriptors_from_geometry_on_device(
-            protocol,
-            atom_count,
-            box,
-            device,
-            workspace)) {
-      return;
-    }
-    nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-        protocol,
-        atom_count,
-        box,
-        workspace);
-    nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-        protocol,
-        atom_count,
-        workspace);
-    nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-        protocol,
-        atom_count,
-        device,
-        workspace);
-    return;
-  }
-
-  if (nep_adapters::cuda_backend::build_radial_descriptors_from_geometry_on_device(
-          protocol,
-          atom_count,
-          box,
-          device,
-          workspace)) {
-    return;
-  }
-
-  nep_adapters::cuda_backend::build_radial_geometry_basis_cache_on_device(
-      protocol,
-      atom_count,
-      box,
-      workspace);
-  nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-      protocol,
-      atom_count,
-      device,
-      workspace);
-}
-
-bool try_build_structural_descriptor_core_stage(
+void build_structural_descriptor_core_stage(
     const nep_adapters::cuda_backend::ModelProtocol& protocol,
     int atom_count,
     const nep_adapters::cuda_backend::SimulationBox& box,
@@ -300,9 +238,8 @@ bool try_build_structural_descriptor_core_stage(
   options.output =
       nep_adapters::cuda_backend::DescriptorCoreOutput::structural_descriptors;
   options.has_angular = has_angular;
-  return nep_adapters::cuda_backend::
-      try_build_descriptor_core_from_positions_on_device(
-          protocol, atom_count, box, device, workspace, options);
+  nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
+      protocol, atom_count, box, device, workspace, options);
 }
 
 void build_charge_descriptors_and_ann_stage(
@@ -312,23 +249,8 @@ void build_charge_descriptors_and_ann_stage(
     const nep_adapters::cuda_backend::DeviceModel& device,
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
     bool has_angular) {
-  if (!try_build_structural_descriptor_core_stage(
-          protocol, atom_count, box, device, workspace, has_angular)) {
-    build_radial_descriptor_stage(
-        protocol,
-        atom_count,
-        box,
-        device,
-        workspace,
-        has_angular);
-    if (has_angular) {
-      nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
-          protocol,
-          atom_count,
-          device,
-          workspace);
-    }
-  }
+  build_structural_descriptor_core_stage(
+      protocol, atom_count, box, device, workspace, has_angular);
   nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
       protocol, atom_count, device, workspace);
 }
@@ -893,21 +815,8 @@ class CudaModel : public nep_adapters::Model {
             box,
             workspace);
         const bool has_angular = needs_angular_terms(protocol_);
-        if (!try_build_structural_descriptor_core_stage(
-                protocol_, atom_count, box, device_, workspace, has_angular)) {
-          build_radial_descriptor_stage(
-              protocol_,
-              atom_count,
-              box,
-              device_,
-              workspace,
-              has_angular);
-          if (has_angular) {
-            nep_adapters::cuda_backend::
-                build_angular_descriptors_from_geometry_on_device(
-                    protocol_, atom_count, device_, workspace);
-          }
-        }
+        build_structural_descriptor_core_stage(
+            protocol_, atom_count, box, device_, workspace, has_angular);
         if (protocol_.spin_mode != 0) {
           nep_adapters::cuda_backend::build_spin_descriptors_on_device(
               protocol_,

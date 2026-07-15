@@ -94,10 +94,6 @@ void set_view_pointer(
     view.parameters_and_q_scaler = static_cast<float*>(device);
   } else if (name == "fp") {
     view.fp = static_cast<float*>(device);
-  } else if (name == "ann_hidden_values") {
-    view.ann_hidden_values = static_cast<float*>(device);
-  } else if (name == "ann_hidden_delta") {
-    view.ann_hidden_delta = static_cast<float*>(device);
   } else if (name == "charge_derivative") {
     view.charge_derivative = static_cast<float*>(device);
   } else if (name == "descriptors") {
@@ -130,12 +126,6 @@ void set_view_pointer(
     view.spin_density_rho0 = static_cast<float*>(device);
   } else if (name == "spin_density_raw1") {
     view.spin_density_raw1 = static_cast<float*>(device);
-  } else if (name == "spin_density_l1_rdot") {
-    view.spin_density_l1_rdot = static_cast<float*>(device);
-  } else if (name == "spin_density_l1_cross") {
-    view.spin_density_l1_cross = static_cast<float*>(device);
-  } else if (name == "spin_density_l1_stf") {
-    view.spin_density_l1_stf = static_cast<float*>(device);
   } else if (name == "spin_density_angular2") {
     view.spin_density_angular2 = static_cast<float*>(device);
   } else if (name == "spin_density_angular3") {
@@ -148,18 +138,6 @@ void set_view_pointer(
     view.spin_density_rho0_dot = static_cast<float*>(device);
   } else if (name == "spin_density_raw1_dot") {
     view.spin_density_raw1_dot = static_cast<float*>(device);
-  } else if (name == "spin_edge_dx") {
-    view.spin_edge_dx = static_cast<float*>(device);
-  } else if (name == "spin_edge_dy") {
-    view.spin_edge_dy = static_cast<float*>(device);
-  } else if (name == "spin_edge_dz") {
-    view.spin_edge_dz = static_cast<float*>(device);
-  } else if (name == "spin_edge_dist") {
-    view.spin_edge_dist = static_cast<float*>(device);
-  } else if (name == "spin_edge_weights") {
-    view.spin_edge_weights = static_cast<float*>(device);
-  } else if (name == "spin_edge_weight_derivatives") {
-    view.spin_edge_weight_derivatives = static_cast<float*>(device);
   } else if (name == "spin_chiral_polar") {
     view.spin_chiral_polar = static_cast<float*>(device);
   } else if (name == "spin_chiral_octupoles_raw") {
@@ -168,8 +146,6 @@ void set_view_pointer(
     view.spin_chiral_hexadecapoles_raw = static_cast<float*>(device);
   } else if (name == "spin_chiral_chirals") {
     view.spin_chiral_chirals = static_cast<float*>(device);
-  } else if (name == "spin_chiral_pseudodevs") {
-    view.spin_chiral_pseudodevs = static_cast<float*>(device);
   }
 }
 

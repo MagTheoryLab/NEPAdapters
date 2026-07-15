@@ -141,6 +141,58 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  nep_adapters::cuda_backend::ModelProtocol generic_spin = protocol;
+  generic_spin.spin_mode = 1;
+  generic_spin.spin_chiral = 0;
+  generic_spin.spin_compress = 1;
+  generic_spin.spin_basis_size = 0;
+  generic_spin.spin_l_max = 4;
+  if (!nep_adapters::cuda_backend::supports_cuda_spin_shape(generic_spin)) {
+    return EXIT_FAILURE;
+  }
+  generic_spin.spin_chiral = 1;
+  if (!nep_adapters::cuda_backend::supports_cuda_spin_shape(generic_spin)) {
+    return EXIT_FAILURE;
+  }
+  generic_spin.spin_compress = 4;
+  generic_spin.spin_basis_size = 3;
+  const nep_adapters::cuda_backend::SpinCoreLayout spin_layout =
+      nep_adapters::cuda_backend::make_spin_core_layout(generic_spin);
+  if (!nep_adapters::cuda_backend::supports_cuda_spin_shape(generic_spin) ||
+      spin_layout.channels != 4 || spin_layout.basis_count != 4 ||
+      spin_layout.l_max != 4 || spin_layout.chi_channels != 2 ||
+      spin_layout.chiral_offset != 58 || spin_layout.descriptor_dim != 68) {
+    return EXIT_FAILURE;
+  }
+  for (int channels = 1; channels <= 4; ++channels) {
+    generic_spin.spin_compress = channels;
+    generic_spin.spin_basis_size = channels - 1;
+    for (int l_max = 0; l_max <= 4; ++l_max) {
+      generic_spin.spin_l_max = l_max;
+      if (!nep_adapters::cuda_backend::supports_cuda_spin_shape(generic_spin) ||
+          nep_adapters::cuda_backend::make_spin_core_layout(generic_spin)
+                  .descriptor_dim <= 0) {
+        return EXIT_FAILURE;
+      }
+    }
+  }
+  generic_spin.spin_compress = 4;
+  generic_spin.spin_basis_size = 2;
+  if (nep_adapters::cuda_backend::supports_cuda_spin_shape(generic_spin)) {
+    return EXIT_FAILURE;
+  }
+  generic_spin.spin_basis_size = 3;
+  generic_spin.spin_l_max = 4;
+  const nep_adapters::cuda_backend::WorkspacePlan unified_spin_workspace =
+      nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+          generic_spin, 4, 1);
+  if (unified_spin_workspace.find_array("spin_edge_weights") != nullptr ||
+      unified_spin_workspace.find_array("spin_edge_weight_derivatives") != nullptr ||
+      unified_spin_workspace.find_array("spin_chiral_pseudodevs") != nullptr ||
+      unified_spin_workspace.find_array("spin_density_l1_stf") != nullptr) {
+    return EXIT_FAILURE;
+  }
+
   const nep_adapters::cuda_backend::WorkspacePlan workspace =
       nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
           protocol, 4, 2);

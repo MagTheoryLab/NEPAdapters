@@ -113,28 +113,6 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
   protocol.spin_mode = tag.find("_spin") != std::string::npos ? 1 : 0;
 }
 
-int spin_descriptor_dim(int compress, int l_max, bool chiral) {
-  int dim = 2 + 4 * compress;
-  if (l_max >= 0) {
-    dim += compress;
-  }
-  if (l_max >= 1) {
-    dim += 3 * compress;
-  }
-  for (int ell = 2; ell <= l_max; ++ell) {
-    dim += compress;
-  }
-  dim += compress;
-  dim += compress;
-  if (l_max >= 1) {
-    dim += compress;
-  }
-  if (chiral) {
-    dim += std::min(2, compress) + 2 * compress;
-  }
-  return dim;
-}
-
 void parse_zbl(
     const std::vector<std::string>& tokens,
     ModelProtocol& protocol) {
@@ -363,10 +341,7 @@ void finalize_counts(ModelProtocol& protocol) {
     if (protocol.spin_baseline.empty()) {
       protocol.spin_baseline.assign(static_cast<std::size_t>(protocol.num_types), 0.0f);
     }
-    protocol.spin_descriptor_dim = spin_descriptor_dim(
-        protocol.spin_compress,
-        protocol.spin_l_max,
-        protocol.spin_chiral != 0);
+    protocol.spin_descriptor_dim = make_spin_core_layout(protocol).descriptor_dim;
   }
   protocol.descriptor_dim =
       protocol.struct_descriptor_dim + protocol.spin_descriptor_dim;

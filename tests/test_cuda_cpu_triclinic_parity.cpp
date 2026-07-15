@@ -26,6 +26,7 @@ struct Case {
   std::string model_text;
   std::vector<double> positions;
   double tolerance = 1.0e-3;
+  int type_cycle = 1;
 };
 
 std::string write_model(const Case& test_case) {
@@ -61,7 +62,8 @@ Prediction evaluate_batch(
     const std::vector<int>& atom_offsets,
     const std::vector<double>& positions,
     const std::vector<double>& boxes,
-    const std::vector<int>& pbc) {
+    const std::vector<int>& pbc,
+    int type_cycle = 1) {
   NepaModel* model = nullptr;
   if (nepa_load_model(engine_name, model_path.c_str(), &model) != NEPA_STATUS_OK ||
       model == nullptr) {
@@ -71,6 +73,12 @@ Prediction evaluate_batch(
 
   const int total_atoms = static_cast<int>(positions.size() / 3);
   std::vector<int> types(static_cast<std::size_t>(total_atoms), 0);
+  for (std::size_t structure = 0; structure < atom_counts.size(); ++structure) {
+    for (int atom = 0; atom < atom_counts[structure]; ++atom) {
+      types[static_cast<std::size_t>(atom_offsets[structure] + atom)] =
+          atom % type_cycle;
+    }
+  }
 
   NepaStructureBatch batch{};
   batch.num_structures = static_cast<int>(atom_counts.size());
@@ -99,7 +107,8 @@ Prediction evaluate_batch(
   nepa_free_model(model);
   if (status != NEPA_STATUS_OK) {
     std::cerr << engine_name << " find_force_batch status=" << status
-              << " model=" << model_path << "\n";
+              << " model=" << model_path
+              << " error=" << nepa_last_error_message() << "\n";
     std::exit(EXIT_FAILURE);
   }
   return prediction;
@@ -108,7 +117,8 @@ Prediction evaluate_batch(
 Prediction evaluate_single(
     const char* engine_name,
     const std::string& model_path,
-    const std::vector<double>& positions) {
+    const std::vector<double>& positions,
+    int type_cycle) {
   return evaluate_batch(
       engine_name,
       model_path,
@@ -116,7 +126,8 @@ Prediction evaluate_single(
       {0},
       positions,
       triclinic_box(),
-      {1, 1, 1});
+      {1, 1, 1},
+      type_cycle);
 }
 
 Prediction evaluate_structures_independently(
@@ -126,7 +137,8 @@ Prediction evaluate_structures_independently(
     const std::vector<int>& atom_offsets,
     const std::vector<double>& positions,
     const std::vector<double>& boxes,
-    const std::vector<int>& pbc) {
+    const std::vector<int>& pbc,
+    int type_cycle) {
   const int total_atoms = static_cast<int>(positions.size() / 3);
   Prediction prediction;
   prediction.energy.assign(atom_counts.size(), 0.0);
@@ -162,7 +174,8 @@ Prediction evaluate_structures_independently(
         {0},
         local_positions,
         local_box,
-        local_pbc);
+        local_pbc,
+        type_cycle);
 
     prediction.energy[structure] = local.energy[0];
     for (int atom = 0; atom < atom_count; ++atom) {
@@ -254,6 +267,28 @@ std::string values_text(const std::vector<double>& values) {
   return text;
 }
 
+std::vector<double> generated_model_values(
+    std::size_t ann_parameter_count,
+    std::size_t descriptor_parameter_count,
+    int descriptor_dim) {
+  std::vector<double> values;
+  values.reserve(
+      ann_parameter_count + descriptor_parameter_count +
+      static_cast<std::size_t>(descriptor_dim));
+  for (std::size_t index = 0; index < ann_parameter_count; ++index) {
+    const int centered = static_cast<int>(index % 17) - 8;
+    values.push_back(5.0e-4 * static_cast<double>(centered));
+  }
+  for (std::size_t index = 0; index < descriptor_parameter_count; ++index) {
+    const int centered = static_cast<int>(index % 11) - 5;
+    values.push_back(2.0e-3 * static_cast<double>(centered));
+  }
+  for (int descriptor = 0; descriptor < descriptor_dim; ++descriptor) {
+    values.push_back(1.0);
+  }
+  return values;
+}
+
 std::vector<Case> make_cases() {
   const std::vector<double> radial_values = {
       0.20, -0.10, 0.05, 0.15,
@@ -300,6 +335,24 @@ std::vector<Case> make_cases() {
       0.0, 0.0,
       1.0,
   };
+  constexpr int kWideDescriptorDim = 65;
+  constexpr int kWideHiddenNeurons = 3;
+  const std::vector<double> wide_descriptor_values = generated_model_values(
+      static_cast<std::size_t>(kWideDescriptorDim + 2) *
+              kWideHiddenNeurons +
+          1,
+      66,
+      kWideDescriptorDim);
+  constexpr int kSharedPressureTypes = 8;
+  constexpr int kSharedPressureHiddenNeurons = 120;
+  constexpr int kSharedPressureDescriptorDim = 1;
+  const std::vector<double> shared_pressure_values = generated_model_values(
+      static_cast<std::size_t>(kSharedPressureDescriptorDim + 2) *
+              kSharedPressureHiddenNeurons * kSharedPressureTypes +
+          1,
+      static_cast<std::size_t>(kSharedPressureTypes) *
+          kSharedPressureTypes * 18,
+      kSharedPressureDescriptorDim);
 
   return {
       {
@@ -363,6 +416,31 @@ std::vector<Case> make_cases() {
           {0.20, 0.20, 0.20, 11.20, 1.85, 0.95, 2.40, 0.50, 0.30},
           5.0e-2,
       },
+      {
+          "wide_descriptor",
+          "nep4 1 C\n"
+          "cutoff 5 1 8 1\n"
+          "n_max 64 0\n"
+          "basis_size 0 0\n"
+          "l_max 0 0 0\n"
+          "ANN 3 0\n" +
+              values_text(wide_descriptor_values),
+          {0.20, 0.20, 0.20, 11.40, 1.90, 1.00, 2.40, 0.50, 0.30},
+          8.0e-3,
+      },
+      {
+          "shared_pressure",
+          "nep4 8 C H N O F Si P S\n"
+          "cutoff 5 1 8 1\n"
+          "n_max 0 0\n"
+          "basis_size 16 0\n"
+          "l_max 0 0 0\n"
+          "ANN 120 0\n" +
+              values_text(shared_pressure_values),
+          {0.20, 0.20, 0.20, 11.40, 1.90, 1.00, 2.40, 0.50, 0.30},
+          1.0e-4,
+          kSharedPressureTypes,
+      },
   };
 }
 
@@ -379,8 +457,13 @@ int main() {
     const Prediction cpu = evaluate_single(
         "cpu_nep3",
         model_path,
-        test_case.positions);
-    const Prediction cuda = evaluate_single("cuda", model_path, test_case.positions);
+        test_case.positions,
+        test_case.type_cycle);
+    const Prediction cuda = evaluate_single(
+        "cuda",
+        model_path,
+        test_case.positions,
+        test_case.type_cycle);
     if (!compare_prediction(test_case, cpu, cuda)) {
       return EXIT_FAILURE;
     }
@@ -405,7 +488,8 @@ int main() {
         {0, 3},
         batch_positions,
         batch_boxes,
-        {1, 1, 1, 1, 1, 1});
+        {1, 1, 1, 1, 1, 1},
+        test_case.type_cycle);
     const Prediction cuda_batch = evaluate_batch(
         "cuda",
         model_path,
@@ -413,7 +497,8 @@ int main() {
         {0, 3},
         batch_positions,
         batch_boxes,
-        {1, 1, 1, 1, 1, 1});
+        {1, 1, 1, 1, 1, 1},
+        test_case.type_cycle);
     if (!compare_prediction(test_case, cpu_batch, cuda_batch)) {
       return EXIT_FAILURE;
     }

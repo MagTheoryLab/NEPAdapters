@@ -51,7 +51,7 @@ if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
     PRIVATE
       ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_compile_definitions(nep_adapters_cuda PRIVATE NEP_ADAPTERS_CUDA_DEVICE_RUNTIME=1)
-  target_link_libraries(nep_adapters_cuda PRIVATE CUDA::cufft CUDA::cublas)
+  target_link_libraries(nep_adapters_cuda PRIVATE CUDA::cufft)
 endif()
 
 target_link_libraries(nep_adapters_cuda PUBLIC NEPAdapters::nep_adapters)

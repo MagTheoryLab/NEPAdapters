@@ -6,7 +6,6 @@
 #include "device_workspace.hpp"
 #include "simulation_box.hpp"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -36,11 +35,11 @@ struct Options {
   std::string mode = "all";
   std::string layout = "both";
   bool use_type_map = false;
+  bool cycle_model_types = false;
   bool write_totals = false;
   bool write_per_atom = false;
   bool breakdown = false;
   bool split_pipeline = false;
-  bool ann_gemm_ablation = false;
   bool strip_spin_model = false;
   std::string model_path;
   std::string replay_path;
@@ -120,6 +119,8 @@ Options parse_options(int argc, char** argv) {
       }
     } else if (arg == "--type-map") {
       options.use_type_map = true;
+    } else if (arg == "--cycle-model-types") {
+      options.cycle_model_types = true;
     } else if (arg == "--model" && i + 1 < argc) {
       options.model_path = argv[++i];
     } else if (arg == "--replay" && i + 1 < argc) {
@@ -148,8 +149,6 @@ Options parse_options(int argc, char** argv) {
       options.breakdown = true;
     } else if (arg == "--split-pipeline") {
       options.split_pipeline = true;
-    } else if (arg == "--ann-gemm-ablation") {
-      options.ann_gemm_ablation = true;
     } else if (arg == "--strip-spin-model") {
       options.strip_spin_model = true;
     } else {
@@ -157,18 +156,23 @@ Options parse_options(int argc, char** argv) {
                 << " [--atoms N] [--warmup N] [--iterations N]"
                 << " [--cubic N] [--mode all|api|reused]"
                 << " [--layout legacy|nolegacy|both] [--type-map]"
+                << " [--cycle-model-types]"
                 << " [--model PATH] [--replay PATH]"
                 << " [--mn-radial N] [--mn-angular N] [--spacing X]"
                 << " [--skin X]"
                 << " [--radial-cutoff X] [--angular-cutoff X]"
                 << " [--totals] [--per-atom] [--breakdown]"
                 << " [--strip-spin-model]"
-                << " [--split-pipeline] [--ann-gemm-ablation]\n";
+                << " [--split-pipeline]\n";
       std::exit(EXIT_FAILURE);
     }
   }
   if (options.strip_spin_model && options.model_path.empty()) {
     std::cerr << "--strip-spin-model requires --model PATH\n";
+    std::exit(EXIT_FAILURE);
+  }
+  if (options.use_type_map && options.cycle_model_types) {
+    std::cerr << "--type-map and --cycle-model-types are mutually exclusive\n";
     std::exit(EXIT_FAILURE);
   }
   return options;
@@ -312,13 +316,6 @@ void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
     throw std::runtime_error(
         std::string(action) + ": " + cudaGetErrorString(status));
-  }
-}
-
-void check_cublas(cublasStatus_t status, const char* action) {
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    throw std::runtime_error(
-        std::string(action) + ": cublas status " + std::to_string(status));
   }
 }
 
@@ -579,16 +576,28 @@ FixedNeighborSystem make_cubic_system(
   return system;
 }
 
-std::vector<int> make_types(int atom_count, bool use_type_map) {
-  return std::vector<int>(
+std::vector<int> make_types(
+    int atom_count,
+    bool use_type_map,
+    bool cycle_model_types,
+    int model_type_count) {
+  std::vector<int> types(
       static_cast<std::size_t>(atom_count),
       use_type_map ? 1 : 0);
+  if (cycle_model_types) {
+    for (int atom = 0; atom < atom_count; ++atom) {
+      types[static_cast<std::size_t>(atom)] = atom % model_type_count;
+    }
+  }
+  return types;
 }
 
 LayoutStorage make_layout(
     const FixedNeighborSystem& system,
     bool soa_layout,
     bool use_type_map,
+    bool cycle_model_types,
+    int model_type_count,
     bool spin_model) {
   LayoutStorage storage;
   storage.atom_count = system.atom_count;
@@ -601,7 +610,11 @@ LayoutStorage make_layout(
   storage.pitch = soa_layout ? system.atom_count + 32 : system.atom_count;
 
   std::vector<int> ilist = make_ilist(system.atom_count);
-  std::vector<int> types = make_types(system.atom_count, use_type_map);
+  std::vector<int> types = make_types(
+      system.atom_count,
+      use_type_map,
+      cycle_model_types,
+      model_type_count);
   storage.ilist = copy_to_device(ilist, "copy ilist");
   storage.numneigh = copy_to_device(system.numneigh, "copy numneigh");
   storage.types = copy_to_device(types, "copy types");
@@ -941,148 +954,13 @@ void clear_potential(nep_adapters::cuda_backend::DeviceWorkspace& workspace) {
       "clear potential");
 }
 
-__global__ void finish_single_type_ann_gemm(
-    int atom_count,
-    int version,
-    int descriptor_dim,
-    int hidden_neurons,
-    const float* __restrict__ ann_type_major,
-    float* __restrict__ hidden_values,
-    double* __restrict__ potential,
-    float* __restrict__ hidden_delta) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const int w0_count = hidden_neurons * descriptor_dim;
-  const int type_extra_bias_count = version == 5 ? 1 : 0;
-  const int type_block_size =
-      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
-  const float* b0 = ann_type_major + w0_count;
-  const float* w1 = b0 + hidden_neurons;
-  const float* b1 = ann_type_major + type_block_size;
-
-  float energy = 0.0f;
-  for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-    const int offset = atom + atom_count * neuron;
-    const float x1 = tanhf(hidden_values[offset] - b0[neuron]);
-    const float tanh_derivative = 1.0f - x1 * x1;
-    energy += w1[neuron] * x1;
-    hidden_delta[offset] = w1[neuron] * tanh_derivative;
-  }
-  const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-  potential[atom] = static_cast<double>(energy - type_bias - b1[0]);
-}
-
-struct AnnGemmScratch {
-  cublasHandle_t handle = nullptr;
-  float* hidden_values = nullptr;
-  float* hidden_delta = nullptr;
-
-  AnnGemmScratch(int atom_count, int hidden_neurons) {
-    check_cublas(cublasCreate(&handle), "create cublas handle");
-    const std::size_t count =
-        static_cast<std::size_t>(atom_count) *
-        static_cast<std::size_t>(hidden_neurons);
-    check_cuda(
-        cudaMalloc(reinterpret_cast<void**>(&hidden_values), count * sizeof(float)),
-        "allocate ann gemm hidden values");
-    check_cuda(
-        cudaMalloc(reinterpret_cast<void**>(&hidden_delta), count * sizeof(float)),
-        "allocate ann gemm hidden delta");
-  }
-
-  ~AnnGemmScratch() {
-    cudaFree(hidden_values);
-    cudaFree(hidden_delta);
-    if (handle != nullptr) {
-      cublasDestroy(handle);
-    }
-  }
-
-  AnnGemmScratch(const AnnGemmScratch&) = delete;
-  AnnGemmScratch& operator=(const AnnGemmScratch&) = delete;
-};
-
-void evaluate_single_type_ann_with_gemm(
-    const nep_adapters::cuda_backend::ModelProtocol& protocol,
-    int atom_count,
-    const nep_adapters::cuda_backend::DeviceModel& model,
-    nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    AnnGemmScratch& scratch) {
-  if (protocol.num_types != 1) {
-    throw std::runtime_error("--ann-gemm-ablation currently expects one model type");
-  }
-  const auto model_view = model.view();
-  const auto workspace_view = workspace.view();
-  const int descriptor_dim = protocol.descriptor_dim;
-  const int hidden_neurons = protocol.hidden_neurons;
-  const float* w0 = model_view.ann_type_major_qscaled;
-  const float alpha = 1.0f;
-  const float beta = 0.0f;
-
-  check_cublas(
-      cublasSgemm(
-          scratch.handle,
-          CUBLAS_OP_N,
-          CUBLAS_OP_N,
-          atom_count,
-          hidden_neurons,
-          descriptor_dim,
-          &alpha,
-          workspace_view.descriptors,
-          static_cast<int>(workspace_view.atom_capacity),
-          w0,
-          descriptor_dim,
-          &beta,
-          scratch.hidden_values,
-          atom_count),
-      "ann gemm hidden");
-
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    finish_single_type_ann_gemm<<<blocks, threads>>>(
-        atom_count,
-        protocol.version,
-        descriptor_dim,
-        hidden_neurons,
-        model_view.ann_type_major_qscaled,
-        scratch.hidden_values,
-        workspace_view.potential,
-        scratch.hidden_delta);
-  }
-  check_cuda(cudaGetLastError(), "finish ann gemm launch failed");
-
-  check_cublas(
-      cublasSgemm(
-          scratch.handle,
-          CUBLAS_OP_N,
-          CUBLAS_OP_T,
-          atom_count,
-          descriptor_dim,
-          hidden_neurons,
-          &alpha,
-          scratch.hidden_delta,
-          atom_count,
-          w0,
-          descriptor_dim,
-          &beta,
-          workspace_view.fp,
-          static_cast<int>(workspace_view.atom_capacity)),
-      "ann gemm fp");
-}
-
 void run_reused_workspace_once(
     const nep_adapters::cuda_backend::ModelProtocol& protocol,
     const nep_adapters::cuda_backend::DeviceModel& model,
     const LayoutStorage& storage,
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    AnnGemmScratch* ann_gemm,
     const Options& options,
     bool check_overflow) {
-  (void)ann_gemm;
   NepaLammpsDeviceNeighborInput input = make_device_input(storage);
 
   NepaLammpsDeviceNeighborResult result{};
@@ -1117,48 +995,13 @@ void run_reused_workspace_once(
       DescriptorCoreOutput::ann_energy_and_derivatives;
   descriptor_options.has_angular = has_angular;
   descriptor_options.store_potential = store_potential;
-  if (!nep_adapters::cuda_backend::try_build_descriptor_core_from_positions_on_device(
-          protocol,
-          storage.atom_count,
-          box,
-          model,
-          workspace,
-          descriptor_options)) {
-    if (has_angular) {
-      nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-          protocol,
-          storage.atom_count,
-          box,
-          workspace);
-      nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-          protocol,
-          storage.atom_count,
-          workspace);
-    } else {
-      nep_adapters::cuda_backend::build_radial_geometry_basis_cache_on_device(
-          protocol,
-          storage.atom_count,
-          box,
-          workspace);
-    }
-    nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-        protocol,
-        storage.atom_count,
-        model,
-        workspace);
-    if (has_angular) {
-      nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
-          protocol,
-          storage.atom_count,
-          model,
-          workspace);
-    }
-    nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-        protocol,
-        storage.atom_count,
-        model,
-        workspace);
-  }
+  nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
+      protocol,
+      storage.atom_count,
+      box,
+      model,
+      workspace,
+      descriptor_options);
   const bool accumulate_virial = options.write_totals || options.write_per_atom;
   const bool zbl_outputs = options.write_totals || options.write_per_atom;
   const auto virial_target = accumulate_virial
@@ -1200,10 +1043,8 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
     const nep_adapters::cuda_backend::DeviceModel& model,
     const LayoutStorage& storage,
     nep_adapters::cuda_backend::DeviceWorkspace& workspace,
-    AnnGemmScratch* ann_gemm,
     const Options& options,
     bool check_overflow) {
-  (void)ann_gemm;
   ReusedWorkspaceTiming timing{};
   NepaLammpsDeviceNeighborInput input = make_device_input(storage);
 
@@ -1244,48 +1085,13 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
   descriptor_options.has_angular = has_angular;
   descriptor_options.store_potential = store_potential;
   timing.descriptor_ms = time_synchronized_phase([&]() {
-    if (!nep_adapters::cuda_backend::try_build_descriptor_core_from_positions_on_device(
-            protocol,
-            storage.atom_count,
-            box,
-            model,
-            workspace,
-            descriptor_options)) {
-      if (has_angular) {
-        nep_adapters::cuda_backend::build_pair_geometry_cache_on_device(
-            protocol,
-            storage.atom_count,
-            box,
-            workspace);
-        nep_adapters::cuda_backend::build_radial_basis_cache_on_device(
-            protocol,
-            storage.atom_count,
-            workspace);
-      } else {
-        nep_adapters::cuda_backend::build_radial_geometry_basis_cache_on_device(
-            protocol,
-            storage.atom_count,
-            box,
-            workspace);
-      }
-      nep_adapters::cuda_backend::build_radial_descriptors_on_device(
-          protocol,
-          storage.atom_count,
-          model,
-          workspace);
-      if (has_angular) {
-        nep_adapters::cuda_backend::build_angular_descriptors_from_geometry_on_device(
-            protocol,
-            storage.atom_count,
-            model,
-            workspace);
-      }
-      nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-          protocol,
-          storage.atom_count,
-          model,
-          workspace);
-    }
+    nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
+        protocol,
+        storage.atom_count,
+        box,
+        model,
+        workspace,
+        descriptor_options);
   });
   timing.ann_ms = 0.0;
   timing.force_ms = time_synchronized_phase([&]() {
@@ -1350,20 +1156,12 @@ ReusedWorkspaceTiming time_reused_workspace_layout(
           workspace_atom_capacity(storage),
           static_cast<std::size_t>(storage.atom_count),
           false));
-  std::unique_ptr<AnnGemmScratch> ann_gemm;
-  if (options.ann_gemm_ablation) {
-    ann_gemm = std::make_unique<AnnGemmScratch>(
-        storage.atom_count,
-        external_protocol.hidden_neurons);
-  }
-
   for (int i = 0; i < options.warmup; ++i) {
     run_reused_workspace_once(
         external_protocol,
         model,
         storage,
         workspace,
-        ann_gemm.get(),
         options,
         i == 0);
   }
@@ -1377,7 +1175,6 @@ ReusedWorkspaceTiming time_reused_workspace_layout(
           model,
           storage,
           workspace,
-          ann_gemm.get(),
           options,
           false);
       timing.total_ms += iter.total_ms;
@@ -1408,7 +1205,6 @@ ReusedWorkspaceTiming time_reused_workspace_layout(
         model,
         storage,
         workspace,
-        ann_gemm.get(),
         options,
         false);
   }
@@ -1560,9 +1356,7 @@ int main(int argc, char** argv) {
                 << "totals=" << (options.write_totals ? 1 : 0) << '\n'
                 << "per_atom=" << (options.write_per_atom ? 1 : 0) << '\n'
                 << "breakdown=" << (options.breakdown ? 1 : 0) << '\n'
-                << "split_pipeline=" << (options.split_pipeline ? 1 : 0) << '\n'
-                << "ann_backend="
-                << (options.ann_gemm_ablation ? "gemm_ablation" : "scalar")
+                << "split_pipeline=" << (options.split_pipeline ? 1 : 0)
                 << '\n';
       const auto atom_throughput = [&](double ms) {
         return static_cast<double>(layout.atom_count) / (1000.0 * ms);
@@ -1574,8 +1368,7 @@ int main(int argc, char** argv) {
       }
       if (options.mode == "all" || options.mode == "reused") {
         ReusedWorkspaceTiming reused{};
-        if (options.breakdown || options.split_pipeline ||
-            options.ann_gemm_ablation) {
+        if (options.breakdown || options.split_pipeline) {
           nep_adapters::cuda_backend::DeviceModel device_model(host);
           reused = time_reused_workspace_layout(
               host.protocol,
@@ -1633,12 +1426,12 @@ int main(int argc, char** argv) {
               << "mode=" << options.mode << '\n'
               << "layout=" << options.layout << '\n'
               << "type_map=" << (options.use_type_map ? 1 : 0) << '\n'
+              << "cycle_model_types="
+              << (options.cycle_model_types ? 1 : 0) << '\n'
               << "totals=" << (options.write_totals ? 1 : 0) << '\n'
               << "per_atom=" << (options.write_per_atom ? 1 : 0) << '\n'
               << "breakdown=" << (options.breakdown ? 1 : 0) << '\n'
-              << "split_pipeline=" << (options.split_pipeline ? 1 : 0) << '\n'
-              << "ann_backend="
-              << (options.ann_gemm_ablation ? "gemm_ablation" : "scalar")
+              << "split_pipeline=" << (options.split_pipeline ? 1 : 0)
               << '\n';
     const auto atom_throughput = [&](double ms) {
       return static_cast<double>(system.atom_count) / (1000.0 * ms);
@@ -1649,6 +1442,8 @@ int main(int argc, char** argv) {
               system,
               options.layout == "nolegacy",
               options.use_type_map,
+              options.cycle_model_types,
+              host.protocol.num_types,
               host.protocol.spin_mode != 0);
       if (options.mode == "all" || options.mode == "api") {
         const double ms = time_layout(model, layout, options);
@@ -1658,8 +1453,7 @@ int main(int argc, char** argv) {
       }
       if (options.mode == "all" || options.mode == "reused") {
         ReusedWorkspaceTiming reused{};
-        if (options.breakdown || options.split_pipeline ||
-            options.ann_gemm_ablation) {
+        if (options.breakdown || options.split_pipeline) {
           nep_adapters::cuda_backend::DeviceModel device_model(host);
           reused = time_reused_workspace_layout(
               host.protocol,
@@ -1677,10 +1471,20 @@ int main(int argc, char** argv) {
       }
       free_layout(layout);
     } else {
-    LayoutStorage legacy =
-        make_layout(system, false, options.use_type_map, host.protocol.spin_mode != 0);
-    LayoutStorage nolegacy =
-        make_layout(system, true, options.use_type_map, host.protocol.spin_mode != 0);
+    LayoutStorage legacy = make_layout(
+        system,
+        false,
+        options.use_type_map,
+        options.cycle_model_types,
+        host.protocol.num_types,
+        host.protocol.spin_mode != 0);
+    LayoutStorage nolegacy = make_layout(
+        system,
+        true,
+        options.use_type_map,
+        options.cycle_model_types,
+        host.protocol.num_types,
+        host.protocol.spin_mode != 0);
     if (options.mode == "all" || options.mode == "api") {
       const double legacy_ms = time_layout(model, legacy, options);
       const double nolegacy_ms = time_layout(model, nolegacy, options);
@@ -1717,8 +1521,7 @@ int main(int argc, char** argv) {
     if (options.mode == "all" || options.mode == "reused") {
       ReusedWorkspaceTiming reused_legacy{};
       ReusedWorkspaceTiming reused_nolegacy{};
-      if (options.breakdown || options.split_pipeline ||
-          options.ann_gemm_ablation) {
+      if (options.breakdown || options.split_pipeline) {
         nep_adapters::cuda_backend::DeviceModel device_model(host);
         reused_legacy = time_reused_workspace_layout(
             host.protocol,

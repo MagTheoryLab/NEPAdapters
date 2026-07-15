@@ -656,7 +656,7 @@ def run_ncu(profile, plan, gpu, args, run_dir):
           small,
           run_dir,
           "primitive",
-          "build_spin_primitive_cache_c4_l4_warp",
+          "build_spin_descriptor_core_streaming",
           args.ncu_detail),
       "chiral": run_ncu_one(
           profile,
@@ -674,7 +674,7 @@ def run_ncu(profile, plan, gpu, args, run_dir):
           small,
           run_dir,
           "density",
-          "accumulate_spin_density_forces_c4_l4_(pull|block_f32)",
+          "accumulate_spin_density_forces_tile_f32",
           args.ncu_detail),
   }
 
@@ -710,7 +710,7 @@ def options_are_complete(options, expected_keys):
 
 def benchmark_evidence(summary):
   latency = spin_median(summary, "nolegacy_ms")
-  throughput = spin_median(summary, "nolegacy_matom_per_s")
+  throughput = spin_median(summary, "nolegacy_Matom_per_s")
   if latency is None or throughput is None:
     return None
   return {

@@ -62,6 +62,82 @@ struct ModelProtocol {
   BodyChannelConfig body_channels;
 };
 
+struct SpinCoreLayout {
+  int channels = 0;
+  int basis_count = 0;
+  int l_max = 0;
+  int chi_channels = 0;
+  int rho0_offset = -1;
+  int l1_rdot_offset = -1;
+  int l1_cross_offset = -1;
+  int l1_stf_offset = -1;
+  int angular2_offset = -1;
+  int angular3_offset = -1;
+  int angular4_offset = -1;
+  int geom_offset = -1;
+  int rho0_dot_offset = -1;
+  int raw1_dot_offset = -1;
+  int chiral_offset = -1;
+  int descriptor_dim = 0;
+};
+
+inline SpinCoreLayout make_spin_core_layout(
+    const ModelProtocol& protocol) noexcept {
+  SpinCoreLayout layout;
+  layout.channels = protocol.spin_compress;
+  layout.basis_count = protocol.spin_basis_size + 1;
+  layout.l_max = protocol.spin_l_max;
+  layout.chi_channels = layout.channels < 2 ? layout.channels : 2;
+
+  int offset = 2 + 4 * layout.channels;
+  layout.rho0_offset = offset;
+  offset += layout.channels;
+  if (layout.l_max >= 1) {
+    layout.l1_rdot_offset = offset;
+    offset += layout.channels;
+    layout.l1_cross_offset = offset;
+    offset += layout.channels;
+    layout.l1_stf_offset = offset;
+    offset += layout.channels;
+  }
+  if (layout.l_max >= 2) {
+    layout.angular2_offset = offset;
+    offset += layout.channels;
+  }
+  if (layout.l_max >= 3) {
+    layout.angular3_offset = offset;
+    offset += layout.channels;
+  }
+  if (layout.l_max >= 4) {
+    layout.angular4_offset = offset;
+    offset += layout.channels;
+  }
+  layout.geom_offset = offset;
+  offset += layout.channels;
+  layout.rho0_dot_offset = offset;
+  offset += layout.channels;
+  if (layout.l_max >= 1) {
+    layout.raw1_dot_offset = offset;
+    offset += layout.channels;
+  }
+  if (protocol.spin_chiral != 0) {
+    layout.chiral_offset = offset;
+    offset += layout.chi_channels + 2 * layout.channels;
+  }
+  layout.descriptor_dim = offset;
+  return layout;
+}
+
+inline bool supports_cuda_spin_shape(const ModelProtocol& protocol) noexcept {
+  if (protocol.spin_mode == 0) {
+    return true;
+  }
+  const int basis_count = protocol.spin_basis_size + 1;
+  return protocol.spin_compress >= 1 && protocol.spin_compress <= 4 &&
+         basis_count >= protocol.spin_compress && basis_count <= 8 &&
+         protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4;
+}
+
 struct ParsedModelFile {
   ModelProtocol protocol;
   std::vector<float> parameters_and_q_scaler;

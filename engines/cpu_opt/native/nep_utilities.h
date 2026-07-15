@@ -2214,6 +2214,9 @@ void accumulate_f12_3body_contracted_all_n(
   const double* NEP_RESTRICT scaled_sum_fxyz,
   double* NEP_RESTRICT f12)
 {
+  if (L_max <= 0) {
+    return;
+  }
   if (L_max == 1) {
     accumulate_f12_3body_contracted_one_lmax<1>(
       n_max_angular_plus_1, d12, r12, fn, fnp, scaled_sum_fxyz, f12);

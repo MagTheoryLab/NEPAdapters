@@ -6,6 +6,8 @@ namespace nep_adapters::cuda_backend {
 namespace {
 
 constexpr std::size_t kLammpsReductionThreads = 256;
+constexpr std::size_t kSpinChiralOReducedCount = 7;
+constexpr std::size_t kSpinChiralHReducedCount = 9;
 
 std::size_t scalar_size(ScalarType type) {
   switch (type) {
@@ -39,6 +41,11 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   if (protocol.spin_mode == 0) {
     return;
   }
+  if (!supports_cuda_spin_shape(protocol)) {
+    throw std::runtime_error(
+        "CUDA spin workspace requires 1 <= spin_compress <= 4, "
+        "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
+  }
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
   const std::size_t spin_compress =
@@ -51,21 +58,6 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   add_array(
       plan,
       "spin_density_raw1",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 9);
-  add_array(
-      plan,
-      "spin_density_l1_rdot",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress);
-  add_array(
-      plan,
-      "spin_density_l1_cross",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 3);
-  add_array(
-      plan,
-      "spin_density_l1_stf",
       ScalarType::float32,
       plan.atom_capacity * spin_compress * 9);
   if (protocol.spin_l_max >= 2) {
@@ -93,7 +85,7 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
       plan,
       "spin_density_geom",
       ScalarType::float32,
-      plan.atom_capacity * spin_compress * 9);
+      plan.atom_capacity * spin_compress * 6);
   add_array(
       plan,
       "spin_density_rho0_dot",
@@ -104,22 +96,6 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
       "spin_density_raw1_dot",
       ScalarType::float32,
       plan.atom_capacity * spin_compress * 9);
-  const std::size_t spin_edge_count = plan.atom_capacity *
-      static_cast<std::size_t>(protocol.neighbor_capacity_radial);
-  add_array(plan, "spin_edge_dx", ScalarType::float32, spin_edge_count);
-  add_array(plan, "spin_edge_dy", ScalarType::float32, spin_edge_count);
-  add_array(plan, "spin_edge_dz", ScalarType::float32, spin_edge_count);
-  add_array(plan, "spin_edge_dist", ScalarType::float32, spin_edge_count);
-  add_array(
-      plan,
-      "spin_edge_weights",
-      ScalarType::float32,
-      spin_edge_count * spin_compress);
-  add_array(
-      plan,
-      "spin_edge_weight_derivatives",
-      ScalarType::float32,
-      spin_edge_count * spin_compress);
   if (protocol.spin_chiral != 0) {
     const std::size_t chi_c = spin_compress < 2 ? spin_compress : 2;
     add_array(
@@ -131,22 +107,17 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
         plan,
         "spin_chiral_octupoles_raw",
         ScalarType::float32,
-        plan.atom_capacity * chi_c * 10);
+        plan.atom_capacity * spin_compress * kSpinChiralOReducedCount);
     add_array(
         plan,
         "spin_chiral_hexadecapoles_raw",
         ScalarType::float32,
-        plan.atom_capacity * chi_c * 15);
+        plan.atom_capacity * chi_c * kSpinChiralHReducedCount);
     add_array(
         plan,
         "spin_chiral_chirals",
         ScalarType::float32,
         plan.atom_capacity * chi_c);
-    add_array(
-        plan,
-        "spin_chiral_pseudodevs",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * 9);
   }
 }
 
@@ -192,13 +163,6 @@ void add_execution_scratch(
       "fp",
       ScalarType::float32,
       plan.atom_capacity * static_cast<std::size_t>(protocol.descriptor_dim));
-  if (protocol.spin_mode != 0 && protocol.charge_mode == 0 &&
-      protocol.num_types == 1) {
-    const std::size_t hidden_count = plan.atom_capacity *
-        static_cast<std::size_t>(protocol.hidden_neurons);
-    add_array(plan, "ann_hidden_values", ScalarType::float32, hidden_count);
-    add_array(plan, "ann_hidden_delta", ScalarType::float32, hidden_count);
-  }
   if (protocol.charge_mode > 0) {
     add_array(plan, "charge", ScalarType::float64, plan.atom_capacity);
     add_array(plan, "bec_soa9", ScalarType::float64, plan.atom_capacity * 9);

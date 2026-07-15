@@ -13,8 +13,9 @@ namespace nep_adapters::cuda_backend {
 namespace {
 
 constexpr float kPi = 3.1415927f;
-constexpr int kMaxFusedDescriptorDim = 64;
 constexpr int kAngularOrderTile = 3;
+constexpr int kPreferredDescriptorBlockSize = 128;
+constexpr int kSharedPressureBlockSize = 32;
 constexpr std::size_t kDefaultDynamicSharedMemoryBytes = 48 * 1024;
 
 void check_cuda(cudaError_t status, const char* message) {
@@ -629,245 +630,6 @@ __global__ void build_angular_descriptors_from_geometry(
   }
 }
 
-__global__ void build_angular_descriptors_and_ann_from_geometry(
-    int atom_count,
-    int atom_stride,
-    int version,
-    int descriptor_dim,
-    int hidden_neurons,
-    int num_types,
-    int num_type_pairs,
-    int n_max_radial,
-    int basis_size_radial,
-    int n_max_angular,
-    int basis_size_angular,
-    int l_max_3body,
-    int has_q_222,
-    int has_q_1111,
-    int has_q_112,
-    int has_q_123,
-    int has_q_233,
-    int has_q_134,
-    int angular_capacity,
-    int abc_count,
-    float cutoff_angular,
-    const int* __restrict__ types,
-    const int* __restrict__ nn_angular,
-    const int* __restrict__ nl_angular,
-    const float* __restrict__ f12x,
-    const float* __restrict__ f12y,
-    const float* __restrict__ f12z,
-    float* __restrict__ r12_angular,
-    const float* __restrict__ descriptor_coefficients,
-    const float* __restrict__ q_scaler,
-    const float* __restrict__ ann_type_major,
-    float* __restrict__ sum_fxyz,
-    float* __restrict__ descriptors,
-    double* __restrict__ potential,
-    float* __restrict__ fp) {
-  (void)q_scaler;
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const int type1 = types[atom];
-  if (type1 < 0 || type1 >= num_types) {
-    return;
-  }
-
-  float q[kMaxFusedDescriptorDim];
-  float fp_local[kMaxFusedDescriptorDim];
-  for (int d = 0; d < descriptor_dim; ++d) {
-    q[d] = descriptors[atom + atom_stride * d];
-    fp_local[d] = 0.0f;
-  }
-
-  const int radial_dim = n_max_radial + 1;
-  const int angular_coefficient_offset =
-      num_type_pairs * (n_max_radial + 1) * (basis_size_radial + 1);
-  const int angular_count = nn_angular[atom];
-  const float rc = cutoff_angular;
-  const float rcinv = 1.0f / rc;
-
-  for (int n = 0; n <= n_max_angular; ++n) {
-    float s[24] = {0.0f};
-    for (int slot = 0; slot < angular_count; ++slot) {
-      const int offset = atom + atom_stride * slot;
-      const int neighbor = nl_angular[offset];
-      const int type2 = types[neighbor];
-      const int type_pair = type1 * num_types + type2;
-
-      const float dx = f12x[offset];
-      const float dy = f12y[offset];
-      const float dz = f12z[offset];
-      const float r = sqrtf(dx * dx + dy * dy + dz * dz);
-      r12_angular[offset] = r;
-      if (r <= 0.0f) {
-        continue;
-      }
-
-      const float fc = angular_cutoff(rc, rcinv, r);
-      const float x = 2.0f * (r * rcinv - 1.0f) * (r * rcinv - 1.0f) - 1.0f;
-      const float half_fc = 0.5f * fc;
-      float gn = 0.0f;
-      float t_minus_2 = 1.0f;
-      float t_minus_1 = x;
-      for (int k = 0; k <= basis_size_angular; ++k) {
-        float fn = fc;
-        if (k == 1) {
-          fn = (x + 1.0f) * half_fc;
-        } else if (k >= 2) {
-          const float t = 2.0f * x * t_minus_1 - t_minus_2;
-          t_minus_2 = t_minus_1;
-          t_minus_1 = t;
-          fn = (t + 1.0f) * half_fc;
-        }
-        const int coefficient_index =
-            angular_coefficient_offset +
-            (n * (basis_size_angular + 1) + k) * num_type_pairs + type_pair;
-        gn += fn * descriptor_coefficients[coefficient_index];
-      }
-
-      const float rinv = 1.0f / r;
-      const float x12 = dx * rinv;
-      const float y12 = dy * rinv;
-      const float z12 = dz * rinv;
-      if (l_max_3body >= 1) {
-        accumulate_s_l1(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 2) {
-        accumulate_s_l2(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 3) {
-        accumulate_s_l3(x12, y12, z12, gn, s);
-      }
-      if (l_max_3body >= 4) {
-        accumulate_s_l4(x12, y12, z12, gn, s);
-      }
-    }
-
-    for (int abc = 0; abc < abc_count; ++abc) {
-      const int s_index = atom + atom_stride * (n * abc_count + abc);
-      sum_fxyz[s_index] = abc < 24 ? s[abc] : 0.0f;
-    }
-
-    if (l_max_3body >= 1) {
-      const int descriptor_index = radial_dim + n;
-      const float value = find_q_l1(s);
-      descriptors[atom + atom_stride * descriptor_index] = value;
-      q[descriptor_index] = value;
-    }
-    if (l_max_3body >= 2) {
-      const int descriptor_index = radial_dim + (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l2(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-    }
-    if (l_max_3body >= 3) {
-      const int descriptor_index = radial_dim + 2 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l3(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-    }
-    if (l_max_3body >= 4) {
-      const int descriptor_index = radial_dim + 3 * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_l4(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-    }
-    int channel = l_max_3body;
-    if (has_q_222) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_222(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_1111) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_1111(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_112) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_112(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_123) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_123(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_233) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_233(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-      ++channel;
-    }
-    if (has_q_134) {
-      const int descriptor_index = radial_dim + channel * (n_max_angular + 1) + n;
-      if (descriptor_index < descriptor_dim) {
-        const float value = find_q_134(s);
-        descriptors[atom + atom_stride * descriptor_index] = value;
-        q[descriptor_index] = value;
-      }
-    }
-  }
-
-  const int w0_count = hidden_neurons * descriptor_dim;
-  const int type_extra_bias_count = version == 5 ? 1 : 0;
-  const int type_block_size =
-      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
-  const float* w0 = ann_type_major + type1 * type_block_size;
-  const float* b0 = w0 + w0_count;
-  const float* w1 = b0 + hidden_neurons;
-  const float* b1 = ann_type_major + num_types * type_block_size;
-
-  float energy = 0.0f;
-  for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-    float w0_times_q = 0.0f;
-    for (int d = 0; d < descriptor_dim; ++d) {
-      w0_times_q += w0[neuron * descriptor_dim + d] * q[d];
-    }
-    const float x1 = tanhf(w0_times_q - b0[neuron]);
-    const float tanh_derivative = 1.0f - x1 * x1;
-    energy += w1[neuron] * x1;
-    for (int d = 0; d < descriptor_dim; ++d) {
-      fp_local[d] += w1[neuron] * tanh_derivative *
-                     w0[neuron * descriptor_dim + d];
-    }
-  }
-
-  const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-  potential[atom] = static_cast<double>(energy - type_bias - b1[0]);
-  for (int d = 0; d < descriptor_dim; ++d) {
-    fp[atom + atom_stride * d] = fp_local[d];
-  }
-}
 
 template <bool StoreDescriptors>
 __device__ __forceinline__ void write_descriptor_value(
@@ -881,6 +643,37 @@ __device__ __forceinline__ void write_descriptor_value(
     descriptors[atom + atom_stride * descriptor_index] = value;
   } else {
     q[descriptor_index] = value;
+  }
+}
+
+template <bool StoreDescriptors>
+__device__ __forceinline__ void flush_radial_type_run(
+    int atom,
+    int atom_stride,
+    int type1,
+    int type2,
+    int num_types,
+    int n_max_radial,
+    int radial_basis_size,
+    int radial_basis_count,
+    const float* __restrict__ descriptor_coefficients,
+    const float* __restrict__ radial_basis_sums,
+    float* q,
+    float* __restrict__ descriptors) {
+  const int type_pair = type1 * num_types + type2;
+  for (int n = 0; n <= n_max_radial; ++n) {
+    const int coefficient_base =
+        type_pair * radial_basis_count + n * radial_basis_size;
+    float value = 0.0f;
+    for (int k = 0; k < radial_basis_size; ++k) {
+      value += radial_basis_sums[k * blockDim.x + threadIdx.x] *
+               descriptor_coefficients[coefficient_base + k];
+    }
+    if constexpr (StoreDescriptors) {
+      descriptors[atom + atom_stride * n] += value;
+    } else {
+      q[n] += value;
+    }
   }
 }
 
@@ -930,9 +723,38 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   const float radial_rcinv = 1.0f / cutoff_radial;
   const int radial_count = nn_radial[atom];
 
+  if constexpr (StoreDescriptors) {
+    for (int n = 0; n <= n_max_radial; ++n) {
+      descriptors[atom + atom_stride * n] = 0.0f;
+    }
+  }
+
+  int radial_run_type = -1;
+
   for (int slot = 0; slot < radial_count; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
+    if (type2 != radial_run_type) {
+      if (radial_run_type >= 0) {
+        flush_radial_type_run<StoreDescriptors>(
+            atom,
+            atom_stride,
+            type1,
+            radial_run_type,
+            num_types,
+            n_max_radial,
+            radial_basis_size,
+            radial_basis_count,
+            descriptor_coefficients,
+            radial_basis_sums,
+            q,
+            descriptors);
+      }
+      for (int k = 0; k < radial_basis_size; ++k) {
+        radial_basis_sums[k * blockDim.x + threadIdx.x] = 0.0f;
+      }
+      radial_run_type = type2;
+    }
     float dx = 0.0f;
     float dy = 0.0f;
     float dz = 0.0f;
@@ -962,26 +784,24 @@ __device__ __forceinline__ void build_structural_descriptor_core(
         t_minus_1 = t;
         fn = (t + 1.0f) * half_fc;
       }
-      radial_basis_sums[
-          (type2 * radial_basis_size + k) * blockDim.x + threadIdx.x] += fn;
+      radial_basis_sums[k * blockDim.x + threadIdx.x] += fn;
     }
   }
 
-  for (int n = 0; n <= n_max_radial; ++n) {
-    float value = 0.0f;
-    for (int type2 = 0; type2 < num_types; ++type2) {
-      const int type_pair = type1 * num_types + type2;
-      const int coefficient_base =
-          type_pair * radial_basis_count + n * radial_basis_size;
-      for (int k = 0; k < radial_basis_size; ++k) {
-        value += radial_basis_sums[
-                     (type2 * radial_basis_size + k) * blockDim.x +
-                     threadIdx.x] *
-                 descriptor_coefficients[coefficient_base + k];
-      }
-    }
-    write_descriptor_value<StoreDescriptors>(
-        atom, atom_stride, n, value, q, descriptors);
+  if (radial_run_type >= 0) {
+    flush_radial_type_run<StoreDescriptors>(
+        atom,
+        atom_stride,
+        type1,
+        radial_run_type,
+        num_types,
+        n_max_radial,
+        radial_basis_size,
+        radial_basis_count,
+        descriptor_coefficients,
+        radial_basis_sums,
+        q,
+        descriptors);
   }
 
   if constexpr (!HasAngular) {
@@ -1257,18 +1077,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   }
 }
 
-template <
-    bool StoreDescriptors,
-    bool StorePotential,
-    int DescriptorDim,
-    bool Batched,
-    bool HasAngular>
+template <bool Batched, bool HasAngular>
 __global__ void build_descriptor_core_from_positions(
     int atom_count,
     int atom_stride,
-    int version,
     int descriptor_dim,
-    int hidden_neurons,
     int num_types,
     int num_type_pairs,
     int n_max_radial,
@@ -1301,23 +1114,17 @@ __global__ void build_descriptor_core_from_positions(
     float* __restrict__ f12y,
     float* __restrict__ f12z,
     const float* __restrict__ descriptor_coefficients,
-    const float* __restrict__ ann_type_major,
     float* __restrict__ sum_fxyz,
-    float* __restrict__ descriptors,
-    double* __restrict__ potential,
-    float* __restrict__ fp) {
+    float* __restrict__ descriptors) {
   extern __shared__ float shared_storage[];
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   const int radial_basis_size = basis_size_radial + 1;
-  const int radial_basis_channels = num_types * radial_basis_size;
   float* radial_basis_sums = shared_storage;
-  float* ann_hidden_delta =
-      shared_storage + radial_basis_channels * blockDim.x;
-  for (int channel = 0; channel < radial_basis_channels; ++channel) {
-    radial_basis_sums[channel * blockDim.x + threadIdx.x] = 0.0f;
-  }
   if (atom >= atom_count) {
     return;
+  }
+  for (int k = 0; k < radial_basis_size; ++k) {
+    radial_basis_sums[k * blockDim.x + threadIdx.x] = 0.0f;
   }
 
   const int type1 = types[atom];
@@ -1333,56 +1140,7 @@ __global__ void build_descriptor_core_from_positions(
         pbc_flags3);
   }
 
-  if constexpr (StoreDescriptors) {
-    build_structural_descriptor_core<true, HasAngular>(
-        atom,
-        atom_stride,
-        descriptor_dim,
-        num_types,
-        num_type_pairs,
-        n_max_radial,
-        basis_size_radial,
-        n_max_angular,
-        basis_size_angular,
-        l_max_3body,
-        has_q_222,
-        has_q_1111,
-        has_q_112,
-        has_q_123,
-        has_q_233,
-        has_q_134,
-        abc_count,
-        cutoff_radial,
-        cutoff_angular,
-        atom_box,
-        types,
-        positions_soa3,
-        nn_radial,
-        nl_radial,
-        nn_angular,
-        nl_angular,
-        r12_angular,
-        f12x,
-        f12y,
-        f12z,
-        descriptor_coefficients,
-        radial_basis_sums,
-        nullptr,
-        sum_fxyz,
-        descriptors);
-    return;
-  }
-
-  constexpr int kDescriptorCapacity =
-      DescriptorDim > 0 ? DescriptorDim : kMaxFusedDescriptorDim;
-  const int descriptor_count =
-      DescriptorDim > 0 ? DescriptorDim : descriptor_dim;
-  float q[kDescriptorCapacity];
-  for (int d = 0; d < descriptor_count; ++d) {
-    q[d] = 0.0f;
-  }
-
-  build_structural_descriptor_core<false, HasAngular>(
+  build_structural_descriptor_core<true, HasAngular>(
       atom,
       atom_stride,
       descriptor_dim,
@@ -1415,49 +1173,9 @@ __global__ void build_descriptor_core_from_positions(
       f12z,
       descriptor_coefficients,
       radial_basis_sums,
-      q,
+      nullptr,
       sum_fxyz,
       descriptors);
-
-  const int w0_count = hidden_neurons * descriptor_dim;
-  const int type_extra_bias_count = version == 5 ? 1 : 0;
-  const int type_block_size =
-      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
-  const float* w0 = ann_type_major + type1 * type_block_size;
-  const float* b0 = w0 + w0_count;
-  const float* w1 = b0 + hidden_neurons;
-  const float* b1 = ann_type_major + num_types * type_block_size;
-
-  float energy = 0.0f;
-  for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-    float w0_times_q = 0.0f;
-    for (int d = 0; d < descriptor_count; ++d) {
-      w0_times_q += w0[neuron * descriptor_dim + d] * q[d];
-    }
-    const float x1 = tanhf(w0_times_q - b0[neuron]);
-    const float tanh_derivative = 1.0f - x1 * x1;
-    if constexpr (StorePotential) {
-      energy += w1[neuron] * x1;
-    }
-    // Each neuron row is thread-contiguous and therefore bank-conflict free.
-    // A thread reads back only its own column, so no block barrier is required.
-    ann_hidden_delta[neuron * blockDim.x + threadIdx.x] =
-        w1[neuron] * tanh_derivative;
-  }
-
-  if constexpr (StorePotential) {
-    const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-    potential[atom] = static_cast<double>(energy - type_bias - b1[0]);
-  }
-  for (int d = 0; d < descriptor_count; ++d) {
-    float fp_value = 0.0f;
-    for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
-      fp_value +=
-          ann_hidden_delta[neuron * blockDim.x + threadIdx.x] *
-          w0[neuron * descriptor_dim + d];
-    }
-    fp[atom + atom_stride * d] = fp_value;
-  }
 }
 
 }  // namespace
@@ -1674,113 +1392,7 @@ void build_angular_descriptors_from_geometry_on_device(
   check_cuda(cudaDeviceSynchronize(), "build fused angular descriptors kernel failed");
 }
 
-bool try_build_angular_descriptors_and_ann_from_geometry_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace) {
-  require(atom_count >= 0, "atom_count must be non-negative");
-  require(protocol.version == 4 || protocol.version == 5,
-          "fused descriptor/ANN kernel supports NEP4/NEP5");
-  require(protocol.num_types > 0, "num_types must be positive");
-  require(protocol.descriptor_dim > 0, "descriptor_dim must be positive");
-  require(protocol.hidden_neurons > 0, "hidden_neurons must be positive");
-  if (protocol.descriptor_dim > kMaxFusedDescriptorDim) {
-    return false;
-  }
-  require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
-  require(protocol.n_max_angular >= 0, "n_max_angular must be non-negative");
-  require(protocol.basis_size_radial >= 0, "radial basis size must be non-negative");
-  require(protocol.basis_size_angular >= 0, "angular basis size must be non-negative");
-  require(protocol.cutoff_angular > 0.0, "angular cutoff must be positive");
-  require(protocol.neighbor_capacity_angular > 0,
-          "angular neighbor capacity must be positive");
-  require(protocol.body_channels.l_max_3body <= 4,
-          "angular descriptor kernel supports l_max_3body <= 4");
-
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView workspace_view = workspace.view();
-  require(static_cast<std::size_t>(atom_count) <= workspace_view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(model_view.descriptor_coefficients != nullptr,
-          "model missing descriptor coefficients");
-  require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
-          "model descriptor coefficient buffer is too small");
-  require(model_view.descriptor_coefficients_type_pair_major != nullptr,
-          "model missing type-pair-major descriptor coefficients");
-  require(model_view.descriptor_coefficients_type_pair_major_count >=
-              protocol.ordinary_descriptor_parameter_count,
-          "model type-pair-major descriptor coefficient buffer is too small");
-  require(model_view.ann_type_major != nullptr, "model missing ANN parameters");
-  require(model_view.ann_type_major_qscaled != nullptr,
-          "model missing q-scaled ANN parameters");
-  require(model_view.q_scaler != nullptr, "model missing q_scaler");
-  require(model_view.ann_type_major_count >= protocol.ann_parameter_count,
-          "ANN parameter buffer is too small");
-  require(model_view.ann_type_major_qscaled_count >= protocol.ann_parameter_count,
-          "q-scaled ANN parameter buffer is too small");
-  require(model_view.q_scaler_count >= static_cast<std::size_t>(protocol.descriptor_dim),
-          "q_scaler buffer is too small");
-  require(workspace_view.types != nullptr, "workspace missing atom types");
-  require(workspace_view.nn_angular != nullptr, "workspace missing angular counts");
-  require(workspace_view.nl_angular_slot_major != nullptr,
-          "workspace missing angular neighbor list");
-  require(workspace_view.f12x != nullptr && workspace_view.f12y != nullptr &&
-              workspace_view.f12z != nullptr,
-          "workspace missing angular pair geometry");
-  require(workspace_view.r12_angular != nullptr,
-          "workspace missing angular distance cache");
-  require(workspace_view.sum_fxyz != nullptr, "workspace missing sum_fxyz cache");
-  require(workspace_view.descriptors != nullptr, "workspace missing descriptor cache");
-  require(workspace_view.potential != nullptr, "workspace missing potential output");
-  require(workspace_view.fp != nullptr, "workspace missing descriptor derivative cache");
-
-  const int threads = 64;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    build_angular_descriptors_and_ann_from_geometry<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(workspace_view.atom_capacity),
-        protocol.version,
-        protocol.descriptor_dim,
-        protocol.hidden_neurons,
-        protocol.num_types,
-        protocol.num_types * protocol.num_types,
-        protocol.n_max_radial,
-        protocol.basis_size_radial,
-        protocol.n_max_angular,
-        protocol.basis_size_angular,
-        protocol.body_channels.l_max_3body,
-        protocol.body_channels.has_q_222 ? 1 : 0,
-        protocol.body_channels.has_q_1111 ? 1 : 0,
-        protocol.body_channels.has_q_112 ? 1 : 0,
-        protocol.body_channels.has_q_123 ? 1 : 0,
-        protocol.body_channels.has_q_233 ? 1 : 0,
-        protocol.body_channels.has_q_134 ? 1 : 0,
-        protocol.neighbor_capacity_angular,
-        protocol.body_channels.abc_count(),
-        static_cast<float>(protocol.cutoff_angular),
-        workspace_view.types,
-        workspace_view.nn_angular,
-        workspace_view.nl_angular_slot_major,
-        workspace_view.f12x,
-        workspace_view.f12y,
-        workspace_view.f12z,
-        workspace_view.r12_angular,
-        model_view.descriptor_coefficients,
-        model_view.q_scaler,
-        model_view.ann_type_major_qscaled,
-        workspace_view.sum_fxyz,
-        workspace_view.descriptors,
-        workspace_view.potential,
-        workspace_view.fp);
-  }
-  check_cuda(cudaGetLastError(),
-             "build fused angular descriptors/ANN kernel launch failed");
-  return true;
-}
-
-bool try_build_descriptor_core_from_positions_on_device(
+void build_descriptor_core_from_positions_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
@@ -1817,9 +1429,6 @@ bool try_build_descriptor_core_from_positions_on_device(
     require(protocol.spin_mode == 0 && protocol.charge_mode == 0,
             "descriptor core ANN only accepts ordinary models");
     require(protocol.hidden_neurons > 0, "hidden_neurons must be positive");
-    if (protocol.descriptor_dim > kMaxFusedDescriptorDim) {
-      return false;
-    }
   }
 
   const DeviceModelView model_view = model.view();
@@ -1867,24 +1476,18 @@ bool try_build_descriptor_core_from_positions_on_device(
       require(workspace_view.potential != nullptr,
               "workspace missing potential output");
     }
-  } else {
-    require(workspace_view.descriptors != nullptr,
-            "workspace missing descriptor cache");
   }
+  require(workspace_view.descriptors != nullptr,
+          "workspace missing descriptor cache");
 
-  const int threads = 128;
-  const int blocks = (atom_count + threads - 1) / threads;
-  const std::size_t radial_basis_sum_shared_bytes =
-      static_cast<std::size_t>(threads) *
-      static_cast<std::size_t>(protocol.num_types) *
-      static_cast<std::size_t>(protocol.basis_size_radial + 1) * sizeof(float);
-  const std::size_t ann_hidden_delta_shared_bytes = evaluate_ann
-      ? static_cast<std::size_t>(threads) *
-          static_cast<std::size_t>(protocol.hidden_neurons) * sizeof(float)
-      : 0;
-  const std::size_t shared_bytes =
-      radial_basis_sum_shared_bytes + ann_hidden_delta_shared_bytes;
-  const bool needs_shared_memory_optin =
+  const std::size_t radial_run_channels =
+      static_cast<std::size_t>(protocol.basis_size_radial + 1);
+  const std::size_t shared_bytes_per_thread =
+      radial_run_channels * sizeof(float);
+  int threads = kPreferredDescriptorBlockSize;
+  std::size_t shared_bytes =
+      shared_bytes_per_thread * static_cast<std::size_t>(threads);
+  bool needs_shared_memory_optin =
       shared_bytes > kDefaultDynamicSharedMemoryBytes;
   if (needs_shared_memory_optin) {
     int device = 0;
@@ -1898,47 +1501,37 @@ bool try_build_descriptor_core_from_positions_on_device(
     const std::size_t optin_shared_bytes = std::max(
         static_cast<std::size_t>(device_properties.sharedMemPerBlock),
         static_cast<std::size_t>(device_properties.sharedMemPerBlockOptin));
-    if (shared_bytes > optin_shared_bytes) {
-      return false;
+    threads = kSharedPressureBlockSize;
+    shared_bytes =
+        shared_bytes_per_thread * static_cast<std::size_t>(threads);
+    while (threads > 1 && shared_bytes > optin_shared_bytes) {
+      threads /= 2;
+      shared_bytes =
+          shared_bytes_per_thread * static_cast<std::size_t>(threads);
     }
+    require(shared_bytes <= optin_shared_bytes,
+            "descriptor core per-atom shared state exceeds the CUDA device limit");
+    needs_shared_memory_optin =
+        shared_bytes > kDefaultDynamicSharedMemoryBytes;
   }
+  const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    const auto launch = [&](auto store_descriptors_tag,
-                            auto store_potential_tag,
-                            auto descriptor_dim_tag,
-                            auto batched_tag,
-                            auto has_angular_tag) {
-      constexpr bool kStoreDescriptors =
-          decltype(store_descriptors_tag)::value;
-      constexpr bool kStorePotential = decltype(store_potential_tag)::value;
-      constexpr int kDescriptorDim = decltype(descriptor_dim_tag)::value;
+    const auto launch = [&](auto batched_tag, auto has_angular_tag) {
       constexpr bool kBatched = decltype(batched_tag)::value;
       constexpr bool kHasAngular = decltype(has_angular_tag)::value;
       if (needs_shared_memory_optin) {
         check_cuda(
             cudaFuncSetAttribute(
-                build_descriptor_core_from_positions<
-                    kStoreDescriptors,
-                    kStorePotential,
-                    kDescriptorDim,
-                    kBatched,
-                    kHasAngular>,
+                build_descriptor_core_from_positions<kBatched, kHasAngular>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
                 static_cast<int>(shared_bytes)),
             "configure descriptor core shared memory");
       }
-      build_descriptor_core_from_positions<
-          kStoreDescriptors,
-          kStorePotential,
-          kDescriptorDim,
-          kBatched,
-          kHasAngular>
+      build_descriptor_core_from_positions<kBatched, kHasAngular>
           <<<blocks, threads, shared_bytes>>>(
           atom_count,
           static_cast<int>(workspace_view.atom_capacity),
-          protocol.version,
           protocol.descriptor_dim,
-          protocol.hidden_neurons,
           protocol.num_types,
           protocol.num_types * protocol.num_types,
           protocol.n_max_radial,
@@ -1971,85 +1564,29 @@ bool try_build_descriptor_core_from_positions_on_device(
           workspace_view.f12y,
           workspace_view.f12z,
           model_view.descriptor_coefficients_type_pair_major,
-          model_view.ann_type_major_qscaled,
           workspace_view.sum_fxyz,
-          workspace_view.descriptors,
-          workspace_view.potential,
-          workspace_view.fp);
+          workspace_view.descriptors);
     };
 
-    const auto dispatch_topology = [&](auto store_descriptors_tag,
-                                       auto store_potential_tag,
-                                       auto descriptor_dim_tag) {
-      if (options.topology == DescriptorCoreTopology::batched_multi_box) {
-        if (options.has_angular) {
-          launch(
-              store_descriptors_tag,
-              store_potential_tag,
-              descriptor_dim_tag,
-              std::true_type{},
-              std::true_type{});
-        } else {
-          launch(
-              store_descriptors_tag,
-              store_potential_tag,
-              descriptor_dim_tag,
-              std::true_type{},
-              std::false_type{});
-        }
+    if (options.topology == DescriptorCoreTopology::batched_multi_box) {
+      if (options.has_angular) {
+        launch(std::true_type{}, std::true_type{});
       } else {
-        if (options.has_angular) {
-          launch(
-              store_descriptors_tag,
-              store_potential_tag,
-              descriptor_dim_tag,
-              std::false_type{},
-              std::true_type{});
-        } else {
-          launch(
-              store_descriptors_tag,
-              store_potential_tag,
-              descriptor_dim_tag,
-              std::false_type{},
-              std::false_type{});
-        }
-      }
-    };
-
-    if (!evaluate_ann) {
-      dispatch_topology(
-          std::true_type{},
-          std::false_type{},
-          std::integral_constant<int, -1>{});
-    } else if (options.store_potential) {
-      if (protocol.descriptor_dim == 35) {
-        dispatch_topology(
-            std::false_type{},
-            std::true_type{},
-            std::integral_constant<int, 35>{});
-      } else {
-        dispatch_topology(
-            std::false_type{},
-            std::true_type{},
-            std::integral_constant<int, -1>{});
+        launch(std::true_type{}, std::false_type{});
       }
     } else {
-      if (protocol.descriptor_dim == 35) {
-        dispatch_topology(
-            std::false_type{},
-            std::false_type{},
-            std::integral_constant<int, 35>{});
+      if (options.has_angular) {
+        launch(std::false_type{}, std::true_type{});
       } else {
-        dispatch_topology(
-            std::false_type{},
-            std::false_type{},
-            std::integral_constant<int, -1>{});
+        launch(std::false_type{}, std::false_type{});
       }
     }
   }
   check_cuda(cudaGetLastError(),
              "build descriptor core kernel launch failed");
-  return true;
+  if (evaluate_ann) {
+    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
+  }
 }
 
 }  // namespace nep_adapters::cuda_backend

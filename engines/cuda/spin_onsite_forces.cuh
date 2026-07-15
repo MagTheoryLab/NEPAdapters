@@ -2,7 +2,7 @@
 
 // Internal CUDA implementation fragment for spin_onsite.cu.
 // Included inside nep_adapters::cuda_backend's anonymous namespace.
-// Contains generic and specialized spin force kernels.
+// Contains the onsite term and the unified compact spin force core.
 
 __global__ void accumulate_spin_onsite_mforces(
     int atom_count,
@@ -26,1093 +26,8 @@ __global__ void accumulate_spin_onsite_mforces(
   mforce_soa3[atom_stride + atom] -= scale * sy;
   mforce_soa3[2 * atom_stride + atom] -= scale * sz;
 }
-__global__ void accumulate_spin_scalar_forces(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    int num_types,
-    int spin_compress,
-    int spin_basis_size,
-    float spin_cutoff,
-    SimulationBox box,
-    const int* __restrict__ types,
-    const double* __restrict__ positions_soa3,
-    const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ fp,
-    const float* __restrict__ descriptor_coefficients,
-    int spin_coefficient_offset,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
-    bool use_cached_geometry,
-    double* __restrict__ force_soa3,
-    double* __restrict__ mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* __restrict__ virial_soa9) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
 
-  const int type1 = types[atom];
-  const int type_pair_base = type1 * num_types;
-  const int basis_count = spin_basis_size + 1;
-  const double rcinv = 1.0 / static_cast<double>(spin_cutoff);
-  const int radial_count = nn_radial[atom];
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    if (use_cached_geometry) {
-      load_spin_edge_cached(
-          atom,
-          neighbor,
-          atom_stride,
-          slot,
-          spins_soa3,
-          spin_edge_dx,
-          spin_edge_dy,
-          spin_edge_dz,
-          spin_edge_dist,
-          rhat,
-          dist,
-          si,
-          sj);
-    } else {
-      load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                     rhat, dist, si, sj);
-    }
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-
-    double weights[kMaxSpinCompress] = {};
-    double weight_derivatives[kMaxSpinCompress] = {};
-    if (spin_edge_weights != nullptr && spin_edge_weight_derivatives != nullptr &&
-        spin_compress == 4 && spin_basis_size == 3) {
-      for (int c = 0; c < 4; ++c) {
-        const int cache_index = spin_edge_cache_index(atom_stride, slot, atom, c);
-        weights[c] = static_cast<double>(spin_edge_weights[cache_index]);
-        weight_derivatives[c] =
-            static_cast<double>(spin_edge_weight_derivatives[cache_index]);
-      }
-    } else {
-      const int type_pair = type_pair_base + types[neighbor];
-      double fc = 0.0;
-      double fcp = 0.0;
-      double fn[kMaxSpinBasis] = {};
-      double fnp[kMaxSpinBasis] = {};
-      find_fc_and_fcp(spin_cutoff, rcinv, dist, fc, fcp);
-      find_fn_and_fnp(spin_basis_size, rcinv, dist, fc, fcp, fn, fnp);
-      for (int c = 0; c < spin_compress; ++c) {
-        for (int k = 0; k < basis_count; ++k) {
-          const int index = spin_coefficient_offset +
-              ((c * basis_count + k) * num_types * num_types + type_pair);
-          const double coefficient =
-              static_cast<double>(descriptor_coefficients[index]);
-          weights[c] += fn[k] * coefficient;
-          weight_derivatives[c] += fnp[k] * coefficient;
-        }
-      }
-    }
-
-    const double dot = dot3(si, sj);
-    const double sj2 = dot3(sj, sj);
-    const double ri_dot_si = dot3(rhat, si);
-    const double ri_dot_sj = dot3(rhat, sj);
-    const double bond_axis = ri_dot_si * ri_dot_sj;
-    const double scalars[4] = {dot, dot * dot, sj2, bond_axis};
-
-    double grad_weight[kMaxSpinCompress] = {};
-    double grad_rhat[3] = {0.0, 0.0, 0.0};
-    double grad_si[3] = {0.0, 0.0, 0.0};
-    double grad_sj[3] = {0.0, 0.0, 0.0};
-    double grad_dot = 0.0;
-
-    int offset = 2;
-    double g = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      const double alpha =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + offset + c)]);
-      grad_weight[c] += alpha * scalars[0];
-      g += alpha * weights[c];
-    }
-    grad_dot += g;
-    offset += spin_compress;
-
-    g = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      const double alpha =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + offset + c)]);
-      grad_weight[c] += alpha * scalars[1];
-      g += alpha * weights[c];
-    }
-    grad_dot += 2.0 * dot * g;
-    offset += spin_compress;
-
-    g = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      const double alpha =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + offset + c)]);
-      grad_weight[c] += alpha * scalars[2];
-      g += alpha * weights[c];
-    }
-    for (int d = 0; d < 3; ++d) {
-      grad_sj[d] += 2.0 * g * sj[d];
-    }
-    offset += spin_compress;
-
-    g = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      const double alpha =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + offset + c)]);
-      grad_weight[c] += alpha * scalars[3];
-      g += alpha * weights[c];
-    }
-    for (int d = 0; d < 3; ++d) {
-      grad_si[d] += g * ri_dot_sj * rhat[d];
-      grad_sj[d] += g * ri_dot_si * rhat[d];
-      grad_rhat[d] += g * (ri_dot_sj * si[d] + ri_dot_si * sj[d]);
-    }
-
-    for (int d = 0; d < 3; ++d) {
-      grad_si[d] += grad_dot * sj[d];
-      grad_sj[d] += grad_dot * si[d];
-    }
-
-    double grad_dist = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      grad_dist += grad_weight[c] * weight_derivatives[c];
-    }
-    double dot_r = 0.0;
-    for (int d = 0; d < 3; ++d) {
-      dot_r += grad_rhat[d] * rhat[d];
-    }
-    double grad_rij[3];
-    for (int d = 0; d < 3; ++d) {
-      grad_rij[d] = grad_dist * rhat[d] +
-                    (grad_rhat[d] - dot_r * rhat[d]) / dist;
-      atomicAdd(force_soa3 + d * atom_stride + atom, grad_rij[d]);
-      atomicAdd(force_soa3 + d * atom_stride + neighbor, -grad_rij[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
-    }
-    if (virial_mode != SpinVirialMode::disabled) {
-      for (int a = 0; a < 3; ++a) {
-        const double rij_a = rhat[a] * dist;
-        for (int b = 0; b < 3; ++b) {
-          const int row_major = a * 3 + b;
-          const int internal_component =
-              row_major == 0 ? 0 :
-              row_major == 1 ? 3 :
-              row_major == 2 ? 4 :
-              row_major == 3 ? 6 :
-              row_major == 4 ? 1 :
-              row_major == 5 ? 5 :
-              row_major == 6 ? 7 :
-              row_major == 7 ? 8 : 2;
-          atomicAdd(
-              virial_soa9 + internal_component * atom_stride +
-                  (virial_mode == SpinVirialMode::cpu_atom_decomposition
-                       ? 0
-                       : atom),
-              -rij_a * grad_rij[b]);
-        }
-      }
-    }
-  }
-}
-
-__global__ void accumulate_spin_density_forces(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    int num_types,
-    int spin_compress,
-    int spin_basis_size,
-    int spin_l_max,
-    float spin_cutoff,
-    SimulationBox box,
-    const int* __restrict__ types,
-    const double* __restrict__ positions_soa3,
-    const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ fp,
-    const float* __restrict__ descriptor_coefficients,
-    int spin_coefficient_offset,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
-    bool use_cached_geometry,
-    const float* __restrict__ density_rho0_cache,
-    const float* __restrict__ density_raw1_cache,
-    const float* __restrict__ density_l1_rdot_cache,
-    const float* __restrict__ density_l1_cross_cache,
-    const float* __restrict__ density_l1_stf_cache,
-    const float* __restrict__ density_angular2_cache,
-    const float* __restrict__ density_angular3_cache,
-    const float* __restrict__ density_angular4_cache,
-    const float* __restrict__ density_geom_cache,
-    const float* __restrict__ density_rho0_dot_cache,
-    const float* __restrict__ density_raw1_dot_cache,
-    double* __restrict__ force_soa3,
-    double* __restrict__ mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* __restrict__ virial_soa9) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  double rho0[kMaxSpinCompress * 3] = {};
-  double raw1[kMaxSpinCompress * 9] = {};
-  double l1_rdot[kMaxSpinCompress] = {};
-  double l1_cross[kMaxSpinCompress * 3] = {};
-  double l1_stf[kMaxSpinCompress * 9] = {};
-  double angular2[kMaxSpinCompress * 15] = {};
-  double angular3[kMaxSpinCompress * 21] = {};
-  double angular4[kMaxSpinCompress * 27] = {};
-  double geom[kMaxSpinCompress * 9] = {};
-  double rho0_dot[kMaxSpinCompress * 3] = {};
-  double raw1_dot[kMaxSpinCompress * 9] = {};
-
-  const int type1 = types[atom];
-  const int type_pair_base = type1 * num_types;
-  const int basis_count = spin_basis_size + 1;
-  const double rcinv = 1.0 / static_cast<double>(spin_cutoff);
-  const int radial_count = nn_radial[atom];
-
-  for (int c = 0; c < spin_compress; ++c) {
-    for (int k = 0; k < 3; ++k) {
-      rho0[idx2(c, k, 3)] =
-          density_rho0_cache[atom + atom_stride * (c * 3 + k)];
-      rho0_dot[idx2(c, k, 3)] =
-          density_rho0_dot_cache[atom + atom_stride * (c * 3 + k)];
-    }
-    for (int k = 0; k < 9; ++k) {
-      raw1[idx2(c, k, 9)] =
-          density_raw1_cache[atom + atom_stride * (c * 9 + k)];
-      l1_stf[idx2(c, k, 9)] =
-          density_l1_stf_cache[atom + atom_stride * (c * 9 + k)];
-      geom[idx2(c, k, 9)] =
-          density_geom_cache[atom + atom_stride * (c * 9 + k)];
-      raw1_dot[idx2(c, k, 9)] =
-          density_raw1_dot_cache[atom + atom_stride * (c * 9 + k)];
-    }
-    l1_rdot[c] = density_l1_rdot_cache[atom + atom_stride * c];
-    for (int k = 0; k < 3; ++k) {
-      l1_cross[idx2(c, k, 3)] =
-          density_l1_cross_cache[atom + atom_stride * (c * 3 + k)];
-    }
-    if (spin_l_max >= 2) {
-      for (int k = 0; k < 15; ++k) {
-        angular2[idx2(c, k, 15)] =
-            density_angular2_cache[atom + atom_stride * (c * 15 + k)];
-      }
-    }
-    if (spin_l_max >= 3) {
-      for (int k = 0; k < 21; ++k) {
-        angular3[idx2(c, k, 21)] =
-            density_angular3_cache[atom + atom_stride * (c * 21 + k)];
-      }
-    }
-    if (spin_l_max >= 4) {
-      for (int k = 0; k < 27; ++k) {
-        angular4[idx2(c, k, 27)] =
-            density_angular4_cache[atom + atom_stride * (c * 27 + k)];
-      }
-    }
-  }
-
-  const int rho0_offset = 2 + 4 * spin_compress;
-  const int l1_rdot_offset = rho0_offset + spin_compress;
-  const int l1_cross_offset = l1_rdot_offset + spin_compress;
-  const int l1_stf_offset = l1_cross_offset + spin_compress;
-  int angular_offset = rho0_offset + spin_compress;
-  if (spin_l_max >= 1) {
-    angular_offset += 3 * spin_compress;
-  }
-  int geom_offset = angular_offset;
-  for (int ell = 2; ell <= spin_l_max; ++ell) {
-    geom_offset += spin_compress;
-  }
-  const int rho0_dot_offset = geom_offset + spin_compress;
-  const int raw1_dot_offset = rho0_dot_offset + spin_compress;
-
-  const double si0[3] = {
-      spins_soa3[atom],
-      spins_soa3[atom_stride + atom],
-      spins_soa3[2 * atom_stride + atom]};
-
-  double rho0_pull[kMaxSpinCompress * 3] = {};
-  double rho0_dot_pull[kMaxSpinCompress * 3] = {};
-  double l1_pull[kMaxSpinCompress * 9] = {};
-  double l1_dot_pull[kMaxSpinCompress * 9] = {};
-  double geom_pull[kMaxSpinCompress * 9] = {};
-  double grad_spin_i_direct[3] = {0.0, 0.0, 0.0};
-
-  for (int c = 0; c < spin_compress; ++c) {
-    const double alpha0 =
-        static_cast<double>(fp[atom + atom_stride * (struct_dim + rho0_offset + c)]);
-    const double alpha0_dot =
-        static_cast<double>(fp[atom + atom_stride * (struct_dim + rho0_dot_offset + c)]);
-    for (int d = 0; d < 3; ++d) {
-      rho0_pull[idx2(c, d, 3)] =
-          2.0 * alpha0 * rho0[idx2(c, d, 3)] +
-          alpha0_dot * rho0_dot[idx2(c, d, 3)];
-      rho0_dot_pull[idx2(c, d, 3)] = alpha0_dot * rho0[idx2(c, d, 3)];
-    }
-
-    const double alpha_geom =
-        static_cast<double>(fp[atom + atom_stride * (struct_dim + geom_offset + c)]);
-    const double* g = geom + c * 9;
-    for (int a = 0; a < 3; ++a) {
-      double gs = 0.0;
-      for (int b = 0; b < 3; ++b) {
-        gs += (g[3 * a + b] + g[3 * b + a]) * si0[b];
-      }
-      grad_spin_i_direct[a] += alpha_geom * gs;
-    }
-    double ss[9];
-    stf_outer3(si0, si0, ss);
-    for (int k = 0; k < 9; ++k) {
-      geom_pull[c * 9 + k] = alpha_geom * ss[k];
-    }
-  }
-
-  if (spin_l_max >= 1) {
-    for (int c = 0; c < spin_compress; ++c) {
-      double* mat = l1_pull + c * 9;
-      double* mat_dot = l1_dot_pull + c * 9;
-      const double alpha_rdot =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + l1_rdot_offset + c)]);
-      const double alpha_cross =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + l1_cross_offset + c)]);
-      const double alpha_stf =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + l1_stf_offset + c)]);
-      const double alpha_raw1 =
-          static_cast<double>(fp[atom + atom_stride * (struct_dim + raw1_dot_offset + c)]);
-      const double rdot = l1_rdot[c];
-      const double* cross = l1_cross + c * 3;
-      const double* stf = l1_stf + c * 9;
-      const double* raw = raw1 + c * 9;
-      const double* raw_dot = raw1_dot + c * 9;
-      const double g_cross[3] = {
-          2.0 * alpha_cross * cross[0],
-          2.0 * alpha_cross * cross[1],
-          2.0 * alpha_cross * cross[2]};
-      mat[0] += 2.0 * alpha_rdot * rdot;
-      mat[4] += 2.0 * alpha_rdot * rdot;
-      mat[8] += 2.0 * alpha_rdot * rdot;
-      mat[1] += g_cross[2];
-      mat[2] -= g_cross[1];
-      mat[3] -= g_cross[2];
-      mat[5] += g_cross[0];
-      mat[6] += g_cross[1];
-      mat[7] -= g_cross[0];
-      for (int k = 0; k < 9; ++k) {
-        mat[k] += 2.0 * alpha_stf * stf[k] + alpha_raw1 * raw_dot[k];
-        mat_dot[k] = alpha_raw1 * raw[k];
-      }
-    }
-  }
-
-  for (int d = 0; d < 3; ++d) {
-    atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_spin_i_direct[d]);
-  }
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    if (use_cached_geometry) {
-      load_spin_edge_cached(
-          atom,
-          neighbor,
-          atom_stride,
-          slot,
-          spins_soa3,
-          spin_edge_dx,
-          spin_edge_dy,
-          spin_edge_dz,
-          spin_edge_dist,
-          rhat,
-          dist,
-          si,
-          sj);
-    } else {
-      load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                     rhat, dist, si, sj);
-    }
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    double weights[kMaxSpinCompress] = {};
-    double weight_derivatives[kMaxSpinCompress] = {};
-    if (spin_edge_weights != nullptr && spin_edge_weight_derivatives != nullptr &&
-        spin_compress == 4 && spin_basis_size == 3) {
-      for (int c = 0; c < 4; ++c) {
-        const int cache_index = spin_edge_cache_index(atom_stride, slot, atom, c);
-        weights[c] = static_cast<double>(spin_edge_weights[cache_index]);
-        weight_derivatives[c] =
-            static_cast<double>(spin_edge_weight_derivatives[cache_index]);
-      }
-    } else {
-      const int type_pair = type_pair_base + types[neighbor];
-      double fc = 0.0;
-      double fcp = 0.0;
-      double fn[kMaxSpinBasis] = {};
-      double fnp[kMaxSpinBasis] = {};
-      find_fc_and_fcp(spin_cutoff, rcinv, dist, fc, fcp);
-      find_fn_and_fnp(spin_basis_size, rcinv, dist, fc, fcp, fn, fnp);
-      for (int c = 0; c < spin_compress; ++c) {
-        for (int k = 0; k < basis_count; ++k) {
-          const int index = spin_coefficient_offset +
-              ((c * basis_count + k) * num_types * num_types + type_pair);
-          const double coefficient =
-              static_cast<double>(descriptor_coefficients[index]);
-          weights[c] += fn[k] * coefficient;
-          weight_derivatives[c] += fnp[k] * coefficient;
-        }
-      }
-    }
-
-    const double dot = dot3(si, sj);
-    double grad_weight[kMaxSpinCompress] = {};
-    double grad_rhat[3] = {0.0, 0.0, 0.0};
-    double grad_si[3] = {0.0, 0.0, 0.0};
-    double grad_sj[3] = {0.0, 0.0, 0.0};
-    double grad_dot = 0.0;
-
-    for (int c = 0; c < spin_compress; ++c) {
-      const double* b = rho0_pull + c * 3;
-      const double* bd = rho0_dot_pull + c * 3;
-      const double u[3] = {
-          b[0] + dot * bd[0],
-          b[1] + dot * bd[1],
-          b[2] + dot * bd[2]};
-      const double w = weights[c];
-      grad_weight[c] += dot3(sj, u);
-      for (int d = 0; d < 3; ++d) {
-        grad_sj[d] += w * u[d];
-      }
-      grad_dot += w * dot3(sj, bd);
-    }
-
-    for (int c = 0; c < spin_compress; ++c) {
-      const double* k_mat = geom_pull + c * 9;
-      const double kr[3] = {
-          k_mat[0] * rhat[0] + k_mat[1] * rhat[1] + k_mat[2] * rhat[2],
-          k_mat[3] * rhat[0] + k_mat[4] * rhat[1] + k_mat[5] * rhat[2],
-          k_mat[6] * rhat[0] + k_mat[7] * rhat[1] + k_mat[8] * rhat[2]};
-      double u[3] = {0.0, 0.0, 0.0};
-      double mt[3] = {0.0, 0.0, 0.0};
-      double dot_v2 = 0.0;
-      if (spin_l_max >= 1) {
-        const double* m = l1_pull + c * 9;
-        const double* md = l1_dot_pull + c * 9;
-        const double v1[3] = {
-            m[0] * sj[0] + m[1] * sj[1] + m[2] * sj[2],
-            m[3] * sj[0] + m[4] * sj[1] + m[5] * sj[2],
-            m[6] * sj[0] + m[7] * sj[1] + m[8] * sj[2]};
-        const double v2[3] = {
-            md[0] * sj[0] + md[1] * sj[1] + md[2] * sj[2],
-            md[3] * sj[0] + md[4] * sj[1] + md[5] * sj[2],
-            md[6] * sj[0] + md[7] * sj[1] + md[8] * sj[2]};
-        for (int d = 0; d < 3; ++d) {
-          u[d] = v1[d] + dot * v2[d];
-        }
-        mt[0] = m[0] * rhat[0] + m[3] * rhat[1] + m[6] * rhat[2] +
-                dot * (md[0] * rhat[0] + md[3] * rhat[1] + md[6] * rhat[2]);
-        mt[1] = m[1] * rhat[0] + m[4] * rhat[1] + m[7] * rhat[2] +
-                dot * (md[1] * rhat[0] + md[4] * rhat[1] + md[7] * rhat[2]);
-        mt[2] = m[2] * rhat[0] + m[5] * rhat[1] + m[8] * rhat[2] +
-                dot * (md[2] * rhat[0] + md[5] * rhat[1] + md[8] * rhat[2]);
-        dot_v2 = dot3(rhat, v2);
-      }
-      const double w = weights[c];
-      for (int d = 0; d < 3; ++d) {
-        grad_weight[c] += rhat[d] * (u[d] + kr[d]);
-        grad_rhat[d] += w * (u[d] + 2.0 * kr[d]);
-        grad_sj[d] += w * mt[d];
-      }
-      grad_dot += w * dot_v2;
-    }
-
-    int offset = angular_offset;
-    for (int ell = 2; ell <= spin_l_max; ++ell) {
-      const int width = (2 * ell + 1) * 3;
-      const double* angular = ell == 2 ? angular2 : ell == 3 ? angular3 : angular4;
-      double ylm[9];
-      const int ylm_width = real_spherical_harmonics_spin(rhat, ell, ylm);
-      double value[27];
-      int value_width = 0;
-      for (int m = 0; m < ylm_width; ++m) {
-        value[value_width++] = ylm[m] * sj[0];
-        value[value_width++] = ylm[m] * sj[1];
-        value[value_width++] = ylm[m] * sj[2];
-      }
-      double ge[27] = {};
-      for (int c = 0; c < spin_compress; ++c) {
-        const double alpha =
-            static_cast<double>(fp[atom + atom_stride * (struct_dim + offset + c)]);
-        const double* self = angular + c * width;
-        for (int k = 0; k < width; ++k) {
-          const double gd = 2.0 * alpha * self[k];
-          grad_weight[c] += gd * value[k];
-          ge[k] += gd * weights[c];
-        }
-      }
-      double grad_ylm[9] = {};
-      for (int m = 0; m < ylm_width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          const double g = ge[m * 3 + d];
-          grad_sj[d] += g * ylm[m];
-          grad_ylm[m] += g * sj[d];
-        }
-      }
-      add_real_spherical_harmonics_gradient(rhat, ell, grad_ylm, grad_rhat);
-      offset += spin_compress;
-    }
-
-    for (int d = 0; d < 3; ++d) {
-      grad_si[d] += grad_dot * sj[d];
-      grad_sj[d] += grad_dot * si[d];
-    }
-
-    double grad_dist = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      grad_dist += grad_weight[c] * weight_derivatives[c];
-    }
-    double dot_r = 0.0;
-    for (int d = 0; d < 3; ++d) {
-      dot_r += grad_rhat[d] * rhat[d];
-    }
-    double grad_rij[3];
-    for (int d = 0; d < 3; ++d) {
-      grad_rij[d] = grad_dist * rhat[d] +
-                    (grad_rhat[d] - dot_r * rhat[d]) / dist;
-      atomicAdd(force_soa3 + d * atom_stride + atom, grad_rij[d]);
-      atomicAdd(force_soa3 + d * atom_stride + neighbor, -grad_rij[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
-    }
-    if (virial_mode != SpinVirialMode::disabled) {
-      for (int a = 0; a < 3; ++a) {
-        const double rij_a = rhat[a] * dist;
-        for (int b = 0; b < 3; ++b) {
-          atomicAdd(
-              virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
-                  (virial_mode == SpinVirialMode::cpu_atom_decomposition
-                       ? 0
-                       : atom),
-              -rij_a * grad_rij[b]);
-        }
-      }
-    }
-  }
-}
-
-template <bool AtomMajor>
-__global__ void prepare_spin_density_pulls_c4_l4(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    const double* __restrict__ spins_soa3,
-    const float* __restrict__ fp,
-    float* __restrict__ density_rho0_cache,
-    const float* __restrict__ density_l1_rdot_cache,
-    const float* __restrict__ density_l1_cross_cache,
-    float* __restrict__ density_l1_stf_cache,
-    float* __restrict__ density_angular2_cache,
-    float* __restrict__ density_angular3_cache,
-    float* __restrict__ density_angular4_cache,
-    const float* __restrict__ density_geom_cache,
-    float* __restrict__ density_rho0_dot_cache,
-    float* __restrict__ density_raw1_cache,
-    float* __restrict__ density_raw1_dot_cache,
-    double* __restrict__ mforce_soa3) {
-  constexpr int C = 4;
-  constexpr int Rho0Offset = 18;
-  constexpr int L1RdotOffset = 22;
-  constexpr int L1CrossOffset = 26;
-  constexpr int L1StfOffset = 30;
-  constexpr int Angular2Offset = 34;
-  constexpr int Angular3Offset = 38;
-  constexpr int Angular4Offset = 42;
-  constexpr int GeomOffset = 46;
-  constexpr int Rho0DotOffset = 50;
-  constexpr int Raw1DotOffset = 54;
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const double si0[3] = {
-      spins_soa3[atom],
-      spins_soa3[atom_stride + atom],
-      spins_soa3[2 * atom_stride + atom]};
-  double grad_spin_i_direct[3] = {0.0, 0.0, 0.0};
-  double ss[9];
-  stf_outer3(si0, si0, ss);
-
-  for (int c = 0; c < C; ++c) {
-    const double alpha0 = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Rho0Offset + c)]);
-    const double alpha0_dot = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Rho0DotOffset + c)]);
-    for (int d = 0; d < 3; ++d) {
-      const int idx = spin_component_cache_index<AtomMajor, C * 3>(
-          atom_stride, atom, c * 3 + d);
-      const double rho0 = static_cast<double>(density_rho0_cache[idx]);
-      const double rho0_dot = static_cast<double>(density_rho0_dot_cache[idx]);
-      density_rho0_cache[idx] =
-          static_cast<float>(2.0 * alpha0 * rho0 + alpha0_dot * rho0_dot);
-      density_rho0_dot_cache[idx] = static_cast<float>(alpha0_dot * rho0);
-    }
-
-    const double alpha_geom = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + GeomOffset + c)]);
-    double geom[9];
-    for (int k = 0; k < 9; ++k) {
-      geom[k] = static_cast<double>(
-          density_geom_cache[
-              spin_component_cache_index<AtomMajor, C * 9>(
-                  atom_stride, atom, c * 9 + k)]);
-    }
-    for (int a = 0; a < 3; ++a) {
-      double gs = 0.0;
-      for (int b = 0; b < 3; ++b) {
-        gs += (geom[3 * a + b] + geom[3 * b + a]) * si0[b];
-      }
-      grad_spin_i_direct[a] += alpha_geom * gs;
-    }
-
-    const double alpha_rdot = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + L1RdotOffset + c)]);
-    const double alpha_cross = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + L1CrossOffset + c)]);
-    const double alpha_stf = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + L1StfOffset + c)]);
-    const double alpha_raw1 = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Raw1DotOffset + c)]);
-    double mat[9] = {};
-    const double rdot = static_cast<double>(
-        density_l1_rdot_cache[
-            spin_component_cache_index<AtomMajor, C>(atom_stride, atom, c)]);
-    const double cross[3] = {
-        static_cast<double>(density_l1_cross_cache[
-            spin_component_cache_index<AtomMajor, C * 3>(
-                atom_stride, atom, c * 3)]),
-        static_cast<double>(
-            density_l1_cross_cache[
-                spin_component_cache_index<AtomMajor, C * 3>(
-                    atom_stride, atom, c * 3 + 1)]),
-        static_cast<double>(
-            density_l1_cross_cache[
-                spin_component_cache_index<AtomMajor, C * 3>(
-                    atom_stride, atom, c * 3 + 2)])};
-    const double g_cross[3] = {
-        2.0 * alpha_cross * cross[0],
-        2.0 * alpha_cross * cross[1],
-        2.0 * alpha_cross * cross[2]};
-    mat[0] += 2.0 * alpha_rdot * rdot;
-    mat[4] += 2.0 * alpha_rdot * rdot;
-    mat[8] += 2.0 * alpha_rdot * rdot;
-    mat[1] += g_cross[2];
-    mat[2] -= g_cross[1];
-    mat[3] -= g_cross[2];
-    mat[5] += g_cross[0];
-    mat[6] += g_cross[1];
-    mat[7] -= g_cross[0];
-    for (int k = 0; k < 9; ++k) {
-      const int idx = spin_component_cache_index<AtomMajor, C * 9>(
-          atom_stride, atom, c * 9 + k);
-      const double stf = static_cast<double>(density_l1_stf_cache[idx]);
-      const double raw = static_cast<double>(density_raw1_cache[idx]);
-      const double raw_dot = static_cast<double>(density_raw1_dot_cache[idx]);
-      density_l1_stf_cache[idx] =
-          static_cast<float>(mat[k] + 2.0 * alpha_stf * stf +
-                             alpha_raw1 * raw_dot);
-      density_raw1_dot_cache[idx] = static_cast<float>(alpha_raw1 * raw);
-      density_raw1_cache[idx] = static_cast<float>(alpha_geom * ss[k]);
-    }
-
-    const double alpha_l2 = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Angular2Offset + c)]);
-    for (int k = 0; k < 15; ++k) {
-      const int idx = spin_component_cache_index<AtomMajor, C * 15>(
-          atom_stride, atom, c * 15 + k);
-      density_angular2_cache[idx] =
-          static_cast<float>(2.0 * alpha_l2 *
-                             static_cast<double>(density_angular2_cache[idx]));
-    }
-    const double alpha_l3 = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Angular3Offset + c)]);
-    for (int k = 0; k < 21; ++k) {
-      const int idx = spin_component_cache_index<AtomMajor, C * 21>(
-          atom_stride, atom, c * 21 + k);
-      density_angular3_cache[idx] =
-          static_cast<float>(2.0 * alpha_l3 *
-                             static_cast<double>(density_angular3_cache[idx]));
-    }
-    const double alpha_l4 = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + Angular4Offset + c)]);
-    for (int k = 0; k < 27; ++k) {
-      const int idx = spin_component_cache_index<AtomMajor, C * 27>(
-          atom_stride, atom, c * 27 + k);
-      density_angular4_cache[idx] =
-          static_cast<float>(2.0 * alpha_l4 *
-                             static_cast<double>(density_angular4_cache[idx]));
-    }
-  }
-
-  for (int d = 0; d < 3; ++d) {
-    mforce_soa3[d * atom_stride + atom] -= grad_spin_i_direct[d];
-  }
-}
-
-template <bool AtomMajor>
-__global__ void __launch_bounds__(32, 12) accumulate_spin_density_forces_c4_l4_pull(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    float spin_cutoff,
-    const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ fp,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
-    const float* __restrict__ density_rho0_pull_cache,
-    const float* __restrict__ density_l1_pull_cache,
-    const float* __restrict__ density_angular2_cache,
-    const float* __restrict__ density_angular3_cache,
-    const float* __restrict__ density_angular4_cache,
-    const float* __restrict__ density_geom_pull_cache,
-    const float* __restrict__ density_rho0_dot_pull_cache,
-    const float* __restrict__ density_l1_dot_pull_cache,
-    double* __restrict__ force_soa3,
-    double* __restrict__ mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* __restrict__ virial_soa9) {
-  constexpr int C = 4;
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-  const int cache_stride = spin_component_cache_stride<AtomMajor>(atom_stride);
-
-  const int radial_count = nn_radial[atom];
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge_cached(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-
-    double weights[C];
-    double weight_derivatives[C];
-    load_spin_edge_weight_derivative_cache(
-        atom_stride,
-        slot,
-        atom,
-        spin_edge_weights,
-        spin_edge_weight_derivatives,
-        weights,
-        weight_derivatives);
-
-    const double dot = dot3(si, sj);
-    double grad_weight[C] = {};
-    double grad_rhat[3] = {0.0, 0.0, 0.0};
-    double grad_si[3] = {0.0, 0.0, 0.0};
-    double grad_sj[3] = {0.0, 0.0, 0.0};
-    double grad_dot = 0.0;
-
-    for (int c = 0; c < C; ++c) {
-      const double b[3] = {
-          static_cast<double>(
-              density_rho0_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3)]),
-          static_cast<double>(
-              density_rho0_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3 + 1)]),
-          static_cast<double>(
-              density_rho0_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3 + 2)])};
-      const double bd[3] = {
-          static_cast<double>(
-              density_rho0_dot_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3)]),
-          static_cast<double>(
-              density_rho0_dot_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3 + 1)]),
-          static_cast<double>(
-              density_rho0_dot_pull_cache[
-                  spin_component_cache_index<AtomMajor, C * 3>(
-                      atom_stride, atom, c * 3 + 2)])};
-      const double u[3] = {
-          b[0] + dot * bd[0],
-          b[1] + dot * bd[1],
-          b[2] + dot * bd[2]};
-      const double w = weights[c];
-      grad_weight[c] += dot3(sj, u);
-      for (int d = 0; d < 3; ++d) {
-        grad_sj[d] += w * u[d];
-      }
-      grad_dot += w * dot3(sj, bd);
-
-      const float* gbase = density_geom_pull_cache +
-          spin_component_cache_index<AtomMajor, C * 9>(
-              atom_stride, atom, c * 9);
-      const float* mbase = density_l1_pull_cache +
-          spin_component_cache_index<AtomMajor, C * 9>(
-              atom_stride, atom, c * 9);
-      const float* mdbase =
-          density_l1_dot_pull_cache +
-          spin_component_cache_index<AtomMajor, C * 9>(
-              atom_stride, atom, c * 9);
-      const double kr[3] = {
-          static_cast<double>(gbase[0 * cache_stride]) * rhat[0] +
-              static_cast<double>(gbase[1 * cache_stride]) * rhat[1] +
-              static_cast<double>(gbase[2 * cache_stride]) * rhat[2],
-          static_cast<double>(gbase[3 * cache_stride]) * rhat[0] +
-              static_cast<double>(gbase[4 * cache_stride]) * rhat[1] +
-              static_cast<double>(gbase[5 * cache_stride]) * rhat[2],
-          static_cast<double>(gbase[6 * cache_stride]) * rhat[0] +
-              static_cast<double>(gbase[7 * cache_stride]) * rhat[1] +
-              static_cast<double>(gbase[8 * cache_stride]) * rhat[2]};
-      const double v1[3] = {
-          static_cast<double>(mbase[0 * cache_stride]) * sj[0] +
-              static_cast<double>(mbase[1 * cache_stride]) * sj[1] +
-              static_cast<double>(mbase[2 * cache_stride]) * sj[2],
-          static_cast<double>(mbase[3 * cache_stride]) * sj[0] +
-              static_cast<double>(mbase[4 * cache_stride]) * sj[1] +
-              static_cast<double>(mbase[5 * cache_stride]) * sj[2],
-          static_cast<double>(mbase[6 * cache_stride]) * sj[0] +
-              static_cast<double>(mbase[7 * cache_stride]) * sj[1] +
-              static_cast<double>(mbase[8 * cache_stride]) * sj[2]};
-      const double v2[3] = {
-          static_cast<double>(mdbase[0 * cache_stride]) * sj[0] +
-              static_cast<double>(mdbase[1 * cache_stride]) * sj[1] +
-              static_cast<double>(mdbase[2 * cache_stride]) * sj[2],
-          static_cast<double>(mdbase[3 * cache_stride]) * sj[0] +
-              static_cast<double>(mdbase[4 * cache_stride]) * sj[1] +
-              static_cast<double>(mdbase[5 * cache_stride]) * sj[2],
-          static_cast<double>(mdbase[6 * cache_stride]) * sj[0] +
-              static_cast<double>(mdbase[7 * cache_stride]) * sj[1] +
-              static_cast<double>(mdbase[8 * cache_stride]) * sj[2]};
-      const double u1[3] = {
-          v1[0] + dot * v2[0],
-          v1[1] + dot * v2[1],
-          v1[2] + dot * v2[2]};
-      const double mt[3] = {
-          static_cast<double>(mbase[0 * cache_stride]) * rhat[0] +
-              static_cast<double>(mbase[3 * cache_stride]) * rhat[1] +
-              static_cast<double>(mbase[6 * cache_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[0 * cache_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[3 * cache_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[6 * cache_stride]) * rhat[2]),
-          static_cast<double>(mbase[1 * cache_stride]) * rhat[0] +
-              static_cast<double>(mbase[4 * cache_stride]) * rhat[1] +
-              static_cast<double>(mbase[7 * cache_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[1 * cache_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[4 * cache_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[7 * cache_stride]) * rhat[2]),
-          static_cast<double>(mbase[2 * cache_stride]) * rhat[0] +
-              static_cast<double>(mbase[5 * cache_stride]) * rhat[1] +
-              static_cast<double>(mbase[8 * cache_stride]) * rhat[2] +
-              dot * (static_cast<double>(mdbase[2 * cache_stride]) * rhat[0] +
-                     static_cast<double>(mdbase[5 * cache_stride]) * rhat[1] +
-                     static_cast<double>(mdbase[8 * cache_stride]) * rhat[2])};
-      for (int d = 0; d < 3; ++d) {
-        grad_weight[c] += rhat[d] * (u1[d] + kr[d]);
-        grad_rhat[d] += w * (u1[d] + 2.0 * kr[d]);
-        grad_sj[d] += w * mt[d];
-      }
-      grad_dot += w * dot3(rhat, v2);
-    }
-
-    for (int ell = 2; ell <= 4; ++ell) {
-      const int width = (2 * ell + 1) * 3;
-      const float* angular =
-          ell == 2 ? density_angular2_cache :
-          ell == 3 ? density_angular3_cache : density_angular4_cache;
-      double ylm[9];
-      const int ylm_width = real_spherical_harmonics_spin(rhat, ell, ylm);
-      double ge[27] = {};
-      for (int c = 0; c < C; ++c) {
-        for (int m = 0; m < ylm_width; ++m) {
-          for (int d = 0; d < 3; ++d) {
-            const int k = m * 3 + d;
-            const double gd = static_cast<double>(
-                angular[spin_component_cache_index<AtomMajor>(
-                    atom_stride, C * width, atom, c * width + k)]);
-            grad_weight[c] += gd * ylm[m] * sj[d];
-            ge[k] += gd * weights[c];
-          }
-        }
-      }
-      double grad_ylm[9] = {};
-      for (int m = 0; m < ylm_width; ++m) {
-        for (int d = 0; d < 3; ++d) {
-          const double g = ge[m * 3 + d];
-          grad_sj[d] += g * ylm[m];
-          grad_ylm[m] += g * sj[d];
-        }
-      }
-      add_real_spherical_harmonics_gradient(rhat, ell, grad_ylm, grad_rhat);
-    }
-
-    for (int d = 0; d < 3; ++d) {
-      grad_si[d] += grad_dot * sj[d];
-      grad_sj[d] += grad_dot * si[d];
-    }
-
-    double grad_dist = 0.0;
-    for (int c = 0; c < C; ++c) {
-      grad_dist += grad_weight[c] * weight_derivatives[c];
-    }
-    double dot_r = 0.0;
-    for (int d = 0; d < 3; ++d) {
-      dot_r += grad_rhat[d] * rhat[d];
-    }
-    double grad_rij[3];
-    for (int d = 0; d < 3; ++d) {
-      grad_rij[d] = grad_dist * rhat[d] +
-                    (grad_rhat[d] - dot_r * rhat[d]) / dist;
-      atomicAdd(force_soa3 + d * atom_stride + atom, grad_rij[d]);
-      atomicAdd(force_soa3 + d * atom_stride + neighbor, -grad_rij[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
-      atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
-    }
-    if (virial_mode != SpinVirialMode::disabled) {
-      for (int a = 0; a < 3; ++a) {
-        const double rij_a = rhat[a] * dist;
-        for (int b = 0; b < 3; ++b) {
-          atomicAdd(
-              virial_soa9 + virial_internal_component(a * 3 + b) *
-                                 atom_stride +
-                                 (virial_mode ==
-                                          SpinVirialMode::cpu_atom_decomposition
-                                      ? 0
-                                      : atom),
-              -rij_a * grad_rij[b]);
-        }
-      }
-    }
-  }
-}
-
-__device__ __forceinline__ int spin_dim_without_chiral(int c_count, int l_max) {
-  int dim = 2 + 4 * c_count;
-  if (l_max >= 0) {
-    dim += c_count;
-  }
-  if (l_max >= 1) {
-    dim += 3 * c_count;
-  }
-  for (int ell = 2; ell <= l_max; ++ell) {
-    dim += c_count;
-  }
-  dim += c_count;
-  dim += c_count;
-  if (l_max >= 1) {
-    dim += c_count;
-  }
-  return dim;
-}
-
-__device__ void apply_edge_gradients(
-    int atom,
-    int neighbor,
-    int atom_stride,
-    double dist,
-    const double* rhat,
-    const double* si,
-    const double* sj,
-    double grad_weight,
-    double weight_derivative,
-    const double* grad_rhat,
-    const double* grad_si,
-    const double* grad_sj,
-    double* force_soa3,
-    double* mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* virial_soa9) {
-  (void)si;
-  (void)sj;
-  const double grad_dist = grad_weight * weight_derivative;
-  double dot_r = 0.0;
-  for (int d = 0; d < 3; ++d) {
-    dot_r += grad_rhat[d] * rhat[d];
-  }
-  double grad_rij[3];
-  for (int d = 0; d < 3; ++d) {
-    grad_rij[d] =
-        grad_dist * rhat[d] + (grad_rhat[d] - dot_r * rhat[d]) / dist;
-    atomicAdd(force_soa3 + d * atom_stride + atom, grad_rij[d]);
-    atomicAdd(force_soa3 + d * atom_stride + neighbor, -grad_rij[d]);
-    atomicAdd(mforce_soa3 + d * atom_stride + atom, -grad_si[d]);
-    atomicAdd(mforce_soa3 + d * atom_stride + neighbor, -grad_sj[d]);
-  }
-  if (virial_mode != SpinVirialMode::disabled) {
-    for (int a = 0; a < 3; ++a) {
-      const double rij_a = rhat[a] * dist;
-      for (int b = 0; b < 3; ++b) {
-        atomicAdd(
-            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
-                (virial_mode == SpinVirialMode::cpu_atom_decomposition
-                     ? 0
-                     : atom),
-            -rij_a * grad_rij[b]);
-      }
-    }
-  }
-}
-
-
-// Float helpers used by the specialized density and chiral paths.
+// Float helpers used by the unified density and chiral core.
 
 __device__ __forceinline__ void cross3f(
     const float* a,
@@ -1143,67 +58,54 @@ __device__ __forceinline__ void stf_outer3f(
   }
 }
 
-__device__ __forceinline__ void load_spin_edge_cached_f32(
+template <int C>
+__device__ __forceinline__ bool load_spin_edge_f32(
     int atom,
     int neighbor,
     int atom_stride,
-    int slot,
-    const double* spins_soa3,
-    const float* spin_edge_dx,
-    const float* spin_edge_dy,
-    const float* spin_edge_dz,
-    const float* spin_edge_dist,
+    int num_types,
+    int spin_basis_size,
+    float spin_cutoff,
+    SimulationBox box,
+    const int* __restrict__ types,
+    const double* __restrict__ positions_soa3,
+    const double* __restrict__ spins_soa3,
+    const float* __restrict__ descriptor_coefficients,
+    int spin_coefficient_offset,
     float* rhat,
     float& dist,
     float* si,
-    float* sj) {
-  const int offset = atom + atom_stride * slot;
-  const float dx = spin_edge_dx[offset];
-  const float dy = spin_edge_dy[offset];
-  const float dz = spin_edge_dz[offset];
-  dist = spin_edge_dist[offset];
-  if (dist > 0.0f) {
-    const float inv_dist = 1.0f / dist;
-    rhat[0] = dx * inv_dist;
-    rhat[1] = dy * inv_dist;
-    rhat[2] = dz * inv_dist;
-  } else {
-    rhat[0] = 0.0f;
-    rhat[1] = 0.0f;
-    rhat[2] = 0.0f;
-  }
-  si[0] = static_cast<float>(spins_soa3[atom]);
-  si[1] = static_cast<float>(spins_soa3[atom_stride + atom]);
-  si[2] = static_cast<float>(spins_soa3[2 * atom_stride + atom]);
-  sj[0] = static_cast<float>(spins_soa3[neighbor]);
-  sj[1] = static_cast<float>(spins_soa3[atom_stride + neighbor]);
-  sj[2] = static_cast<float>(spins_soa3[2 * atom_stride + neighbor]);
-}
-
-__device__ __forceinline__ void load_spin_edge_weight_cache_f32(
-    int atom_stride,
-    int slot,
-    int atom,
-    const float* __restrict__ spin_edge_weights,
-    float* weights) {
-  for (int c = 0; c < 4; ++c) {
-    weights[c] = spin_edge_weights[spin_edge_cache_index(atom_stride, slot, atom, c)];
-  }
-}
-
-__device__ __forceinline__ void load_spin_edge_weight_derivative_cache_f32(
-    int atom_stride,
-    int slot,
-    int atom,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
+    float* sj,
     float* weights,
     float* weight_derivatives) {
-  for (int c = 0; c < 4; ++c) {
-    const int index = spin_edge_cache_index(atom_stride, slot, atom, c);
-    weights[c] = spin_edge_weights[index];
-    weight_derivatives[c] = spin_edge_weight_derivatives[index];
+  compute_spin_edge_geometry_f32(
+      atom,
+      neighbor,
+      atom_stride,
+      box,
+      positions_soa3,
+      rhat,
+      dist);
+  #pragma unroll
+  for (int d = 0; d < 3; ++d) {
+    si[d] = static_cast<float>(spins_soa3[d * atom_stride + atom]);
+    sj[d] = static_cast<float>(spins_soa3[d * atom_stride + neighbor]);
   }
+  if (!(dist > 1.0e-12f && dist < spin_cutoff)) {
+    return false;
+  }
+  const int type_pair = types[atom] * num_types + types[neighbor];
+  evaluate_spin_edge_weights_f32<C, true>(
+      spin_basis_size,
+      spin_cutoff,
+      dist,
+      num_types,
+      type_pair,
+      descriptor_coefficients,
+      spin_coefficient_offset,
+      weights,
+      weight_derivatives);
+  return true;
 }
 
 __device__ __forceinline__ void fill_spin_monomials2f(
@@ -1271,7 +173,6 @@ __device__ __forceinline__ float dot_spin_termsf(
   return out;
 }
 
-template <bool AtomMajor>
 __device__ __forceinline__ void load_spin_chiral_qoh_reduced_f32(
     int atom_stride,
     int atom,
@@ -1283,11 +184,11 @@ __device__ __forceinline__ void load_spin_chiral_qoh_reduced_f32(
     float* __restrict__ o_reduced,
     float* __restrict__ h_reduced) {
   constexpr int ChiC = 2;
-  const int component_stride = spin_component_cache_stride<AtomMajor>(atom_stride);
-  const int o_base = spin_component_cache_index<AtomMajor, ChiC * kSpinDeg3Count>(
-      atom_stride, atom, channel * kSpinDeg3Count);
-  const int h_base = spin_component_cache_index<AtomMajor, ChiC * kSpinDeg4Count>(
-      atom_stride, atom, channel * kSpinDeg4Count);
+  constexpr int C = 4;
+  const int o_base = spin_atom_cache_index<C * kSpinChiralOReducedCount>(
+      atom_stride, atom, channel * kSpinChiralOReducedCount);
+  const int h_base = spin_atom_cache_index<ChiC * kSpinChiralHReducedCount>(
+      atom_stride, atom, channel * kSpinChiralHReducedCount);
 
   q_reduced[0] = qmat[0] - qmat[8];
   q_reduced[1] = -qmat[5];
@@ -1296,10 +197,10 @@ __device__ __forceinline__ void load_spin_chiral_qoh_reduced_f32(
   q_reduced[4] = qmat[0] - qmat[4];
 
   for (int k = 0; k < kSpinChiralOReducedCount; ++k) {
-    o_reduced[k] = octupoles_raw_cache[o_base + k * component_stride];
+    o_reduced[k] = octupoles_raw_cache[o_base + k];
   }
   for (int k = 0; k < kSpinChiralHReducedCount; ++k) {
-    h_reduced[k] = hexadecapoles_raw_cache[h_base + k * component_stride];
+    h_reduced[k] = hexadecapoles_raw_cache[h_base + k];
   }
 }
 
@@ -1320,17 +221,132 @@ __device__ __forceinline__ float contract_spin_chiral_qoh_reduced_f32(
   return value;
 }
 
-__device__ __forceinline__ void add_spin_chiral_qoh_reduced_gradient_f32(
+__device__ __forceinline__ void reconstruct_spin_rank3_raw_f32(
+    const float* __restrict__ polar,
+    const float* __restrict__ reduced,
+    float* __restrict__ raw) {
+  raw[0] = 0.6f * polar[0] - 0.6f * reduced[4] - 0.4f * reduced[6];
+  raw[1] = 0.6f * polar[1] + 0.4f * reduced[0] - 0.6f * reduced[2];
+  raw[2] = 0.6f * polar[2] + 0.4f * reduced[1] - 0.6f * reduced[3];
+  raw[3] = 0.2f * polar[1] - 0.2f * reduced[0] + 0.8f * reduced[2];
+  raw[4] = 0.2f * polar[2] - 0.2f * reduced[1] + 0.8f * reduced[3];
+  raw[5] = 0.2f * polar[0] + 0.8f * reduced[4] + 0.2f * reduced[6];
+  raw[6] = 0.2f * polar[2] - 0.2f * reduced[1] - 0.2f * reduced[3];
+  raw[7] = 0.2f * polar[0] - 0.2f * reduced[4] + 0.2f * reduced[6];
+  raw[8] = 0.2f * polar[1] - 0.2f * reduced[0] - 0.2f * reduced[2];
+  raw[9] = reduced[5];
+}
+
+__device__ __forceinline__ float spin_rank3_symmetric_component_f32(
+    const float* __restrict__ raw,
+    int a,
+    int b,
+    int c) {
+  const int nx = (a == 0) + (b == 0) + (c == 0);
+  const int ny = (a == 1) + (b == 1) + (c == 1);
+  if (nx == 3) {
+    return raw[0];
+  }
+  if (ny == 3) {
+    return raw[1];
+  }
+  if (nx == 0 && ny == 0) {
+    return raw[2];
+  }
+  if (nx == 2) {
+    return raw[ny == 1 ? 3 : 4];
+  }
+  if (ny == 2) {
+    return raw[nx == 1 ? 5 : 6];
+  }
+  if (nx == 1 && ny == 0) {
+    return raw[7];
+  }
+  if (nx == 0 && ny == 1) {
+    return raw[8];
+  }
+  return raw[9];
+}
+
+__device__ __forceinline__ int spin_rank3_symmetric_index_f32(
+    int a,
+    int b,
+    int c) {
+  const int nx = (a == 0) + (b == 0) + (c == 0);
+  const int ny = (a == 1) + (b == 1) + (c == 1);
+  if (nx == 3) {
+    return 0;
+  }
+  if (ny == 3) {
+    return 1;
+  }
+  if (nx == 0 && ny == 0) {
+    return 2;
+  }
+  if (nx == 2) {
+    return ny == 1 ? 3 : 4;
+  }
+  if (ny == 2) {
+    return nx == 1 ? 5 : 6;
+  }
+  if (nx == 1 && ny == 0) {
+    return 7;
+  }
+  if (nx == 0 && ny == 1) {
+    return 8;
+  }
+  return 9;
+}
+
+__device__ __forceinline__ void build_spin_chiral_pseudodev_center_f32(
+    const float* __restrict__ geom,
+    const float* __restrict__ polar,
+    const float* __restrict__ octupole_reduced,
+    float* __restrict__ pseudodev) {
+  float octupole_raw[kSpinDeg3Count];
+  reconstruct_spin_rank3_raw_f32(polar, octupole_reduced, octupole_raw);
+
+  float unsymmetrized[9] = {};
+#pragma unroll
+  for (int b = 0; b < 3; ++b) {
+#pragma unroll
+    for (int e = 0; e < 3; ++e) {
+      unsymmetrized[b] +=
+          geom[6 + e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 1, e, b) -
+          geom[3 + e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 2, e, b);
+      unsymmetrized[3 + b] +=
+          geom[e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 2, e, b) -
+          geom[6 + e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 0, e, b);
+      unsymmetrized[6 + b] +=
+          geom[3 + e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 0, e, b) -
+          geom[e] *
+              spin_rank3_symmetric_component_f32(octupole_raw, 1, e, b);
+    }
+  }
+#pragma unroll
+  for (int a = 0; a < 3; ++a) {
+#pragma unroll
+    for (int b = 0; b < 3; ++b) {
+      pseudodev[3 * a + b] =
+          0.5f * (unsymmetrized[3 * a + b] + unsymmetrized[3 * b + a]);
+    }
+  }
+}
+
+__device__ __forceinline__ void add_spin_chiral_qoh_reduced_pull_f32(
     float pull,
     const float* __restrict__ q_reduced,
     const float* __restrict__ o_reduced,
     const float* __restrict__ h_reduced,
     float* __restrict__ grad_q,
-    float* __restrict__ grad_o,
-    float* __restrict__ grad_h) {
+    float* __restrict__ grad_o_reduced,
+    float* __restrict__ grad_h_reduced) {
   float grad_q_reduced[5] = {};
-  float grad_o_reduced[7] = {};
-  float grad_h_reduced[9] = {};
 #pragma unroll 1
   for (int term = 0; term < kSpinChiralQohReducedCount; ++term) {
     const unsigned short packed = kSpinChiralQohReducedPacked[term];
@@ -1349,6 +365,11 @@ __device__ __forceinline__ void add_spin_chiral_qoh_reduced_gradient_f32(
   grad_q[4] -= grad_q_reduced[4];
   grad_q[5] -= grad_q_reduced[1];
   grad_q[8] -= grad_q_reduced[0];
+}
+
+__device__ __forceinline__ void add_spin_chiral_o_reduced_terms_f32(
+    const float* __restrict__ grad_o_reduced,
+    float* __restrict__ grad_o) {
 
   grad_o[0] -= grad_o_reduced[6];
   grad_o[1] += grad_o_reduced[0];
@@ -1360,6 +381,11 @@ __device__ __forceinline__ void add_spin_chiral_qoh_reduced_gradient_f32(
   grad_o[7] += -grad_o_reduced[4] + 3.0f * grad_o_reduced[6];
   grad_o[8] -= 3.0f * grad_o_reduced[0] + grad_o_reduced[2];
   grad_o[9] += grad_o_reduced[5];
+}
+
+__device__ __forceinline__ void add_spin_chiral_h_reduced_terms_f32(
+    const float* __restrict__ grad_h_reduced,
+    float* __restrict__ grad_h) {
 
   constexpr float OneSeventh = 1.0f / 7.0f;
   grad_h[0] += (-grad_h_reduced[7] + 4.0f * grad_h_reduced[8]) * OneSeventh;
@@ -1389,6 +415,78 @@ __device__ __forceinline__ void add_spin_chiral_qoh_reduced_gradient_f32(
                 OneSeventh;
   grad_h[14] += (-6.0f * grad_h_reduced[1] + 3.0f * grad_h_reduced[3]) *
                 OneSeventh;
+}
+
+__device__ __forceinline__ void add_spin_rank3_reconstruction_pull_f32(
+    const float* __restrict__ grad_raw,
+    float* __restrict__ grad_polar,
+    float* __restrict__ grad_reduced) {
+  grad_polar[0] +=
+      0.6f * grad_raw[0] + 0.2f * grad_raw[5] + 0.2f * grad_raw[7];
+  grad_polar[1] +=
+      0.6f * grad_raw[1] + 0.2f * grad_raw[3] + 0.2f * grad_raw[8];
+  grad_polar[2] +=
+      0.6f * grad_raw[2] + 0.2f * grad_raw[4] + 0.2f * grad_raw[6];
+
+  grad_reduced[0] +=
+      0.4f * grad_raw[1] - 0.2f * grad_raw[3] - 0.2f * grad_raw[8];
+  grad_reduced[1] +=
+      0.4f * grad_raw[2] - 0.2f * grad_raw[4] - 0.2f * grad_raw[6];
+  grad_reduced[2] +=
+      -0.6f * grad_raw[1] + 0.8f * grad_raw[3] - 0.2f * grad_raw[8];
+  grad_reduced[3] +=
+      -0.6f * grad_raw[2] + 0.8f * grad_raw[4] - 0.2f * grad_raw[6];
+  grad_reduced[4] +=
+      -0.6f * grad_raw[0] + 0.8f * grad_raw[5] - 0.2f * grad_raw[7];
+  grad_reduced[5] += grad_raw[9];
+  grad_reduced[6] +=
+      -0.4f * grad_raw[0] + 0.2f * grad_raw[5] + 0.2f * grad_raw[7];
+}
+
+__device__ __forceinline__ void add_spin_chiral_pseudodev_center_pull_f32(
+    const float* __restrict__ geom,
+    const float* __restrict__ octupole_raw,
+    const float* __restrict__ grad_pseudodev,
+    float* __restrict__ grad_geom,
+    float* __restrict__ grad_octupole_raw) {
+  float grad_unsymmetrized[9];
+#pragma unroll
+  for (int a = 0; a < 3; ++a) {
+#pragma unroll
+    for (int b = 0; b < 3; ++b) {
+      grad_unsymmetrized[3 * a + b] =
+          0.5f *
+          (grad_pseudodev[3 * a + b] + grad_pseudodev[3 * b + a]);
+    }
+  }
+
+#pragma unroll
+  for (int b = 0; b < 3; ++b) {
+#pragma unroll
+    for (int e = 0; e < 3; ++e) {
+      const float g0 = grad_unsymmetrized[b];
+      const float g1 = grad_unsymmetrized[3 + b];
+      const float g2 = grad_unsymmetrized[6 + b];
+      const int o0 = spin_rank3_symmetric_index_f32(0, e, b);
+      const int o1 = spin_rank3_symmetric_index_f32(1, e, b);
+      const int o2 = spin_rank3_symmetric_index_f32(2, e, b);
+
+      grad_geom[6 + e] += g0 * octupole_raw[o1];
+      grad_octupole_raw[o1] += g0 * geom[6 + e];
+      grad_geom[3 + e] -= g0 * octupole_raw[o2];
+      grad_octupole_raw[o2] -= g0 * geom[3 + e];
+
+      grad_geom[e] += g1 * octupole_raw[o2];
+      grad_octupole_raw[o2] += g1 * geom[e];
+      grad_geom[6 + e] -= g1 * octupole_raw[o0];
+      grad_octupole_raw[o0] -= g1 * geom[6 + e];
+
+      grad_geom[3 + e] += g2 * octupole_raw[o0];
+      grad_octupole_raw[o0] += g2 * geom[3 + e];
+      grad_geom[e] -= g2 * octupole_raw[o1];
+      grad_octupole_raw[o1] -= g2 * geom[e];
+    }
+  }
 }
 
 __device__ __forceinline__ void project_rank2_spin_gradientf(
@@ -1472,6 +570,7 @@ __device__ __forceinline__ void add_stf_outer_gradientf(
   }
 }
 
+template <SpinVirialMode VirialMode>
 __device__ void apply_edge_gradients_f32(
     int atom,
     int neighbor,
@@ -1485,8 +584,8 @@ __device__ void apply_edge_gradients_f32(
     const float* grad_sj,
     double* force_soa3,
     double* mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* virial_soa9) {
+    double* virial_soa9,
+    double* cpu_virial) {
   const float grad_dist = grad_weight * weight_derivative;
   float dot_r = 0.0f;
   for (int d = 0; d < 3; ++d) {
@@ -1505,16 +604,17 @@ __device__ void apply_edge_gradients_f32(
     atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
               -static_cast<double>(grad_sj[d]));
   }
-  if (virial_mode != SpinVirialMode::disabled) {
+  if constexpr (VirialMode != SpinVirialMode::disabled) {
     for (int a = 0; a < 3; ++a) {
       const double rij_a = static_cast<double>(rhat[a] * dist);
       for (int b = 0; b < 3; ++b) {
-        atomicAdd(
-            virial_soa9 + virial_internal_component(a * 3 + b) * atom_stride +
-                (virial_mode == SpinVirialMode::cpu_atom_decomposition
-                     ? 0
-                     : atom),
-            -rij_a * static_cast<double>(grad_rij[b]));
+        const int component = virial_internal_component(a * 3 + b);
+        const double value = -rij_a * static_cast<double>(grad_rij[b]);
+        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
+          cpu_virial[component] += value;
+        } else {
+          atomicAdd(virial_soa9 + component * atom_stride + atom, value);
+        }
       }
     }
   }
@@ -1663,56 +763,61 @@ __device__ void add_real_spherical_harmonics_gradientf(
 }
 
 
-// Specialized density force kernels.
+// Unified compact density-force core.
 
-struct SpinDensityPullSharedC4L4 {
-  float rho0[12];
-  float l1[36];
-  float angular2[60];
-  float angular3[84];
-  float angular4[108];
-  float geom[36];
-  float rho0_dot[12];
-  float l1_dot[36];
+template <int C>
+struct SpinDensityPullShared {
+  float rho0[C * 3];
+  float l1[C * 9];
+  float angular2[C * 15];
+  float angular3[C * 21];
+  float angular4[C * 27];
+  float geom[C * 6];
+  float rho0_dot[C * 3];
+  float l1_dot[C * 9];
 };
 
 static_assert(
-    sizeof(SpinDensityPullSharedC4L4) == 384 * sizeof(float),
-    "c4/l4 fused density pulls must remain tightly packed");
+    sizeof(SpinDensityPullShared<4>) == 372 * sizeof(float),
+    "spin density pulls must remain tightly packed");
 
-template <bool AtomMajor>
-struct SpinDensityForceSharedC4L4 {
-  float reduce[6][32];
+template <int C>
+struct SpinDensityPullSharedPadded {
+  SpinDensityPullShared<C> values;
+  // Shift each atom's base by one bank so same-component subwarp reads do not
+  // alias across the eight centers in a tile.
+  float bank_padding;
 };
 
-template <>
-struct SpinDensityForceSharedC4L4<true> {
-  SpinDensityPullSharedC4L4 pulls;
-  float reduce[6][32];
-  double direct_center_mforce[3];
+template <int C, int AtomsPerWarp>
+struct SpinDensityForceTileShared {
+  SpinDensityPullSharedPadded<C> pulls[AtomsPerWarp];
 };
 
-template <bool AtomMajor>
+template <
+    int C,
+    int LMax,
+    SpinVirialMode VirialMode,
+    int AtomsPerWarp,
+    int EdgesPerAtomBatch>
 __global__ void __launch_bounds__(32, 8)
-accumulate_spin_density_forces_c4_l4_block_f32(
+accumulate_spin_density_forces_tile_f32(
     int atom_count,
     int atom_stride,
     int struct_dim,
+    int num_types,
+    int spin_basis_size,
     float spin_cutoff,
+    SimulationBox box,
+    const int* __restrict__ types,
+    const double* __restrict__ positions_soa3,
     const double* __restrict__ spins_soa3,
     const int* __restrict__ nn_radial,
     const int* __restrict__ nl_radial,
     const float* __restrict__ fp,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
+    const float* __restrict__ descriptor_coefficients,
+    int spin_coefficient_offset,
     const float* __restrict__ density_rho0_cache,
-    const float* __restrict__ density_l1_rdot_cache,
-    const float* __restrict__ density_l1_cross_cache,
-    const float* __restrict__ density_l1_stf_cache,
     const float* __restrict__ density_angular2_cache,
     const float* __restrict__ density_angular3_cache,
     const float* __restrict__ density_angular4_cache,
@@ -1721,25 +826,21 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     const float* __restrict__ density_raw1_cache,
     const float* __restrict__ density_raw1_dot_cache,
     double* __restrict__ force_soa3,
-    double* __restrict__ mforce_soa3) {
-  constexpr int C = 4;
-  constexpr int Rho0Offset = 18;
-  constexpr int L1RdotOffset = 22;
-  constexpr int L1CrossOffset = 26;
-  constexpr int L1StfOffset = 30;
-  constexpr int Angular2Offset = 34;
-  constexpr int Angular3Offset = 38;
-  constexpr int Angular4Offset = 42;
-  constexpr int GeomOffset = 46;
-  constexpr int Rho0DotOffset = 50;
-  constexpr int Raw1DotOffset = 54;
-  const int atom = blockIdx.x;
+    double* __restrict__ mforce_soa3,
+    double* __restrict__ virial_soa9) {
+  using Layout = SpinStaticLayout<C, LMax>;
+  static_assert(
+      AtomsPerWarp * EdgesPerAtomBatch == 32,
+      "spin density tile must fill one warp");
   const int lane = threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-  __shared__ SpinDensityForceSharedC4L4<AtomMajor> shared;
-  const int cache_stride = spin_component_cache_stride<AtomMajor>(atom_stride);
+  const int atom_in_tile = lane / EdgesPerAtomBatch;
+  const int edge_lane = lane - atom_in_tile * EdgesPerAtomBatch;
+  const int atom = blockIdx.x * AtomsPerWarp + atom_in_tile;
+  const bool active_atom = atom < atom_count;
+  constexpr unsigned int FullWarpMask = 0xffffffffu;
+  __shared__ SpinDensityForceTileShared<C, AtomsPerWarp> shared;
+  constexpr int cache_stride = 1;
+  double direct_center_mforce_lane = 0.0;
 
   const float* rho0_pull_base;
   const float* l1_pull_base;
@@ -1749,214 +850,208 @@ accumulate_spin_density_forces_c4_l4_block_f32(
   const float* geom_pull_base;
   const float* rho0_dot_pull_base;
   const float* l1_dot_pull_base;
-  if constexpr (AtomMajor) {
-    constexpr unsigned int FullWarpMask = 0xffffffffu;
-    const double spin_lane = lane < 3
-        ? spins_soa3[lane * atom_stride + atom]
-        : 0.0;
-    const double si0[3] = {
-        __shfl_sync(FullWarpMask, spin_lane, 0),
-        __shfl_sync(FullWarpMask, spin_lane, 1),
-        __shfl_sync(FullWarpMask, spin_lane, 2)};
-    const double spin_trace =
-        (si0[0] * si0[0] + si0[1] * si0[1] + si0[2] * si0[2]) / 3.0;
+  SpinDensityPullShared<C>* atom_pulls =
+      &shared.pulls[atom_in_tile].values;
+  const double spin_lane = active_atom && edge_lane < 3
+      ? spins_soa3[edge_lane * atom_stride + atom]
+      : 0.0;
+  const double si0[3] = {
+      __shfl_sync(FullWarpMask, spin_lane, 0, EdgesPerAtomBatch),
+      __shfl_sync(FullWarpMask, spin_lane, 1, EdgesPerAtomBatch),
+      __shfl_sync(FullWarpMask, spin_lane, 2, EdgesPerAtomBatch)};
+  const double spin_trace =
+      (si0[0] * si0[0] + si0[1] * si0[1] + si0[2] * si0[2]) / 3.0;
 
-    for (int component = lane; component < C * 3; component += blockDim.x) {
-      const int c = component / 3;
-      const float alpha0 =
-          fp[atom + atom_stride * (struct_dim + Rho0Offset + c)];
-      const float alpha0_dot =
-          fp[atom + atom_stride * (struct_dim + Rho0DotOffset + c)];
-      const int index = spin_component_cache_index<true, C * 3>(
-          atom_stride, atom, component);
-      const float rho0 = density_rho0_cache[index];
-      const float rho0_dot = density_rho0_dot_cache[index];
-      shared.pulls.rho0[component] =
-          2.0f * alpha0 * rho0 + alpha0_dot * rho0_dot;
-      shared.pulls.rho0_dot[component] =
-          alpha0_dot * rho0;
-    }
-
-    for (int component = lane; component < C * 9; component += blockDim.x) {
-      const int c = component / 9;
-      const int k = component - c * 9;
-      const float alpha_rdot =
-          fp[atom + atom_stride * (struct_dim + L1RdotOffset + c)];
-      const float alpha_cross =
-          fp[atom + atom_stride * (struct_dim + L1CrossOffset + c)];
-      const float alpha_stf =
-          fp[atom + atom_stride * (struct_dim + L1StfOffset + c)];
-      const float alpha_raw1 =
-          fp[atom + atom_stride * (struct_dim + Raw1DotOffset + c)];
-      const float rdot =
-          density_l1_rdot_cache[
-              spin_component_cache_index<true, C>(atom_stride, atom, c)];
-      const float cross[3] = {
-          density_l1_cross_cache[
-              spin_component_cache_index<true, C * 3>(
-                  atom_stride, atom, c * 3)],
-          density_l1_cross_cache[
-              spin_component_cache_index<true, C * 3>(
-                  atom_stride, atom, c * 3 + 1)],
-          density_l1_cross_cache[
-              spin_component_cache_index<true, C * 3>(
-                  atom_stride, atom, c * 3 + 2)]};
-      const float g_cross[3] = {
-          2.0f * alpha_cross * cross[0],
-          2.0f * alpha_cross * cross[1],
-          2.0f * alpha_cross * cross[2]};
-      float mat = 0.0f;
-      if (k == 0 || k == 4 || k == 8) {
-        mat += 2.0f * alpha_rdot * rdot;
-      } else if (k == 1) {
-        mat += g_cross[2];
-      } else if (k == 2) {
-        mat -= g_cross[1];
-      } else if (k == 3) {
-        mat -= g_cross[2];
-      } else if (k == 5) {
-        mat += g_cross[0];
-      } else if (k == 6) {
-        mat += g_cross[1];
-      } else if (k == 7) {
-        mat -= g_cross[0];
-      }
-      const int index = spin_component_cache_index<true, C * 9>(
-          atom_stride, atom, component);
-      const float stf = density_l1_stf_cache[index];
-      const float raw = density_raw1_cache[index];
-      const float raw_dot = density_raw1_dot_cache[index];
-      shared.pulls.l1[component] =
-          mat + 2.0f * alpha_stf * stf + alpha_raw1 * raw_dot;
-      shared.pulls.l1_dot[component] =
-          alpha_raw1 * raw;
-
-      const double alpha_geom = static_cast<double>(
-          fp[atom + atom_stride * (struct_dim + GeomOffset + c)]);
-      const int a = k / 3;
-      const int b = k % 3;
-      double ss = 0.5 * (si0[a] * si0[b] + si0[b] * si0[a]);
-      if (a == b) {
-        ss -= spin_trace;
-      }
-      shared.pulls.geom[component] = static_cast<float>(alpha_geom * ss);
-    }
-
-    for (int component = lane; component < C * 15; component += blockDim.x) {
-      const int c = component / 15;
-      const float alpha =
-          fp[atom + atom_stride * (struct_dim + Angular2Offset + c)];
-      const int index = spin_component_cache_index<true, C * 15>(
-          atom_stride, atom, component);
-      shared.pulls.angular2[component] =
-          2.0f * alpha * density_angular2_cache[index];
-    }
-    for (int component = lane; component < C * 21; component += blockDim.x) {
-      const int c = component / 21;
-      const float alpha =
-          fp[atom + atom_stride * (struct_dim + Angular3Offset + c)];
-      const int index = spin_component_cache_index<true, C * 21>(
-          atom_stride, atom, component);
-      shared.pulls.angular3[component] =
-          2.0f * alpha * density_angular3_cache[index];
-    }
-    for (int component = lane; component < C * 27; component += blockDim.x) {
-      const int c = component / 27;
-      const float alpha =
-          fp[atom + atom_stride * (struct_dim + Angular4Offset + c)];
-      const int index = spin_component_cache_index<true, C * 27>(
-          atom_stride, atom, component);
-      shared.pulls.angular4[component] =
-          2.0f * alpha * density_angular4_cache[index];
-    }
-
-    if (lane < 3) {
-      double grad_spin_i_direct = 0.0;
-      for (int c = 0; c < C; ++c) {
-        const double alpha_geom = static_cast<double>(
-            fp[atom + atom_stride * (struct_dim + GeomOffset + c)]);
-        double gs = 0.0;
-        for (int b = 0; b < 3; ++b) {
-          const double geom_ab = static_cast<double>(
-              density_geom_cache[
-                  spin_component_cache_index<true, C * 9>(
-                      atom_stride, atom, c * 9 + 3 * lane + b)]);
-          const double geom_ba = static_cast<double>(
-              density_geom_cache[
-                  spin_component_cache_index<true, C * 9>(
-                      atom_stride, atom, c * 9 + 3 * b + lane)]);
-          gs += (geom_ab + geom_ba) * si0[b];
-        }
-        grad_spin_i_direct += alpha_geom * gs;
-      }
-      shared.direct_center_mforce[lane] = -grad_spin_i_direct;
-    }
-    __syncthreads();
-
-    rho0_pull_base = shared.pulls.rho0;
-    l1_pull_base = shared.pulls.l1;
-    angular2_pull_base = shared.pulls.angular2;
-    angular3_pull_base = shared.pulls.angular3;
-    angular4_pull_base = shared.pulls.angular4;
-    geom_pull_base = shared.pulls.geom;
-    rho0_dot_pull_base = shared.pulls.rho0_dot;
-    l1_dot_pull_base = shared.pulls.l1_dot;
-  } else {
-    rho0_pull_base = density_rho0_cache +
-        spin_component_cache_index<false, C * 3>(atom_stride, atom, 0);
-    l1_pull_base = density_l1_stf_cache +
-        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
-    angular2_pull_base = density_angular2_cache +
-        spin_component_cache_index<false, C * 15>(atom_stride, atom, 0);
-    angular3_pull_base = density_angular3_cache +
-        spin_component_cache_index<false, C * 21>(atom_stride, atom, 0);
-    angular4_pull_base = density_angular4_cache +
-        spin_component_cache_index<false, C * 27>(atom_stride, atom, 0);
-    geom_pull_base = density_raw1_cache +
-        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
-    rho0_dot_pull_base = density_rho0_dot_cache +
-        spin_component_cache_index<false, C * 3>(atom_stride, atom, 0);
-    l1_dot_pull_base = density_raw1_dot_cache +
-        spin_component_cache_index<false, C * 9>(atom_stride, atom, 0);
+  for (int component = edge_lane;
+       active_atom && component < C * 3;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 3;
+    const float alpha0 =
+        fp[atom + atom_stride * (struct_dim + Layout::Rho0Offset + c)];
+    const float alpha0_dot =
+        fp[atom + atom_stride * (struct_dim + Layout::Rho0DotOffset + c)];
+    const int index = spin_atom_cache_index<C * 3>(
+        atom_stride, atom, component);
+    const float rho0 = density_rho0_cache[index];
+    const float rho0_dot = density_rho0_dot_cache[index];
+    atom_pulls->rho0[component] =
+        2.0f * alpha0 * rho0 + alpha0_dot * rho0_dot;
+    atom_pulls->rho0_dot[component] =
+        alpha0_dot * rho0;
   }
+
+  for (int component = edge_lane;
+       active_atom && LMax >= 1 && component < C * 9;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 9;
+    const int k = component - c * 9;
+    const float alpha_rdot =
+        fp[atom + atom_stride * (struct_dim + Layout::L1RdotOffset + c)];
+    const float alpha_cross =
+        fp[atom + atom_stride * (struct_dim + Layout::L1CrossOffset + c)];
+    const float alpha_stf =
+        fp[atom + atom_stride * (struct_dim + Layout::L1StfOffset + c)];
+    const float alpha_raw1 =
+        fp[atom + atom_stride * (struct_dim + Layout::Raw1DotOffset + c)];
+    const int raw1_base = spin_atom_cache_index<C * 9>(
+        atom_stride, atom, c * 9);
+    const int a = k / 3;
+    const int b = k - 3 * a;
+    const float raw = density_raw1_cache[raw1_base + k];
+    const float raw_transpose = density_raw1_cache[raw1_base + 3 * b + a];
+    float mat = 0.0f;
+    float stf = 0.5f * (raw + raw_transpose);
+    if (a == b) {
+      const float rdot =
+          density_raw1_cache[raw1_base] +
+          density_raw1_cache[raw1_base + 4] +
+          density_raw1_cache[raw1_base + 8];
+      mat = 2.0f * alpha_rdot * rdot;
+      stf -= rdot / 3.0f;
+    } else {
+      mat = 2.0f * alpha_cross * (raw - raw_transpose);
+    }
+    const int index = spin_atom_cache_index<C * 9>(
+        atom_stride, atom, component);
+    const float raw_dot = density_raw1_dot_cache[index];
+    atom_pulls->l1[component] =
+        mat + 2.0f * alpha_stf * stf + alpha_raw1 * raw_dot;
+    atom_pulls->l1_dot[component] =
+        alpha_raw1 * raw;
+
+  }
+
+  for (int component = edge_lane;
+       active_atom && component < C * 6;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 6;
+    const int k = component - c * 6;
+    int a;
+    int b;
+    if (k < 3) {
+      a = 0;
+      b = k;
+    } else if (k < 5) {
+      a = 1;
+      b = k - 2;
+    } else {
+      a = 2;
+      b = 2;
+    }
+    const double alpha_geom = static_cast<double>(
+        fp[atom + atom_stride * (struct_dim + Layout::GeomOffset + c)]);
+    double ss = si0[a] * si0[b];
+    if (a == b) {
+      ss -= spin_trace;
+    }
+    atom_pulls->geom[component] = static_cast<float>(alpha_geom * ss);
+  }
+
+  for (int component = edge_lane;
+       active_atom && LMax >= 2 && component < C * 15;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 15;
+    const float alpha =
+        fp[atom + atom_stride * (struct_dim + Layout::Angular2Offset + c)];
+    const int index = spin_atom_cache_index<C * 15>(
+        atom_stride, atom, component);
+    atom_pulls->angular2[component] =
+        2.0f * alpha * density_angular2_cache[index];
+  }
+  for (int component = edge_lane;
+       active_atom && LMax >= 3 && component < C * 21;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 21;
+    const float alpha =
+        fp[atom + atom_stride * (struct_dim + Layout::Angular3Offset + c)];
+    const int index = spin_atom_cache_index<C * 21>(
+        atom_stride, atom, component);
+    atom_pulls->angular3[component] =
+        2.0f * alpha * density_angular3_cache[index];
+  }
+  for (int component = edge_lane;
+       active_atom && LMax >= 4 && component < C * 27;
+       component += EdgesPerAtomBatch) {
+    const int c = component / 27;
+    const float alpha =
+        fp[atom + atom_stride * (struct_dim + Layout::Angular4Offset + c)];
+    const int index = spin_atom_cache_index<C * 27>(
+        atom_stride, atom, component);
+    atom_pulls->angular4[component] =
+        2.0f * alpha * density_angular4_cache[index];
+  }
+
+  if (active_atom && edge_lane < 3) {
+    double grad_spin_i_direct = 0.0;
+    for (int c = 0; c < C; ++c) {
+      const double alpha_geom = static_cast<double>(
+          fp[atom + atom_stride * (struct_dim + Layout::GeomOffset + c)]);
+      double gs = 0.0;
+      for (int b = 0; b < 3; ++b) {
+        int packed_component = 0;
+        if (edge_lane == 0) {
+          packed_component = b;
+        } else if (edge_lane == 1) {
+          packed_component = b == 0 ? 1 : b + 2;
+        } else {
+          packed_component = b == 0 ? 2 : (b == 1 ? 4 : 5);
+        }
+        const double geom_ab = static_cast<double>(
+            density_geom_cache[
+                spin_atom_cache_index<C * 6>(
+                    atom_stride, atom, c * 6 + packed_component)]);
+        gs += 2.0 * geom_ab * si0[b];
+      }
+      grad_spin_i_direct += alpha_geom * gs;
+    }
+    direct_center_mforce_lane = -grad_spin_i_direct;
+  }
+  __syncwarp(FullWarpMask);
+
+  rho0_pull_base = atom_pulls->rho0;
+  l1_pull_base = atom_pulls->l1;
+  angular2_pull_base = atom_pulls->angular2;
+  angular3_pull_base = atom_pulls->angular3;
+  angular4_pull_base = atom_pulls->angular4;
+  geom_pull_base = atom_pulls->geom;
+  rho0_dot_pull_base = atom_pulls->rho0_dot;
+  l1_dot_pull_base = atom_pulls->l1_dot;
 
   float center_force[3] = {};
   float center_mforce[3] = {};
-  const int radial_count = nn_radial[atom];
-  for (int slot = lane; slot < radial_count; slot += blockDim.x) {
+  float center_virial[VirialMode == SpinVirialMode::disabled ? 1 : 9] = {};
+  const int radial_count = active_atom ? nn_radial[atom] : 0;
+  for (int slot = edge_lane;
+       slot < radial_count;
+       slot += EdgesPerAtomBatch) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     float rhat[3];
     float dist = 0.0f;
     float si[3];
     float sj[3];
-    load_spin_edge_cached_f32(
+    float weights[C];
+    float weight_derivatives[C];
+    if (!load_spin_edge_f32<C>(
         atom,
         neighbor,
         atom_stride,
-        slot,
+        num_types,
+        spin_basis_size,
+        spin_cutoff,
+        box,
+        types,
+        positions_soa3,
         spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
+        descriptor_coefficients,
+        spin_coefficient_offset,
         rhat,
         dist,
         si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
+        sj,
+        weights,
+        weight_derivatives)) {
       continue;
     }
-
-    float weights[C];
-    float weight_derivatives[C];
-    load_spin_edge_weight_derivative_cache_f32(
-        atom_stride,
-        slot,
-        atom,
-        spin_edge_weights,
-        spin_edge_weight_derivatives,
-        weights,
-        weight_derivatives);
 
     const float dot = dot3f(si, sj);
     float grad_weight[C] = {};
@@ -2025,68 +1120,78 @@ accumulate_spin_density_forces_c4_l4_block_f32(
       }
       grad_dot += w * dot3f(sj, bd);
 
-      const float* gbase = geom_pull_base + c * 9 * cache_stride;
-      const float* mbase = l1_pull_base + c * 9 * cache_stride;
-      const float* mdbase = l1_dot_pull_base + c * 9 * cache_stride;
+      const float* gbase = geom_pull_base + c * 6 * cache_stride;
       const float kr[3] = {
           gbase[0 * cache_stride] * rhat[0] +
               gbase[1 * cache_stride] * rhat[1] +
               gbase[2 * cache_stride] * rhat[2],
-          gbase[3 * cache_stride] * rhat[0] +
+          gbase[1 * cache_stride] * rhat[0] +
+              gbase[3 * cache_stride] * rhat[1] +
+              gbase[4 * cache_stride] * rhat[2],
+          gbase[2 * cache_stride] * rhat[0] +
               gbase[4 * cache_stride] * rhat[1] +
-              gbase[5 * cache_stride] * rhat[2],
-          gbase[6 * cache_stride] * rhat[0] +
-              gbase[7 * cache_stride] * rhat[1] +
-              gbase[8 * cache_stride] * rhat[2]};
-      const float v1[3] = {
-          mbase[0 * cache_stride] * sj[0] + mbase[1 * cache_stride] * sj[1] +
-              mbase[2 * cache_stride] * sj[2],
-          mbase[3 * cache_stride] * sj[0] + mbase[4 * cache_stride] * sj[1] +
-              mbase[5 * cache_stride] * sj[2],
-          mbase[6 * cache_stride] * sj[0] + mbase[7 * cache_stride] * sj[1] +
-              mbase[8 * cache_stride] * sj[2]};
-      const float v2[3] = {
-          mdbase[0 * cache_stride] * sj[0] +
-              mdbase[1 * cache_stride] * sj[1] +
-              mdbase[2 * cache_stride] * sj[2],
-          mdbase[3 * cache_stride] * sj[0] +
-              mdbase[4 * cache_stride] * sj[1] +
-              mdbase[5 * cache_stride] * sj[2],
-          mdbase[6 * cache_stride] * sj[0] +
-              mdbase[7 * cache_stride] * sj[1] +
-              mdbase[8 * cache_stride] * sj[2]};
-      const float u1[3] = {
-          v1[0] + dot * v2[0],
-          v1[1] + dot * v2[1],
-          v1[2] + dot * v2[2]};
-      const float mt[3] = {
-          mbase[0 * cache_stride] * rhat[0] +
-              mbase[3 * cache_stride] * rhat[1] +
-              mbase[6 * cache_stride] * rhat[2] +
-              dot * (mdbase[0 * cache_stride] * rhat[0] +
-                     mdbase[3 * cache_stride] * rhat[1] +
-                     mdbase[6 * cache_stride] * rhat[2]),
-          mbase[1 * cache_stride] * rhat[0] +
-              mbase[4 * cache_stride] * rhat[1] +
-              mbase[7 * cache_stride] * rhat[2] +
-              dot * (mdbase[1 * cache_stride] * rhat[0] +
-                     mdbase[4 * cache_stride] * rhat[1] +
-                     mdbase[7 * cache_stride] * rhat[2]),
-          mbase[2 * cache_stride] * rhat[0] +
-              mbase[5 * cache_stride] * rhat[1] +
-              mbase[8 * cache_stride] * rhat[2] +
-              dot * (mdbase[2 * cache_stride] * rhat[0] +
-                     mdbase[5 * cache_stride] * rhat[1] +
-                     mdbase[8 * cache_stride] * rhat[2])};
+              gbase[5 * cache_stride] * rhat[2]};
       for (int d = 0; d < 3; ++d) {
-        grad_weight[c] += rhat[d] * (u1[d] + kr[d]);
-        grad_rhat[d] += w * (u1[d] + 2.0f * kr[d]);
-        grad_sj[d] += w * mt[d];
+        grad_weight[c] += rhat[d] * kr[d];
+        grad_rhat[d] += 2.0f * w * kr[d];
       }
-      grad_dot += w * dot3f(rhat, v2);
+      if constexpr (LMax >= 1) {
+        const float* mbase = l1_pull_base + c * 9 * cache_stride;
+        const float* mdbase = l1_dot_pull_base + c * 9 * cache_stride;
+        const float v1[3] = {
+            mbase[0 * cache_stride] * sj[0] +
+                mbase[1 * cache_stride] * sj[1] +
+                mbase[2 * cache_stride] * sj[2],
+            mbase[3 * cache_stride] * sj[0] +
+                mbase[4 * cache_stride] * sj[1] +
+                mbase[5 * cache_stride] * sj[2],
+            mbase[6 * cache_stride] * sj[0] +
+                mbase[7 * cache_stride] * sj[1] +
+                mbase[8 * cache_stride] * sj[2]};
+        const float v2[3] = {
+            mdbase[0 * cache_stride] * sj[0] +
+                mdbase[1 * cache_stride] * sj[1] +
+                mdbase[2 * cache_stride] * sj[2],
+            mdbase[3 * cache_stride] * sj[0] +
+                mdbase[4 * cache_stride] * sj[1] +
+                mdbase[5 * cache_stride] * sj[2],
+            mdbase[6 * cache_stride] * sj[0] +
+                mdbase[7 * cache_stride] * sj[1] +
+                mdbase[8 * cache_stride] * sj[2]};
+        const float u1[3] = {
+            v1[0] + dot * v2[0],
+            v1[1] + dot * v2[1],
+            v1[2] + dot * v2[2]};
+        const float mt[3] = {
+            mbase[0 * cache_stride] * rhat[0] +
+                mbase[3 * cache_stride] * rhat[1] +
+                mbase[6 * cache_stride] * rhat[2] +
+                dot * (mdbase[0 * cache_stride] * rhat[0] +
+                       mdbase[3 * cache_stride] * rhat[1] +
+                       mdbase[6 * cache_stride] * rhat[2]),
+            mbase[1 * cache_stride] * rhat[0] +
+                mbase[4 * cache_stride] * rhat[1] +
+                mbase[7 * cache_stride] * rhat[2] +
+                dot * (mdbase[1 * cache_stride] * rhat[0] +
+                       mdbase[4 * cache_stride] * rhat[1] +
+                       mdbase[7 * cache_stride] * rhat[2]),
+            mbase[2 * cache_stride] * rhat[0] +
+                mbase[5 * cache_stride] * rhat[1] +
+                mbase[8 * cache_stride] * rhat[2] +
+                dot * (mdbase[2 * cache_stride] * rhat[0] +
+                       mdbase[5 * cache_stride] * rhat[1] +
+                       mdbase[8 * cache_stride] * rhat[2])};
+        for (int d = 0; d < 3; ++d) {
+          grad_weight[c] += rhat[d] * u1[d];
+          grad_rhat[d] += w * u1[d];
+          grad_sj[d] += w * mt[d];
+        }
+        grad_dot += w * dot3f(rhat, v2);
+      }
     }
 
-    for (int ell = 2; ell <= 4; ++ell) {
+    #pragma unroll
+    for (int ell = 2; ell <= LMax; ++ell) {
       const int width = (2 * ell + 1) * 3;
       const float* angular =
           ell == 2 ? angular2_pull_base :
@@ -2128,73 +1233,93 @@ accumulate_spin_density_forces_c4_l4_block_f32(
     for (int d = 0; d < 3; ++d) {
       dot_r += grad_rhat[d] * rhat[d];
     }
+    float grad_rij[3];
     for (int d = 0; d < 3; ++d) {
-      const float grad_rij =
+      grad_rij[d] =
           grad_dist * rhat[d] + (grad_rhat[d] - dot_r * rhat[d]) / dist;
-      center_force[d] += grad_rij;
+      center_force[d] += grad_rij[d];
       center_mforce[d] -= grad_si[d];
       atomicAdd(force_soa3 + d * atom_stride + neighbor,
-                -static_cast<double>(grad_rij));
+                -static_cast<double>(grad_rij[d]));
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
                 -static_cast<double>(grad_sj[d]));
     }
-  }
-
-  float (*reduce)[32] = shared.reduce;
-  for (int d = 0; d < 3; ++d) {
-    reduce[d][lane] = center_force[d];
-    reduce[d + 3][lane] = center_mforce[d];
-  }
-  __syncthreads();
-  for (int stride = 16; stride > 0; stride >>= 1) {
-    if (lane < stride) {
-      for (int d = 0; d < 6; ++d) {
-        reduce[d][lane] += reduce[d][lane + stride];
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+      for (int a = 0; a < 3; ++a) {
+        const float rij_a = rhat[a] * dist;
+        for (int b = 0; b < 3; ++b) {
+          center_virial[virial_internal_component(a * 3 + b)] -=
+              rij_a * grad_rij[b];
+        }
       }
     }
-    __syncthreads();
   }
-  if (lane == 0) {
+
+  for (int offset = EdgesPerAtomBatch / 2; offset > 0; offset >>= 1) {
+    for (int d = 0; d < 3; ++d) {
+      center_force[d] += __shfl_down_sync(
+          FullWarpMask, center_force[d], offset, EdgesPerAtomBatch);
+      center_mforce[d] += __shfl_down_sync(
+          FullWarpMask, center_mforce[d], offset, EdgesPerAtomBatch);
+    }
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+      for (int component = 0; component < 9; ++component) {
+        center_virial[component] += __shfl_down_sync(
+            FullWarpMask,
+            center_virial[component],
+            offset,
+            EdgesPerAtomBatch);
+      }
+    }
+  }
+  double direct_center_mforce[3] = {};
+  for (int d = 0; d < 3; ++d) {
+    direct_center_mforce[d] = __shfl_sync(
+        FullWarpMask,
+        direct_center_mforce_lane,
+        d,
+        EdgesPerAtomBatch);
+  }
+  if (active_atom && edge_lane == 0) {
     for (int d = 0; d < 3; ++d) {
       atomicAdd(force_soa3 + d * atom_stride + atom,
-                static_cast<double>(reduce[d][0]));
-      double center_mforce_total = static_cast<double>(reduce[d + 3][0]);
-      if constexpr (AtomMajor) {
-        center_mforce_total += shared.direct_center_mforce[d];
-      }
+                static_cast<double>(center_force[d]));
+      const double center_mforce_total =
+          static_cast<double>(center_mforce[d]) + direct_center_mforce[d];
       atomicAdd(mforce_soa3 + d * atom_stride + atom,
                 center_mforce_total);
+    }
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+      for (int component = 0; component < 9; ++component) {
+        const double value = static_cast<double>(center_virial[component]);
+        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
+          atomicAdd(virial_soa9 + component * atom_stride, value);
+        } else {
+          virial_soa9[component * atom_stride + atom] += value;
+        }
+      }
     }
   }
 }
 
 
-// Specialized chiral descriptor-finalize and force kernels.
+// Unified compact chiral descriptor-finalize and force core.
 
-template <bool AtomMajor>
-__global__ void build_spin_chiral_finalize_c4_l4_f32(
+template <int C>
+__global__ void build_spin_chiral_descriptors_f32(
     int atom_count,
     int atom_stride,
     int struct_dim,
-    float spin_cutoff,
+    SpinCoreLayout layout,
     const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
     const float* __restrict__ density_geom_cache,
+    const float* __restrict__ density_raw1_cache,
     const float* __restrict__ chiral_polar_cache,
     const float* __restrict__ chiral_octupoles_raw_cache,
     const float* __restrict__ chiral_hexadecapoles_raw_cache,
     float* __restrict__ chiral_chirals_cache,
-    float* __restrict__ chiral_pseudodevs_cache,
     float* __restrict__ descriptors) {
-  constexpr int C = 4;
-  constexpr int ChiC = 2;
-  constexpr int ChiralOffset = 58;
+  constexpr int ChiC = C < 2 ? C : 2;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int atom = tid / C;
   const int c = tid - atom * C;
@@ -2202,568 +1327,146 @@ __global__ void build_spin_chiral_finalize_c4_l4_f32(
     return;
   }
 
+  float geom_packed[6];
   float geom[9];
   float polar[3];
-  for (int k = 0; k < 9; ++k) {
-    geom[k] = density_geom_cache[
-        spin_component_cache_index<AtomMajor, C * 9>(
-            atom_stride, atom, c * 9 + k)];
+  for (int k = 0; k < 6; ++k) {
+    geom_packed[k] = density_geom_cache[
+        spin_atom_cache_index<C * 6>(
+            atom_stride, atom, c * 6 + k)];
   }
+  unpack_spin_symmetric6f(geom_packed, geom);
   for (int k = 0; k < 3; ++k) {
     polar[k] = chiral_polar_cache[
-        spin_component_cache_index<AtomMajor, C * 3>(
+        spin_atom_cache_index<C * 3>(
             atom_stride, atom, c * 3 + k)];
+  }
+
+  float octupole_reduced[kSpinChiralOReducedCount];
+  const int octupole_base =
+      spin_atom_cache_index<C * kSpinChiralOReducedCount>(
+          atom_stride, atom, c * kSpinChiralOReducedCount);
+  for (int k = 0; k < kSpinChiralOReducedCount; ++k) {
+    octupole_reduced[k] = chiral_octupoles_raw_cache[octupole_base + k];
   }
 
   float chiral_value = 0.0f;
   if (c < ChiC) {
     float q_reduced[5];
-    float o_reduced[7];
     float h_reduced[9];
-    load_spin_chiral_qoh_reduced_f32<AtomMajor>(
-        atom_stride,
-        atom,
-        c,
-        geom,
-        chiral_octupoles_raw_cache,
-        chiral_hexadecapoles_raw_cache,
-        q_reduced,
-        o_reduced,
-        h_reduced);
+    q_reduced[0] = geom[0] - geom[8];
+    q_reduced[1] = -geom[5];
+    q_reduced[2] = 0.5f * geom[2];
+    q_reduced[3] = geom[1];
+    q_reduced[4] = geom[0] - geom[4];
+    const int hexadecapole_base =
+        spin_atom_cache_index<ChiC * kSpinChiralHReducedCount>(
+            atom_stride, atom, c * kSpinChiralHReducedCount);
+    for (int k = 0; k < kSpinChiralHReducedCount; ++k) {
+      h_reduced[k] = chiral_hexadecapoles_raw_cache[hexadecapole_base + k];
+    }
     chiral_value =
-        contract_spin_chiral_qoh_reduced_f32(q_reduced, o_reduced, h_reduced);
+        contract_spin_chiral_qoh_reduced_f32(
+            q_reduced, octupole_reduced, h_reduced);
     chiral_chirals_cache[
-        spin_component_cache_index<AtomMajor, ChiC>(atom_stride, atom, c)] =
+        spin_atom_cache_index<ChiC>(atom_stride, atom, c)] =
         chiral_value;
   }
 
-  float pseudodevs[9] = {};
-  const int radial_count = nn_radial[atom];
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    float rhat[3];
-    float dist = 0.0f;
-    float si[3];
-    float sj[3];
-    load_spin_edge_cached_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
-      continue;
-    }
-    const float weight =
-        spin_edge_weights[spin_edge_cache_index(atom_stride, slot, atom, c)];
-    float qu[3] = {0.0f, 0.0f, 0.0f};
-    for (int a = 0; a < 3; ++a) {
-      for (int b = 0; b < 3; ++b) {
-        qu[a] += geom[3 * a + b] * rhat[b];
-      }
-    }
-    float axis[3];
-    cross3f(rhat, qu, axis);
-    float pseudo[9];
-    stf_outer3f(axis, rhat, pseudo);
-    for (int k = 0; k < 9; ++k) {
-      pseudodevs[k] += weight * pseudo[k];
-    }
-  }
-  for (int k = 0; k < 9; ++k) {
-    chiral_pseudodevs_cache[
-        spin_component_cache_index<AtomMajor, C * 9>(
-            atom_stride, atom, c * 9 + k)] = pseudodevs[k];
-  }
+  float pseudodevs[9];
+  build_spin_chiral_pseudodev_center_f32(
+      geom, polar, octupole_reduced, pseudodevs);
 
+  const float si[3] = {
+      static_cast<float>(spins_soa3[atom]),
+      static_cast<float>(spins_soa3[atom_stride + atom]),
+      static_cast<float>(spins_soa3[2 * atom_stride + atom])};
   float chiral_q0 = 0.0f;
-  float chiral_q1 = 0.0f;
-  float chiral_q2 = 0.0f;
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    float rhat[3];
-    float dist = 0.0f;
-    float si[3];
-    float sj[3];
-    load_spin_edge_cached_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
-      continue;
-    }
-    const float weight =
-        spin_edge_weights[spin_edge_cache_index(atom_stride, slot, atom, c)];
-    float spin_cross[3];
-    cross3f(si, sj, spin_cross);
-    if (c < ChiC) {
-      chiral_q0 += weight * dot3f(spin_cross, rhat) * chiral_value;
-    }
-    float axis[3];
-    cross3f(polar, rhat, axis);
-    chiral_q1 += weight * dot3f(spin_cross, axis);
-    float pseudo_axis[3] = {0.0f, 0.0f, 0.0f};
-    for (int a = 0; a < 3; ++a) {
-      for (int b = 0; b < 3; ++b) {
-        pseudo_axis[a] += pseudodevs[3 * a + b] * rhat[b];
-      }
-    }
-    chiral_q2 += weight * dot3f(spin_cross, pseudo_axis);
+  const int raw1_base = spin_atom_cache_index<C * 9>(
+      atom_stride, atom, c * 9);
+  float raw1[9];
+  for (int k = 0; k < 9; ++k) {
+    raw1[k] = density_raw1_cache[raw1_base + k];
   }
   if (c < ChiC) {
-    descriptors[atom + atom_stride * (struct_dim + ChiralOffset + c)] =
+    float l1_cross[3];
+    spin_raw1_crossf(raw1, l1_cross);
+    chiral_q0 = -chiral_value * dot3f(si, l1_cross);
+  }
+
+  const float l1_rdot = spin_raw1_tracef(raw1);
+  float chiral_q1 = 0.0f;
+  for (int b = 0; b < 3; ++b) {
+    float raw1_transpose_si = 0.0f;
+    for (int a = 0; a < 3; ++a) {
+      raw1_transpose_si +=
+          raw1[3 * a + b] * si[a];
+    }
+    chiral_q1 +=
+        polar[b] * (si[b] * l1_rdot - raw1_transpose_si);
+  }
+
+  float chiral_q2 = 0.0f;
+  for (int b = 0; b < 3; ++b) {
+    const float raw1_row[3] = {
+        raw1[3 * b], raw1[3 * b + 1], raw1[3 * b + 2]};
+    float spin_cross_raw1[3];
+    cross3f(si, raw1_row, spin_cross_raw1);
+    for (int a = 0; a < 3; ++a) {
+      chiral_q2 += pseudodevs[3 * a + b] * spin_cross_raw1[a];
+    }
+  }
+  if (c < ChiC) {
+    descriptors[
+        atom + atom_stride * (struct_dim + layout.chiral_offset + c)] =
         chiral_q0;
   }
-  descriptors[atom + atom_stride * (struct_dim + ChiralOffset + ChiC + c)] =
-      chiral_q1;
-  descriptors[atom + atom_stride * (struct_dim + ChiralOffset + ChiC + C + c)] =
-      chiral_q2;
+  descriptors[
+      atom + atom_stride * (struct_dim + layout.chiral_offset + ChiC + c)] =
+          chiral_q1;
+  descriptors[
+      atom +
+      atom_stride * (struct_dim + layout.chiral_offset + ChiC + C + c)] =
+          chiral_q2;
 }
 
-template <bool AtomMajor>
+template <int C>
+struct SpinChiralPullShared {
+  static constexpr int ChiC = C < 2 ? C : 2;
+  float geom_terms[C * kSpinDeg2Count];
+  float polar[C * 3];
+  float raw1[C * 9];
+  float rdot[C];
+  float cross[C * 3];
+  float octupole_terms[C * kSpinDeg3Count];
+  float hexadecapole_terms[ChiC * kSpinDeg4Count];
+  float direct_mforce[3];
+};
+
+static_assert(
+    sizeof(SpinChiralPullShared<4>) == 161 * sizeof(float),
+    "spin chiral center pulls must remain tightly packed");
+
+template <int C, int AtomsPerWarp>
+struct SpinChiralForceTileShared {
+  // The 161-float stride naturally rotates equal-component accesses through
+  // shared-memory banks for the eight independent centers in a warp.
+  SpinChiralPullShared<C> pulls[AtomsPerWarp];
+};
+
+template <
+    int C,
+    SpinVirialMode VirialMode,
+    int AtomsPerWarp,
+    int EdgesPerAtomBatch>
 __global__ void __launch_bounds__(32, 8)
-accumulate_spin_chiral_forces_c4_l4_cached_f32(
-    int atom_count,
-    int atom_stride,
-    int struct_dim,
-    float spin_cutoff,
-    const double* __restrict__ spins_soa3,
-    const int* __restrict__ nn_radial,
-    const int* __restrict__ nl_radial,
-    const float* __restrict__ fp,
-    const float* __restrict__ spin_edge_dx,
-    const float* __restrict__ spin_edge_dy,
-    const float* __restrict__ spin_edge_dz,
-    const float* __restrict__ spin_edge_dist,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
-    const float* __restrict__ density_geom_cache,
-    const float* __restrict__ chiral_polar_cache,
-    const float* __restrict__ chiral_octupoles_raw_cache,
-    const float* __restrict__ chiral_hexadecapoles_raw_cache,
-    const float* __restrict__ chiral_chirals_cache,
-    const float* __restrict__ chiral_pseudodevs_cache,
-    double* __restrict__ force_soa3,
-    double* __restrict__ mforce_soa3,
-    SpinVirialMode virial_mode,
-    double* __restrict__ virial_soa9) {
-  constexpr int C = 4;
-  constexpr int ChiC = 2;
-  constexpr int BaseOffset = 58;
-  constexpr int PolarOffset = BaseOffset + ChiC;
-  constexpr int PseudoOffset = PolarOffset + C;
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-
-  const int radial_count = nn_radial[atom];
-  float alpha_chiral_pull[ChiC] = {};
-  float alpha_polar_pull[C] = {};
-  float alpha_pseudo_pull[C] = {};
-  for (int c = 0; c < ChiC; ++c) {
-    alpha_chiral_pull[c] =
-        fp[atom + atom_stride * (struct_dim + BaseOffset + c)];
-  }
-  for (int c = 0; c < C; ++c) {
-    alpha_polar_pull[c] =
-        fp[atom + atom_stride * (struct_dim + PolarOffset + c)];
-    alpha_pseudo_pull[c] =
-        fp[atom + atom_stride * (struct_dim + PseudoOffset + c)];
-  }
-
-  float geom[C * 9] = {};
-  float polar[C * 3] = {};
-  float chirals[ChiC] = {};
-  float pseudodevs[C * 9] = {};
-  for (int c = 0; c < C; ++c) {
-    for (int k = 0; k < 3; ++k) {
-      polar[c * 3 + k] = chiral_polar_cache[
-          spin_component_cache_index<AtomMajor, C * 3>(
-              atom_stride, atom, c * 3 + k)];
-    }
-    for (int k = 0; k < 9; ++k) {
-      geom[c * 9 + k] = density_geom_cache[
-          spin_component_cache_index<AtomMajor, C * 9>(
-              atom_stride, atom, c * 9 + k)];
-      pseudodevs[c * 9 + k] =
-          chiral_pseudodevs_cache[
-              spin_component_cache_index<AtomMajor, C * 9>(
-                  atom_stride, atom, c * 9 + k)];
-    }
-  }
-  for (int c = 0; c < ChiC; ++c) {
-    chirals[c] = chiral_chirals_cache[
-        spin_component_cache_index<AtomMajor, ChiC>(atom_stride, atom, c)];
-  }
-
-  float grad_chi[ChiC] = {};
-  float grad_polar[C * 3] = {};
-  float grad_pseudodev[C * 9] = {};
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    float rhat[3];
-    float dist = 0.0f;
-    float si[3];
-    float sj[3];
-    load_spin_edge_cached_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
-      continue;
-    }
-    float weights[C] = {};
-    load_spin_edge_weight_cache_f32(
-        atom_stride, slot, atom, spin_edge_weights, weights);
-    float x[3];
-    cross3f(si, sj, x);
-    const float xu = dot3f(x, rhat);
-    for (int c = 0; c < ChiC; ++c) {
-      grad_chi[c] += alpha_chiral_pull[c] * weights[c] * xu;
-    }
-    for (int c = 0; c < C; ++c) {
-      float axis[3];
-      cross3f(polar + c * 3, rhat, axis);
-      const float alpha_polar = alpha_polar_pull[c];
-      float gaxis_polar[3] = {
-          alpha_polar * weights[c] * x[0],
-          alpha_polar * weights[c] * x[1],
-          alpha_polar * weights[c] * x[2]};
-      float gp[3];
-      cross3f(rhat, gaxis_polar, gp);
-      for (int d = 0; d < 3; ++d) {
-        grad_polar[c * 3 + d] += gp[d];
-      }
-      const float alpha_pseudo = alpha_pseudo_pull[c];
-      float gaxis_pseudo[3] = {
-          alpha_pseudo * weights[c] * x[0],
-          alpha_pseudo * weights[c] * x[1],
-          alpha_pseudo * weights[c] * x[2]};
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_pseudodev[c * 9 + 3 * a + b] +=
-              gaxis_pseudo[a] * rhat[b];
-        }
-      }
-    }
-  }
-
-  float grad_Q[C * 9] = {};
-  float grad_O_terms[ChiC * kSpinDeg3Count] = {};
-  float grad_H_terms[ChiC * kSpinDeg4Count] = {};
-  for (int c = 0; c < ChiC; ++c) {
-    const float g = grad_chi[c];
-    const float* qmat = geom + c * 9;
-    float* gQ = grad_Q + c * 9;
-    float* gO_terms = grad_O_terms + c * kSpinDeg3Count;
-    float* gH_terms = grad_H_terms + c * kSpinDeg4Count;
-    float q_reduced[5];
-    float o_reduced[7];
-    float h_reduced[9];
-    load_spin_chiral_qoh_reduced_f32<AtomMajor>(
-        atom_stride,
-        atom,
-        c,
-        qmat,
-        chiral_octupoles_raw_cache,
-        chiral_hexadecapoles_raw_cache,
-        q_reduced,
-        o_reduced,
-        h_reduced);
-    add_spin_chiral_qoh_reduced_gradient_f32(
-        g,
-        q_reduced,
-        o_reduced,
-        h_reduced,
-        gQ,
-        gO_terms,
-        gH_terms);
-  }
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    float rhat[3];
-    float dist = 0.0f;
-    float si[3];
-    float sj[3];
-    load_spin_edge_cached_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
-      continue;
-    }
-    float weights[C] = {};
-    load_spin_edge_weight_cache_f32(
-        atom_stride, slot, atom, spin_edge_weights, weights);
-    for (int c = 0; c < C; ++c) {
-      const float* gpd = grad_pseudodev + c * 9;
-      const float* qmat = geom + c * 9;
-      float qu[3] = {
-          qmat[0] * rhat[0] + qmat[1] * rhat[1] + qmat[2] * rhat[2],
-          qmat[3] * rhat[0] + qmat[4] * rhat[1] + qmat[5] * rhat[2],
-          qmat[6] * rhat[0] + qmat[7] * rhat[1] + qmat[8] * rhat[2]};
-      float pseudo_axis[3];
-      cross3f(rhat, qu, pseudo_axis);
-      float gpseudo[9];
-      for (int k = 0; k < 9; ++k) {
-        gpseudo[k] = gpd[k] * weights[c];
-      }
-      float g_axis[3] = {0.0f, 0.0f, 0.0f};
-      float gu2[3] = {0.0f, 0.0f, 0.0f};
-      add_stf_outer_gradientf(gpseudo, pseudo_axis, rhat, g_axis, gu2);
-      float g_qu[3];
-      cross3f(g_axis, rhat, g_qu);
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_Q[c * 9 + 3 * a + b] += g_qu[a] * rhat[b];
-        }
-      }
-    }
-  }
-
-  float grad_Q_terms[C * kSpinDeg2Count] = {};
-  for (int c = 0; c < C; ++c) {
-    project_rank2_spin_gradientf(
-        grad_Q + c * 9, grad_Q_terms + c * kSpinDeg2Count);
-  }
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    float rhat[3];
-    float dist = 0.0f;
-    float si[3];
-    float sj[3];
-    load_spin_edge_cached_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        slot,
-        spins_soa3,
-        spin_edge_dx,
-        spin_edge_dy,
-        spin_edge_dz,
-        spin_edge_dist,
-        rhat,
-        dist,
-        si,
-        sj);
-    if (dist <= 1.0e-12f || dist >= spin_cutoff) {
-      continue;
-    }
-    float weights[C] = {};
-    float weight_derivatives[C] = {};
-    load_spin_edge_weight_derivative_cache_f32(
-        atom_stride,
-        slot,
-        atom,
-        spin_edge_weights,
-        spin_edge_weight_derivatives,
-        weights,
-        weight_derivatives);
-
-    float x[3];
-    cross3f(si, sj, x);
-    float grad_weight[C] = {};
-    float grad_rhat[3] = {0.0f, 0.0f, 0.0f};
-    float grad_si[3] = {0.0f, 0.0f, 0.0f};
-    float grad_sj[3] = {0.0f, 0.0f, 0.0f};
-    float gx[3] = {0.0f, 0.0f, 0.0f};
-    for (int c = 0; c < ChiC; ++c) {
-      const float alpha = alpha_chiral_pull[c];
-      const float xu = dot3f(x, rhat);
-      grad_weight[c] += alpha * xu * chirals[c];
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha * weights[c] * chirals[c] * rhat[d];
-        grad_rhat[d] += alpha * weights[c] * chirals[c] * x[d];
-      }
-    }
-    for (int c = 0; c < C; ++c) {
-      float axis[3];
-      cross3f(polar + c * 3, rhat, axis);
-      const float alpha_polar = alpha_polar_pull[c];
-      const float xa = dot3f(x, axis);
-      grad_weight[c] += alpha_polar * xa;
-      float gaxis_polar[3] = {
-          alpha_polar * weights[c] * x[0],
-          alpha_polar * weights[c] * x[1],
-          alpha_polar * weights[c] * x[2]};
-      float gu_part[3];
-      cross3f(gaxis_polar, polar + c * 3, gu_part);
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha_polar * weights[c] * axis[d];
-        grad_rhat[d] += gu_part[d];
-      }
-
-      const float alpha_pseudo = alpha_pseudo_pull[c];
-      const float* pdev = pseudodevs + c * 9;
-      float pseudo_axis[3] = {
-          pdev[0] * rhat[0] + pdev[1] * rhat[1] + pdev[2] * rhat[2],
-          pdev[3] * rhat[0] + pdev[4] * rhat[1] + pdev[5] * rhat[2],
-          pdev[6] * rhat[0] + pdev[7] * rhat[1] + pdev[8] * rhat[2]};
-      const float xpa = dot3f(x, pseudo_axis);
-      grad_weight[c] += alpha_pseudo * xpa;
-      float gaxis_pseudo[3] = {
-          alpha_pseudo * weights[c] * x[0],
-          alpha_pseudo * weights[c] * x[1],
-          alpha_pseudo * weights[c] * x[2]};
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha_pseudo * weights[c] * pseudo_axis[d];
-      }
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_rhat[b] += pdev[3 * a + b] * gaxis_pseudo[a];
-        }
-      }
-    }
-    float gsi_part[3];
-    float gsj_part[3];
-    cross3f(sj, gx, gsi_part);
-    cross3f(gx, si, gsj_part);
-    for (int d = 0; d < 3; ++d) {
-      grad_si[d] += gsi_part[d];
-      grad_sj[d] += gsj_part[d];
-    }
-
-    for (int c = 0; c < C; ++c) {
-      const float* gp = grad_polar + c * 3;
-      grad_weight[c] += dot3f(gp, rhat);
-      for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += weights[c] * gp[d];
-      }
-
-      const float* gpd = grad_pseudodev + c * 9;
-      const float* qmat = geom + c * 9;
-      float qu[3] = {
-          qmat[0] * rhat[0] + qmat[1] * rhat[1] + qmat[2] * rhat[2],
-          qmat[3] * rhat[0] + qmat[4] * rhat[1] + qmat[5] * rhat[2],
-          qmat[6] * rhat[0] + qmat[7] * rhat[1] + qmat[8] * rhat[2]};
-      float pseudo_axis[3];
-      cross3f(rhat, qu, pseudo_axis);
-      float pseudo[9];
-      stf_outer3f(pseudo_axis, rhat, pseudo);
-      float dot = 0.0f;
-      float gpseudo[9];
-      for (int k = 0; k < 9; ++k) {
-        dot += gpd[k] * pseudo[k];
-        gpseudo[k] = gpd[k] * weights[c];
-      }
-      grad_weight[c] += dot;
-      float g_axis[3] = {0.0f, 0.0f, 0.0f};
-      float gu2[3] = {0.0f, 0.0f, 0.0f};
-      add_stf_outer_gradientf(gpseudo, pseudo_axis, rhat, g_axis, gu2);
-      float g_u_cross[3];
-      float g_qu[3];
-      cross3f(qu, g_axis, g_u_cross);
-      cross3f(g_axis, rhat, g_qu);
-      for (int a = 0; a < 3; ++a) {
-        grad_rhat[a] += gu2[a] + g_u_cross[a];
-        for (int b = 0; b < 3; ++b) {
-          grad_rhat[b] += qmat[3 * a + b] * g_qu[a];
-        }
-      }
-
-      const float* q_terms = grad_Q_terms + c * kSpinDeg2Count;
-      float m2[kSpinDeg2Count];
-      fill_spin_monomials2f(rhat, m2);
-      grad_weight[c] += dot_spin_termsf(q_terms, m2, kSpinDeg2Count);
-      grad_rhat[0] += weights[c] *
-          (2.0f * q_terms[0] * rhat[0] + q_terms[3] * rhat[1] +
-           q_terms[4] * rhat[2]);
-      grad_rhat[1] += weights[c] *
-          (2.0f * q_terms[1] * rhat[1] + q_terms[3] * rhat[0] +
-           q_terms[5] * rhat[2]);
-      grad_rhat[2] += weights[c] *
-          (2.0f * q_terms[2] * rhat[2] + q_terms[4] * rhat[0] +
-           q_terms[5] * rhat[1]);
-    }
-
-    float m3[kSpinDeg3Count];
-    float m4[kSpinDeg4Count];
-    fill_spin_monomialsf(rhat, m3, m4);
-    for (int c = 0; c < ChiC; ++c) {
-      const float* o_terms = grad_O_terms + c * kSpinDeg3Count;
-      const float* h_terms = grad_H_terms + c * kSpinDeg4Count;
-      grad_weight[c] += dot_spin_termsf(o_terms, m3, kSpinDeg3Count) +
-                        dot_spin_termsf(h_terms, m4, kSpinDeg4Count);
-      float o_gradient[3];
-      float h_gradient[3];
-      evaluate_spin_polynomial_gradientf(3, o_terms, rhat, o_gradient);
-      evaluate_spin_polynomial_gradientf(4, h_terms, rhat, h_gradient);
-      for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += weights[c] * (o_gradient[d] + h_gradient[d]);
-      }
-    }
-
-    float weighted_derivative = 0.0f;
-    for (int c = 0; c < C; ++c) {
-      weighted_derivative += grad_weight[c] * weight_derivatives[c];
-    }
-    apply_edge_gradients_f32(
-        atom,
-        neighbor,
-        atom_stride,
-        dist,
-        rhat,
-        1.0f,
-        weighted_derivative,
-        grad_rhat,
-        grad_si,
-        grad_sj,
-        force_soa3,
-        mforce_soa3,
-        virial_mode,
-        virial_soa9);
-  }
-}
-
-__global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
+accumulate_spin_chiral_forces_tile_f32(
     int atom_count,
     int atom_stride,
     int struct_dim,
     int num_types,
-    int spin_compress,
     int spin_basis_size,
-    int spin_l_max,
+    SpinCoreLayout layout,
     float spin_cutoff,
     SimulationBox box,
     const int* __restrict__ types,
@@ -2774,394 +1477,455 @@ __global__ void __launch_bounds__(32, 16) accumulate_spin_chiral_forces(
     const float* __restrict__ fp,
     const float* __restrict__ descriptor_coefficients,
     int spin_coefficient_offset,
-    const float* __restrict__ spin_edge_weights,
-    const float* __restrict__ spin_edge_weight_derivatives,
     const float* __restrict__ density_geom_cache,
+    const float* __restrict__ density_raw1_cache,
     const float* __restrict__ chiral_polar_cache,
     const float* __restrict__ chiral_octupoles_raw_cache,
     const float* __restrict__ chiral_hexadecapoles_raw_cache,
     const float* __restrict__ chiral_chirals_cache,
-    const float* __restrict__ chiral_pseudodevs_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    SpinVirialMode virial_mode,
     double* __restrict__ virial_soa9) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
+  constexpr int ChiC = C < 2 ? C : 2;
+  static_assert(
+      AtomsPerWarp * EdgesPerAtomBatch == 32,
+      "spin chiral tile must fill one warp");
+  const int lane = threadIdx.x;
+  const int atom_in_tile = lane / EdgesPerAtomBatch;
+  const int edge_lane = lane - atom_in_tile * EdgesPerAtomBatch;
+  const int atom = blockIdx.x * AtomsPerWarp + atom_in_tile;
+  const bool active_atom = atom < atom_count;
+  constexpr unsigned int FullWarpMask = 0xffffffffu;
+  __shared__ SpinChiralForceTileShared<C, AtomsPerWarp> shared;
+  SpinChiralPullShared<C>* atom_pulls = &shared.pulls[atom_in_tile];
 
-  (void)num_types;
-  (void)spin_basis_size;
-  (void)descriptor_coefficients;
-  (void)spin_coefficient_offset;
-  const int radial_count = nn_radial[atom];
-  const int chi_c = spin_compress < 2 ? spin_compress : 2;
-  const int base_offset = spin_dim_without_chiral(spin_compress, spin_l_max);
-  const int polar_offset = base_offset + chi_c;
-  const int pseudo_offset = polar_offset + spin_compress;
-  double alpha_chiral_pull[2] = {};
-  double alpha_polar_pull[kMaxSpinCompress] = {};
-  double alpha_pseudo_pull[kMaxSpinCompress] = {};
-  for (int c = 0; c < chi_c; ++c) {
-    alpha_chiral_pull[c] = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + base_offset + c)]);
-  }
-  for (int c = 0; c < spin_compress; ++c) {
-    alpha_polar_pull[c] = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + polar_offset + c)]);
-    alpha_pseudo_pull[c] = static_cast<double>(
-        fp[atom + atom_stride * (struct_dim + pseudo_offset + c)]);
-  }
+  const double spin_lane = active_atom && edge_lane < 3
+      ? spins_soa3[edge_lane * atom_stride + atom]
+      : 0.0;
+  const float si[3] = {
+      static_cast<float>(__shfl_sync(
+          FullWarpMask, spin_lane, 0, EdgesPerAtomBatch)),
+      static_cast<float>(__shfl_sync(
+          FullWarpMask, spin_lane, 1, EdgesPerAtomBatch)),
+      static_cast<float>(__shfl_sync(
+          FullWarpMask, spin_lane, 2, EdgesPerAtomBatch))};
 
-  double geom[kMaxSpinCompress * 9] = {};
-  double polar[kMaxSpinCompress * 3] = {};
-  double octupoles_raw[2 * kSpinDeg3Count] = {};
-  double hexadecapoles_raw[2 * kSpinDeg4Count] = {};
+  float direct_grad_si[3] = {};
+  if (active_atom && edge_lane < C) {
+    const int c = edge_lane;
+    const float alpha_q0 = c < ChiC
+        ? fp[atom + atom_stride * (struct_dim + layout.chiral_offset + c)]
+        : 0.0f;
+    const float alpha_q1 =
+        fp[atom + atom_stride * (
+            struct_dim + layout.chiral_offset + ChiC + c)];
+    const float alpha_q2 = fp[
+        atom + atom_stride * (
+            struct_dim + layout.chiral_offset + ChiC + C + c)];
 
-  double chirals[2] = {};
-  double pseudodevs[kMaxSpinCompress * 9] = {};
-  for (int c = 0; c < spin_compress; ++c) {
-    for (int k = 0; k < 3; ++k) {
-      polar[idx2(c, k, 3)] =
-          static_cast<double>(chiral_polar_cache[atom + atom_stride * (c * 3 + k)]);
+    float geom_packed[6];
+    float geom[9];
+    float polar[3];
+    float raw1[9];
+    float l1_cross[3];
+    float octupole_reduced[kSpinChiralOReducedCount];
+    const int geom_base = spin_atom_cache_index<C * 6>(
+        atom_stride, atom, c * 6);
+    const int raw1_base = spin_atom_cache_index<C * 9>(
+        atom_stride, atom, c * 9);
+    const int vector_base = spin_atom_cache_index<C * 3>(
+        atom_stride, atom, c * 3);
+    const int octupole_base =
+        spin_atom_cache_index<C * kSpinChiralOReducedCount>(
+            atom_stride, atom, c * kSpinChiralOReducedCount);
+#pragma unroll
+    for (int k = 0; k < 6; ++k) {
+      geom_packed[k] = density_geom_cache[geom_base + k];
     }
+    unpack_spin_symmetric6f(geom_packed, geom);
+#pragma unroll
     for (int k = 0; k < 9; ++k) {
-      geom[idx2(c, k, 9)] =
-          static_cast<double>(density_geom_cache[atom + atom_stride * (c * 9 + k)]);
-      pseudodevs[idx2(c, k, 9)] = static_cast<double>(
-          chiral_pseudodevs_cache[atom + atom_stride * (c * 9 + k)]);
+      raw1[k] = density_raw1_cache[raw1_base + k];
     }
-  }
-  for (int c = 0; c < chi_c; ++c) {
+#pragma unroll
+    for (int k = 0; k < 3; ++k) {
+      polar[k] = chiral_polar_cache[vector_base + k];
+    }
+    spin_raw1_crossf(raw1, l1_cross);
+#pragma unroll
+    for (int k = 0; k < kSpinChiralOReducedCount; ++k) {
+      octupole_reduced[k] = chiral_octupoles_raw_cache[octupole_base + k];
+    }
+    const float l1_rdot = spin_raw1_tracef(raw1);
+
+    float grad_geom[9] = {};
+    float grad_polar[3] = {};
+    float grad_raw1[9] = {};
+    float grad_l1_cross[3] = {};
+    float grad_octupole_reduced[kSpinChiralOReducedCount] = {};
+    float grad_hexadecapole_reduced[kSpinChiralHReducedCount] = {};
+    float grad_l1_rdot = alpha_q1 * dot3f(polar, si);
+
+    if (c < ChiC) {
+      const float chiral = chiral_chirals_cache[
+          spin_atom_cache_index<ChiC>(atom_stride, atom, c)];
+      const float si_dot_cross = dot3f(si, l1_cross);
+      const float grad_chiral = -alpha_q0 * si_dot_cross;
+      for (int d = 0; d < 3; ++d) {
+        grad_l1_cross[d] -= alpha_q0 * chiral * si[d];
+        direct_grad_si[d] -= alpha_q0 * chiral * l1_cross[d];
+      }
+
+      float q_reduced[5];
+      float h_reduced[kSpinChiralHReducedCount];
+      q_reduced[0] = geom[0] - geom[8];
+      q_reduced[1] = -geom[5];
+      q_reduced[2] = 0.5f * geom[2];
+      q_reduced[3] = geom[1];
+      q_reduced[4] = geom[0] - geom[4];
+      const int hexadecapole_base =
+          spin_atom_cache_index<ChiC * kSpinChiralHReducedCount>(
+              atom_stride, atom, c * kSpinChiralHReducedCount);
+#pragma unroll
+      for (int k = 0; k < kSpinChiralHReducedCount; ++k) {
+        h_reduced[k] =
+            chiral_hexadecapoles_raw_cache[hexadecapole_base + k];
+      }
+      add_spin_chiral_qoh_reduced_pull_f32(
+          grad_chiral,
+          q_reduced,
+          octupole_reduced,
+          h_reduced,
+          grad_geom,
+          grad_octupole_reduced,
+          grad_hexadecapole_reduced);
+    }
+
+#pragma unroll
+    for (int b = 0; b < 3; ++b) {
+      float raw1_transpose_si = 0.0f;
+#pragma unroll
+      for (int a = 0; a < 3; ++a) {
+        raw1_transpose_si += raw1[3 * a + b] * si[a];
+        grad_raw1[3 * a + b] -= alpha_q1 * si[a] * polar[b];
+      }
+      grad_polar[b] +=
+          alpha_q1 * (si[b] * l1_rdot - raw1_transpose_si);
+    }
+#pragma unroll
+    for (int a = 0; a < 3; ++a) {
+      float raw1_polar = 0.0f;
+#pragma unroll
+      for (int b = 0; b < 3; ++b) {
+        raw1_polar += raw1[3 * a + b] * polar[b];
+      }
+      direct_grad_si[a] +=
+          alpha_q1 * (l1_rdot * polar[a] - raw1_polar);
+    }
+
+    float octupole_raw[kSpinDeg3Count];
+    float pseudodev[9];
+    reconstruct_spin_rank3_raw_f32(
+        polar, octupole_reduced, octupole_raw);
+    build_spin_chiral_pseudodev_center_f32(
+        geom, polar, octupole_reduced, pseudodev);
+    float grad_pseudodev[9] = {};
+#pragma unroll
+    for (int b = 0; b < 3; ++b) {
+      const float raw1_row[3] = {
+          raw1[3 * b], raw1[3 * b + 1], raw1[3 * b + 2]};
+      float spin_cross_raw1[3];
+      cross3f(si, raw1_row, spin_cross_raw1);
+      float grad_spin_cross_raw1[3];
+#pragma unroll
+      for (int a = 0; a < 3; ++a) {
+        grad_pseudodev[3 * a + b] +=
+            alpha_q2 * spin_cross_raw1[a];
+        grad_spin_cross_raw1[a] = alpha_q2 * pseudodev[3 * a + b];
+      }
+      float grad_si_part[3];
+      float grad_raw1_row[3];
+      cross3f(raw1_row, grad_spin_cross_raw1, grad_si_part);
+      cross3f(grad_spin_cross_raw1, si, grad_raw1_row);
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        direct_grad_si[d] += grad_si_part[d];
+        grad_raw1[3 * b + d] += grad_raw1_row[d];
+      }
+    }
+
+    float grad_octupole_raw[kSpinDeg3Count] = {};
+    add_spin_chiral_pseudodev_center_pull_f32(
+        geom,
+        octupole_raw,
+        grad_pseudodev,
+        grad_geom,
+        grad_octupole_raw);
+    add_spin_rank3_reconstruction_pull_f32(
+        grad_octupole_raw, grad_polar, grad_octupole_reduced);
+
+    project_rank2_spin_gradientf(
+        grad_geom, atom_pulls->geom_terms + c * kSpinDeg2Count);
+#pragma unroll
+    for (int k = 0; k < 3; ++k) {
+      atom_pulls->polar[c * 3 + k] = grad_polar[k];
+      atom_pulls->cross[c * 3 + k] = grad_l1_cross[k];
+    }
+#pragma unroll
+    for (int k = 0; k < 9; ++k) {
+      atom_pulls->raw1[c * 9 + k] = grad_raw1[k];
+    }
+    atom_pulls->rdot[c] = grad_l1_rdot;
+    float octupole_terms[kSpinDeg3Count] = {};
+    add_spin_chiral_o_reduced_terms_f32(
+        grad_octupole_reduced, octupole_terms);
+#pragma unroll
     for (int k = 0; k < kSpinDeg3Count; ++k) {
-      octupoles_raw[c * kSpinDeg3Count + k] = static_cast<double>(
-          chiral_octupoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg3Count + k)]);
+      atom_pulls->octupole_terms[c * kSpinDeg3Count + k] =
+          octupole_terms[k];
     }
-    for (int k = 0; k < kSpinDeg4Count; ++k) {
-      hexadecapoles_raw[c * kSpinDeg4Count + k] = static_cast<double>(
-          chiral_hexadecapoles_raw_cache[
-              atom + atom_stride * (c * kSpinDeg4Count + k)]);
-    }
-    chirals[c] =
-        static_cast<double>(chiral_chirals_cache[atom + atom_stride * c]);
-  }
-
-  double grad_chi[2] = {};
-  double grad_polar[kMaxSpinCompress * 3] = {};
-  double grad_pseudodev[kMaxSpinCompress * 9] = {};
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                   rhat, dist, si, sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    double weights[kMaxSpinCompress] = {};
-    load_spin_edge_weight_cache(
-        atom_stride, slot, atom, spin_edge_weights, weights);
-    double x[3];
-    cross3(si, sj, x);
-    const double xu = dot3(x, rhat);
-    for (int c = 0; c < chi_c; ++c) {
-      const double alpha = alpha_chiral_pull[c];
-      grad_chi[c] += alpha * weights[c] * xu;
-    }
-    for (int c = 0; c < spin_compress; ++c) {
-      double axis[3];
-      cross3(polar + c * 3, rhat, axis);
-      const double alpha_polar = alpha_polar_pull[c];
-      double gaxis_polar[3] = {
-          alpha_polar * weights[c] * x[0],
-          alpha_polar * weights[c] * x[1],
-          alpha_polar * weights[c] * x[2]};
-      double gp[3];
-      cross3(rhat, gaxis_polar, gp);
-      for (int d = 0; d < 3; ++d) {
-        grad_polar[c * 3 + d] += gp[d];
-      }
-      const double alpha_pseudo = alpha_pseudo_pull[c];
-      double gaxis_pseudo[3] = {
-          alpha_pseudo * weights[c] * x[0],
-          alpha_pseudo * weights[c] * x[1],
-          alpha_pseudo * weights[c] * x[2]};
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_pseudodev[c * 9 + 3 * a + b] += gaxis_pseudo[a] * rhat[b];
-        }
+    if (c < ChiC) {
+      float hexadecapole_terms[kSpinDeg4Count] = {};
+      add_spin_chiral_h_reduced_terms_f32(
+          grad_hexadecapole_reduced, hexadecapole_terms);
+#pragma unroll
+      for (int k = 0; k < kSpinDeg4Count; ++k) {
+        atom_pulls->hexadecapole_terms[c * kSpinDeg4Count + k] =
+            hexadecapole_terms[k];
       }
     }
   }
 
-  double grad_Q[kMaxSpinCompress * 9] = {};
-  double grad_O_terms[2 * kSpinDeg3Count] = {};
-  double grad_H_terms[2 * kSpinDeg4Count] = {};
-  for (int c = 0; c < chi_c; ++c) {
-    const double g = grad_chi[c];
-    const double* qmat = geom + c * 9;
-    const double* oct_raw = octupoles_raw + c * kSpinDeg3Count;
-    const double* hex_raw = hexadecapoles_raw + c * kSpinDeg4Count;
-    double* gQ = grad_Q + c * 9;
-    double* gO_terms = grad_O_terms + c * kSpinDeg3Count;
-    double* gH_terms = grad_H_terms + c * kSpinDeg4Count;
-    for (int term = 0; term < kSpinChiralQohCount; ++term) {
-      const unsigned short packed = kSpinChiralQohPacked[term];
-      const int q = packed >> 8;
-      const int o = (packed >> 4) & 0x0f;
-      const int h = packed & 0x0f;
-      const double scale = g * kSpinChiralQohCoeff[term];
-      const double o_value = oct_raw[o];
-      const double h_value = hex_raw[h];
-      gQ[q] += scale * o_value * h_value;
-      const double qscale = scale * qmat[q];
-      gO_terms[o] += qscale * h_value;
-      gH_terms[h] += qscale * o_value;
-    }
-  }
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                   rhat, dist, si, sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    double weights[kMaxSpinCompress] = {};
-    load_spin_edge_weight_cache(
-        atom_stride, slot, atom, spin_edge_weights, weights);
-    for (int c = 0; c < spin_compress; ++c) {
-      const double* gpd = grad_pseudodev + c * 9;
-      const double* qmat = geom + c * 9;
-      double qu[3] = {
-          qmat[0] * rhat[0] + qmat[1] * rhat[1] + qmat[2] * rhat[2],
-          qmat[3] * rhat[0] + qmat[4] * rhat[1] + qmat[5] * rhat[2],
-          qmat[6] * rhat[0] + qmat[7] * rhat[1] + qmat[8] * rhat[2]};
-      double pseudo_axis[3];
-      cross3(rhat, qu, pseudo_axis);
-      double gpseudo[9];
-      for (int k = 0; k < 9; ++k) {
-        gpseudo[k] = gpd[k] * weights[c];
-      }
-      double g_axis[3] = {0.0, 0.0, 0.0};
-      double gu2[3] = {0.0, 0.0, 0.0};
-      add_stf_outer_gradient(gpseudo, pseudo_axis, rhat, g_axis, gu2);
-      double g_qu[3];
-      cross3(g_axis, rhat, g_qu);
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_Q[c * 9 + 3 * a + b] += g_qu[a] * rhat[b];
-        }
-      }
-    }
-  }
-
-  double grad_Q_terms[kMaxSpinCompress * kSpinDeg2Count] = {};
-  double grad_O_derivatives[2 * 3 * kSpinDeg2Count] = {};
-  double grad_H_derivatives[2 * 3 * kSpinDeg3Count] = {};
-  for (int c = 0; c < spin_compress; ++c) {
-    project_rank2_spin_gradient(grad_Q + c * 9, grad_Q_terms + c * kSpinDeg2Count);
-  }
-  for (int c = 0; c < chi_c; ++c) {
-    fill_spin_term_derivatives(
-        3,
-        kSpinDeg3Count,
-        grad_O_terms + c * kSpinDeg3Count,
-        grad_O_derivatives + c * 3 * kSpinDeg2Count);
-    fill_spin_term_derivatives(
-        4,
-        kSpinDeg4Count,
-        grad_H_terms + c * kSpinDeg4Count,
-        grad_H_derivatives + c * 3 * kSpinDeg3Count);
-  }
-
-  for (int slot = 0; slot < radial_count; ++slot) {
-    const int neighbor = nl_radial[atom + atom_stride * slot];
-    double rhat[3];
-    double dist = 0.0;
-    double si[3];
-    double sj[3];
-    load_spin_edge(atom, neighbor, atom_stride, box, positions_soa3, spins_soa3,
-                   rhat, dist, si, sj);
-    if (dist <= 1.0e-12 || dist >= spin_cutoff) {
-      continue;
-    }
-    double weights[kMaxSpinCompress] = {};
-    double weight_derivatives[kMaxSpinCompress] = {};
-    load_spin_edge_weight_derivative_cache(
-        atom_stride,
-        slot,
-        atom,
-        spin_edge_weights,
-        spin_edge_weight_derivatives,
-        weights,
-        weight_derivatives);
-
-    double x[3];
-    cross3(si, sj, x);
-    double grad_weight[kMaxSpinCompress] = {};
-    double grad_rhat[3] = {0.0, 0.0, 0.0};
-    double grad_si[3] = {0.0, 0.0, 0.0};
-    double grad_sj[3] = {0.0, 0.0, 0.0};
-    double gx[3] = {0.0, 0.0, 0.0};
-    for (int c = 0; c < chi_c; ++c) {
-      const double alpha = alpha_chiral_pull[c];
-      const double xu = dot3(x, rhat);
-      grad_weight[c] += alpha * xu * chirals[c];
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha * weights[c] * chirals[c] * rhat[d];
-        grad_rhat[d] += alpha * weights[c] * chirals[c] * x[d];
-      }
-    }
-    for (int c = 0; c < spin_compress; ++c) {
-      double axis[3];
-      cross3(polar + c * 3, rhat, axis);
-      const double alpha_polar = alpha_polar_pull[c];
-      const double xa = dot3(x, axis);
-      grad_weight[c] += alpha_polar * xa;
-      double gaxis_polar[3] = {
-          alpha_polar * weights[c] * x[0],
-          alpha_polar * weights[c] * x[1],
-          alpha_polar * weights[c] * x[2]};
-      double gu_part[3];
-      cross3(gaxis_polar, polar + c * 3, gu_part);
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha_polar * weights[c] * axis[d];
-        grad_rhat[d] += gu_part[d];
-      }
-
-      const double alpha_pseudo = alpha_pseudo_pull[c];
-      const double* pdev = pseudodevs + c * 9;
-      double pseudo_axis[3] = {
-          pdev[0] * rhat[0] + pdev[1] * rhat[1] + pdev[2] * rhat[2],
-          pdev[3] * rhat[0] + pdev[4] * rhat[1] + pdev[5] * rhat[2],
-          pdev[6] * rhat[0] + pdev[7] * rhat[1] + pdev[8] * rhat[2]};
-      const double xpa = dot3(x, pseudo_axis);
-      grad_weight[c] += alpha_pseudo * xpa;
-      double gaxis_pseudo[3] = {
-          alpha_pseudo * weights[c] * x[0],
-          alpha_pseudo * weights[c] * x[1],
-          alpha_pseudo * weights[c] * x[2]};
-      for (int d = 0; d < 3; ++d) {
-        gx[d] += alpha_pseudo * weights[c] * pseudo_axis[d];
-      }
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) {
-          grad_rhat[b] += pdev[3 * a + b] * gaxis_pseudo[a];
-        }
-      }
-    }
-    double gsi_part[3];
-    double gsj_part[3];
-    cross3(sj, gx, gsi_part);
-    cross3(gx, si, gsj_part);
+#pragma unroll
+  for (int offset = EdgesPerAtomBatch / 2; offset > 0; offset >>= 1) {
+#pragma unroll
     for (int d = 0; d < 3; ++d) {
-      grad_si[d] += gsi_part[d];
-      grad_sj[d] += gsj_part[d];
+      direct_grad_si[d] += __shfl_down_sync(
+          FullWarpMask, direct_grad_si[d], offset, EdgesPerAtomBatch);
     }
-
-    for (int c = 0; c < spin_compress; ++c) {
-      const double* gp = grad_polar + c * 3;
-      grad_weight[c] += dot3(gp, rhat);
-      for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += weights[c] * gp[d];
-      }
-
-      const double* gpd = grad_pseudodev + c * 9;
-      const double* qmat = geom + c * 9;
-      double qu[3] = {
-          qmat[0] * rhat[0] + qmat[1] * rhat[1] + qmat[2] * rhat[2],
-          qmat[3] * rhat[0] + qmat[4] * rhat[1] + qmat[5] * rhat[2],
-          qmat[6] * rhat[0] + qmat[7] * rhat[1] + qmat[8] * rhat[2]};
-      double pseudo_axis[3];
-      cross3(rhat, qu, pseudo_axis);
-      double pseudo[9];
-      stf_outer3(pseudo_axis, rhat, pseudo);
-      double dot = 0.0;
-      double gpseudo[9];
-      for (int k = 0; k < 9; ++k) {
-        dot += gpd[k] * pseudo[k];
-        gpseudo[k] = gpd[k] * weights[c];
-      }
-      grad_weight[c] += dot;
-      double g_axis[3] = {0.0, 0.0, 0.0};
-      double gu2[3] = {0.0, 0.0, 0.0};
-      add_stf_outer_gradient(gpseudo, pseudo_axis, rhat, g_axis, gu2);
-      double g_u_cross[3];
-      double g_qu[3];
-      cross3(qu, g_axis, g_u_cross);
-      cross3(g_axis, rhat, g_qu);
-      for (int a = 0; a < 3; ++a) {
-        grad_rhat[a] += gu2[a] + g_u_cross[a];
-        for (int b = 0; b < 3; ++b) {
-          grad_rhat[b] += qmat[3 * a + b] * g_qu[a];
-        }
-      }
-
-      const double* q_terms = grad_Q_terms + c * kSpinDeg2Count;
-      double m2[kSpinDeg2Count];
-      fill_spin_monomials2(rhat, m2);
-      grad_weight[c] += dot_spin_terms(q_terms, m2, kSpinDeg2Count);
-      grad_rhat[0] += weights[c] *
-          (2.0 * q_terms[0] * rhat[0] + q_terms[3] * rhat[1] +
-           q_terms[4] * rhat[2]);
-      grad_rhat[1] += weights[c] *
-          (2.0 * q_terms[1] * rhat[1] + q_terms[3] * rhat[0] +
-           q_terms[5] * rhat[2]);
-      grad_rhat[2] += weights[c] *
-          (2.0 * q_terms[2] * rhat[2] + q_terms[4] * rhat[0] +
-           q_terms[5] * rhat[1]);
+  }
+  if (active_atom && edge_lane == 0) {
+#pragma unroll
+    for (int d = 0; d < 3; ++d) {
+      atom_pulls->direct_mforce[d] = -direct_grad_si[d];
     }
+  }
+  __syncwarp(FullWarpMask);
 
-    double m2[kSpinDeg2Count];
-    double m3[kSpinDeg3Count];
-    double m4[kSpinDeg4Count];
-    fill_spin_monomials2(rhat, m2);
-    fill_spin_monomials(rhat, m3, m4);
-    for (int c = 0; c < chi_c; ++c) {
-      const double* o_terms = grad_O_terms + c * kSpinDeg3Count;
-      const double* o_derivatives = grad_O_derivatives + c * 3 * kSpinDeg2Count;
-      const double* h_terms = grad_H_terms + c * kSpinDeg4Count;
-      const double* h_derivatives = grad_H_derivatives + c * 3 * kSpinDeg3Count;
-      grad_weight[c] += dot_spin_terms(o_terms, m3, kSpinDeg3Count) +
-                        dot_spin_terms(h_terms, m4, kSpinDeg4Count);
-      for (int d = 0; d < 3; ++d) {
-        grad_rhat[d] += weights[c] *
-            (dot_spin_terms(
-                 o_derivatives + d * kSpinDeg2Count, m2, kSpinDeg2Count) +
-             dot_spin_terms(
-                 h_derivatives + d * kSpinDeg3Count, m3, kSpinDeg3Count));
-      }
-    }
-
-    double weighted_derivative = 0.0;
-    for (int c = 0; c < spin_compress; ++c) {
-      weighted_derivative += grad_weight[c] * weight_derivatives[c];
-    }
-    apply_edge_gradients(
+  float center_force[3] = {};
+  float center_mforce[3] = {};
+  float center_virial[VirialMode == SpinVirialMode::disabled ? 1 : 9] = {};
+  const int radial_count = active_atom ? nn_radial[atom] : 0;
+  for (int slot = edge_lane;
+       slot < radial_count;
+       slot += EdgesPerAtomBatch) {
+    const int neighbor = nl_radial[atom + atom_stride * slot];
+    float rhat[3];
+    float dist = 0.0f;
+    float edge_si[3];
+    float sj[3];
+    float weights[C];
+    float weight_derivatives[C];
+    if (!load_spin_edge_f32<C>(
         atom,
         neighbor,
         atom_stride,
-        dist,
+        num_types,
+        spin_basis_size,
+        spin_cutoff,
+        box,
+        types,
+        positions_soa3,
+        spins_soa3,
+        descriptor_coefficients,
+        spin_coefficient_offset,
         rhat,
-        si,
+        dist,
+        edge_si,
         sj,
-        1.0,
-        weighted_derivative,
-        grad_rhat,
-        grad_si,
-        grad_sj,
-        force_soa3,
-        mforce_soa3,
-        virial_mode,
-        virial_soa9);
+        weights,
+        weight_derivatives)) {
+      continue;
+    }
+    float m2[kSpinDeg2Count];
+    float m3[kSpinDeg3Count];
+    float m4[kSpinDeg4Count];
+    fill_spin_monomials2f(rhat, m2);
+    fill_spin_monomialsf(rhat, m3, m4);
+
+    float grad_weight[C] = {};
+    float grad_rhat[3] = {};
+    float grad_sj[3] = {};
+    for (int c = 0; c < C; ++c) {
+      const float w = weights[c];
+      const float* q_terms =
+          atom_pulls->geom_terms + c * kSpinDeg2Count;
+      grad_weight[c] +=
+          dot_spin_termsf(q_terms, m2, kSpinDeg2Count);
+      grad_rhat[0] += w *
+          (2.0f * q_terms[0] * rhat[0] + q_terms[3] * rhat[1] +
+           q_terms[4] * rhat[2]);
+      grad_rhat[1] += w *
+          (2.0f * q_terms[1] * rhat[1] + q_terms[3] * rhat[0] +
+           q_terms[5] * rhat[2]);
+      grad_rhat[2] += w *
+          (2.0f * q_terms[2] * rhat[2] + q_terms[4] * rhat[0] +
+           q_terms[5] * rhat[1]);
+
+      const float* grad_polar = atom_pulls->polar + c * 3;
+      grad_weight[c] += dot3f(grad_polar, rhat);
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += w * grad_polar[d];
+      }
+
+      const float* grad_raw1 = atom_pulls->raw1 + c * 9;
+      float grad_raw1_sj[3];
+      float grad_raw1_transpose_rhat[3];
+#pragma unroll
+      for (int a = 0; a < 3; ++a) {
+        grad_raw1_sj[a] =
+            grad_raw1[3 * a] * sj[0] +
+            grad_raw1[3 * a + 1] * sj[1] +
+            grad_raw1[3 * a + 2] * sj[2];
+      }
+#pragma unroll
+      for (int b = 0; b < 3; ++b) {
+        grad_raw1_transpose_rhat[b] =
+            grad_raw1[b] * rhat[0] +
+            grad_raw1[3 + b] * rhat[1] +
+            grad_raw1[6 + b] * rhat[2];
+      }
+      grad_weight[c] += dot3f(rhat, grad_raw1_sj);
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += w * grad_raw1_sj[d];
+        grad_sj[d] += w * grad_raw1_transpose_rhat[d];
+      }
+
+      const float grad_rdot = atom_pulls->rdot[c];
+      const float rhat_dot_sj = dot3f(rhat, sj);
+      grad_weight[c] += grad_rdot * rhat_dot_sj;
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += w * grad_rdot * sj[d];
+        grad_sj[d] += w * grad_rdot * rhat[d];
+      }
+
+      const float* grad_cross = atom_pulls->cross + c * 3;
+      float rhat_cross_sj[3];
+      float sj_cross_grad[3];
+      float grad_cross_rhat[3];
+      cross3f(rhat, sj, rhat_cross_sj);
+      cross3f(sj, grad_cross, sj_cross_grad);
+      cross3f(grad_cross, rhat, grad_cross_rhat);
+      grad_weight[c] += dot3f(grad_cross, rhat_cross_sj);
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += w * sj_cross_grad[d];
+        grad_sj[d] += w * grad_cross_rhat[d];
+      }
+
+      const float* octupole_terms =
+          atom_pulls->octupole_terms + c * kSpinDeg3Count;
+      grad_weight[c] +=
+          dot_spin_termsf(octupole_terms, m3, kSpinDeg3Count);
+      float octupole_gradient[3];
+      evaluate_spin_polynomial_gradientf(
+          3, octupole_terms, rhat, octupole_gradient);
+#pragma unroll
+      for (int d = 0; d < 3; ++d) {
+        grad_rhat[d] += w * octupole_gradient[d];
+      }
+
+      if (c < ChiC) {
+        const float* hexadecapole_terms =
+            atom_pulls->hexadecapole_terms + c * kSpinDeg4Count;
+        grad_weight[c] +=
+            dot_spin_termsf(hexadecapole_terms, m4, kSpinDeg4Count);
+        float hexadecapole_gradient[3];
+        evaluate_spin_polynomial_gradientf(
+            4, hexadecapole_terms, rhat, hexadecapole_gradient);
+#pragma unroll
+        for (int d = 0; d < 3; ++d) {
+          grad_rhat[d] += w * hexadecapole_gradient[d];
+        }
+      }
+    }
+
+    float grad_dist = 0.0f;
+#pragma unroll
+    for (int c = 0; c < C; ++c) {
+      grad_dist += grad_weight[c] * weight_derivatives[c];
+    }
+    const float dot_r = dot3f(grad_rhat, rhat);
+    float grad_rij[3];
+#pragma unroll
+    for (int d = 0; d < 3; ++d) {
+      grad_rij[d] =
+          grad_dist * rhat[d] + (grad_rhat[d] - dot_r * rhat[d]) / dist;
+      center_force[d] += grad_rij[d];
+      atomicAdd(
+          force_soa3 + d * atom_stride + neighbor,
+          -static_cast<double>(grad_rij[d]));
+      atomicAdd(
+          mforce_soa3 + d * atom_stride + neighbor,
+          -static_cast<double>(grad_sj[d]));
+    }
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+#pragma unroll
+      for (int a = 0; a < 3; ++a) {
+        const float rij_a = rhat[a] * dist;
+#pragma unroll
+        for (int b = 0; b < 3; ++b) {
+          center_virial[virial_internal_component(3 * a + b)] -=
+              rij_a * grad_rij[b];
+        }
+      }
+    }
+  }
+
+#pragma unroll
+  for (int offset = EdgesPerAtomBatch / 2; offset > 0; offset >>= 1) {
+#pragma unroll
+    for (int d = 0; d < 3; ++d) {
+      center_force[d] += __shfl_down_sync(
+          FullWarpMask, center_force[d], offset, EdgesPerAtomBatch);
+      center_mforce[d] += __shfl_down_sync(
+          FullWarpMask, center_mforce[d], offset, EdgesPerAtomBatch);
+    }
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+#pragma unroll
+      for (int component = 0; component < 9; ++component) {
+        center_virial[component] += __shfl_down_sync(
+            FullWarpMask,
+            center_virial[component],
+            offset,
+            EdgesPerAtomBatch);
+      }
+    }
+  }
+  if (active_atom && edge_lane == 0) {
+#pragma unroll
+    for (int d = 0; d < 3; ++d) {
+      atomicAdd(
+          force_soa3 + d * atom_stride + atom,
+          static_cast<double>(center_force[d]));
+      atomicAdd(
+          mforce_soa3 + d * atom_stride + atom,
+          static_cast<double>(center_mforce[d]) +
+              static_cast<double>(atom_pulls->direct_mforce[d]));
+    }
+    if constexpr (VirialMode != SpinVirialMode::disabled) {
+#pragma unroll
+      for (int component = 0; component < 9; ++component) {
+        const double value = static_cast<double>(center_virial[component]);
+        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
+          atomicAdd(virial_soa9 + component * atom_stride, value);
+        } else {
+          virial_soa9[component * atom_stride + atom] += value;
+        }
+      }
+    }
   }
 }

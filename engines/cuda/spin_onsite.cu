@@ -6,6 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace nep_adapters::cuda_backend {
@@ -19,10 +20,6 @@ constexpr int kSpinDeg3Count = 10;
 constexpr int kSpinDeg4Count = 15;
 constexpr int kSpinChiralOReducedCount = 7;
 constexpr int kSpinChiralHReducedCount = 9;
-constexpr int kSpinPrimitiveCount =
-    61 + kSpinChiralOReducedCount + kSpinChiralHReducedCount;
-constexpr int kSpinPrimitiveSlots = 88;
-constexpr int kSpinChiralQohCount = 300;
 
 enum class SpinVirialMode : int {
   disabled,
@@ -30,85 +27,84 @@ enum class SpinVirialMode : int {
   cpu_atom_decomposition,
 };
 
-__device__ __constant__ unsigned short kSpinChiralQohPacked[kSpinChiralQohCount] = {
-    20, 23, 29, 35, 37, 46, 52, 55, 61, 67, 69, 78,
-    86, 88, 92, 99, 101, 110, 118, 120, 124, 132, 135, 141,
-    145, 146, 153, 154, 278, 280, 284, 288, 289, 290, 297, 298,
-    299, 310, 312, 316, 320, 321, 322, 329, 330, 331, 340, 343,
-    349, 352, 353, 354, 361, 362, 363, 372, 375, 381, 390, 392,
-    396, 403, 405, 414, 528, 529, 530, 537, 538, 539, 550, 552,
-    556, 560, 561, 562, 569, 570, 571, 582, 584, 588, 595, 597,
-    606, 614, 616, 620, 627, 629, 638, 640, 641, 642, 649, 650,
-    651, 660, 663, 669, 772, 775, 781, 800, 801, 802, 809, 810,
-    811, 822, 824, 828, 832, 833, 834, 841, 842, 843, 852, 855,
-    861, 864, 865, 866, 873, 874, 875, 884, 887, 893, 902, 904,
-    908, 915, 917, 926, 1030, 1032, 1036, 1059, 1061, 1070, 1076, 1079,
-    1085, 1091, 1093, 1102, 1110, 1112, 1116, 1123, 1125, 1134, 1142, 1144,
-    1148, 1156, 1159, 1165, 1168, 1170, 1177, 1179, 1280, 1281, 1282, 1289,
-    1290, 1291, 1316, 1319, 1325, 1331, 1333, 1342, 1348, 1351, 1357, 1360,
-    1361, 1362, 1369, 1370, 1371, 1380, 1383, 1389, 1392, 1393, 1394, 1401,
-    1402, 1403, 1411, 1413, 1422, 1430, 1432, 1436, 1539, 1541, 1550, 1552,
-    1553, 1554, 1561, 1562, 1563, 1584, 1585, 1586, 1593, 1594, 1595, 1606,
-    1608, 1612, 1619, 1621, 1630, 1638, 1640, 1644, 1651, 1653, 1662, 1664,
-    1665, 1666, 1673, 1674, 1675, 1684, 1687, 1693, 1792, 1793, 1794, 1801,
-    1802, 1803, 1811, 1813, 1822, 1843, 1845, 1854, 1860, 1863, 1869, 1872,
-    1873, 1874, 1881, 1882, 1883, 1892, 1895, 1901, 1904, 1905, 1906, 1913,
-    1914, 1915, 1923, 1925, 1934, 1942, 1944, 1948, 2054, 2056, 2060, 2068,
-    2071, 2077, 2100, 2103, 2109, 2115, 2117, 2126, 2134, 2136, 2140, 2147,
-    2149, 2158, 2166, 2168, 2172, 2180, 2183, 2189, 2192, 2193, 2202, 2203,
-};
+template <typename Launch>
+void dispatch_spin_virial_mode(
+    SpinVirialMode virial_mode,
+    const Launch& launch) {
+  switch (virial_mode) {
+    case SpinVirialMode::disabled:
+      launch(std::integral_constant<SpinVirialMode, SpinVirialMode::disabled>{});
+      break;
+    case SpinVirialMode::center_owned:
+      launch(std::integral_constant<SpinVirialMode, SpinVirialMode::center_owned>{});
+      break;
+    case SpinVirialMode::cpu_atom_decomposition:
+      launch(std::integral_constant<
+             SpinVirialMode,
+             SpinVirialMode::cpu_atom_decomposition>{});
+      break;
+  }
+}
 
-__device__ __constant__ double kSpinChiralQohCoeff[kSpinChiralQohCount] = {
-    -1.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, 1.0 / 7.0, 1.0 / 7.0, -6.0 / 7.0,
-    4.0 / 7.0, -3.0 / 7.0, -3.0 / 7.0, -4.0 / 7.0, 3.0 / 7.0, 3.0 / 7.0,
-    -2.0 / 7.0, -2.0 / 7.0, 12.0 / 7.0, 1.0 / 7.0, -6.0 / 7.0, 15.0 / 7.0,
-    2.0 / 7.0, 2.0 / 7.0, -12.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, -15.0 / 7.0,
-    2.0 / 7.0, -2.0 / 7.0, -12.0 / 7.0, 12.0 / 7.0, 4.0 / 7.0, -3.0 / 7.0,
-    -3.0 / 7.0, -1.0 / 35.0, 4.0 / 35.0, 4.0 / 35.0, 3.0 / 35.0, 3.0 / 35.0,
-    -27.0 / 35.0, -1.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, 4.0 / 35.0, 4.0 / 35.0,
-    -1.0 / 35.0, -27.0 / 35.0, 3.0 / 35.0, 3.0 / 35.0, -2.0 / 7.0, -2.0 / 7.0,
-    12.0 / 7.0, -1.0 / 35.0, -16.0 / 35.0, -11.0 / 35.0, 18.0 / 35.0, -12.0 / 35.0,
-    78.0 / 35.0, 2.0 / 7.0, 2.0 / 7.0, -12.0 / 7.0, -11.0 / 7.0, 10.0 / 7.0,
-    3.0 / 7.0, 4.0 / 7.0, -10.0 / 7.0, 18.0 / 7.0, 1.0 / 35.0, -4.0 / 35.0,
-    -4.0 / 35.0, -3.0 / 35.0, -3.0 / 35.0, 27.0 / 35.0, 3.0 / 7.0, -4.0 / 7.0,
-    3.0 / 7.0, -4.0 / 35.0, 1.0 / 35.0, -4.0 / 35.0, -3.0 / 35.0, 27.0 / 35.0,
-    -3.0 / 35.0, 1.0 / 7.0, 1.0 / 7.0, -6.0 / 7.0, -2.0 / 7.0, -2.0 / 7.0,
-    12.0 / 7.0, -10.0 / 7.0, 11.0 / 7.0, -3.0 / 7.0, 2.0 / 7.0, 2.0 / 7.0,
-    -12.0 / 7.0, 1.0 / 35.0, 11.0 / 35.0, 16.0 / 35.0, 12.0 / 35.0, -18.0 / 35.0,
-    -78.0 / 35.0, -4.0 / 7.0, 10.0 / 7.0, -18.0 / 7.0, -4.0 / 7.0, 3.0 / 7.0,
-    3.0 / 7.0, -4.0 / 35.0, 1.0 / 35.0, -4.0 / 35.0, -3.0 / 35.0, 27.0 / 35.0,
-    -3.0 / 35.0, 2.0 / 7.0, 2.0 / 7.0, -12.0 / 7.0, 16.0 / 35.0, 1.0 / 35.0,
-    11.0 / 35.0, -18.0 / 35.0, -78.0 / 35.0, 12.0 / 35.0, 1.0 / 7.0, 1.0 / 7.0,
-    -6.0 / 7.0, -4.0 / 35.0, -4.0 / 35.0, 1.0 / 35.0, 27.0 / 35.0, -3.0 / 35.0,
-    -3.0 / 35.0, 11.0 / 7.0, -10.0 / 7.0, -3.0 / 7.0, -2.0 / 7.0, -2.0 / 7.0,
-    12.0 / 7.0, 10.0 / 7.0, -4.0 / 7.0, -18.0 / 7.0, 1.0 / 7.0, 1.0 / 7.0,
-    -6.0 / 7.0, -1.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, 2.0 / 7.0, 2.0 / 7.0,
-    -12.0 / 7.0, 6.0 / 7.0, -1.0 / 7.0, -15.0 / 7.0, -4.0 / 7.0, 3.0 / 7.0,
-    3.0 / 7.0, -3.0 / 7.0, 4.0 / 7.0, -3.0 / 7.0, 1.0 / 7.0, -6.0 / 7.0,
-    15.0 / 7.0, -2.0 / 7.0, -2.0 / 7.0, 12.0 / 7.0, -2.0 / 7.0, 2.0 / 7.0,
-    12.0 / 7.0, -12.0 / 7.0, 4.0 / 35.0, -1.0 / 35.0, 4.0 / 35.0, 3.0 / 35.0,
-    -27.0 / 35.0, 3.0 / 35.0, -3.0 / 7.0, 4.0 / 7.0, -3.0 / 7.0, 2.0 / 7.0,
-    2.0 / 7.0, -12.0 / 7.0, 10.0 / 7.0, -11.0 / 7.0, 3.0 / 7.0, -1.0 / 35.0,
-    4.0 / 35.0, 4.0 / 35.0, 3.0 / 35.0, 3.0 / 35.0, -27.0 / 35.0, -1.0 / 7.0,
-    -1.0 / 7.0, 6.0 / 7.0, -11.0 / 35.0, -1.0 / 35.0, -16.0 / 35.0, -12.0 / 35.0,
-    78.0 / 35.0, 18.0 / 35.0, -2.0 / 7.0, -2.0 / 7.0, 12.0 / 7.0, 4.0 / 7.0,
-    -10.0 / 7.0, 18.0 / 7.0, 4.0 / 7.0, -3.0 / 7.0, -3.0 / 7.0, 4.0 / 35.0,
-    4.0 / 35.0, -1.0 / 35.0, -27.0 / 35.0, 3.0 / 35.0, 3.0 / 35.0, -16.0 / 35.0,
-    -11.0 / 35.0, -1.0 / 35.0, 78.0 / 35.0, 18.0 / 35.0, -12.0 / 35.0, -2.0 / 7.0,
-    -2.0 / 7.0, 12.0 / 7.0, -11.0 / 7.0, 10.0 / 7.0, 3.0 / 7.0, 2.0 / 7.0,
-    2.0 / 7.0, -12.0 / 7.0, -1.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, 4.0 / 35.0,
-    -1.0 / 35.0, 4.0 / 35.0, 3.0 / 35.0, -27.0 / 35.0, 3.0 / 35.0, -10.0 / 7.0,
-    4.0 / 7.0, 18.0 / 7.0, -4.0 / 35.0, -4.0 / 35.0, 1.0 / 35.0, 27.0 / 35.0,
-    -3.0 / 35.0, -3.0 / 35.0, 3.0 / 7.0, -4.0 / 7.0, 3.0 / 7.0, -10.0 / 7.0,
-    11.0 / 7.0, -3.0 / 7.0, -2.0 / 7.0, -2.0 / 7.0, 12.0 / 7.0, 11.0 / 35.0,
-    16.0 / 35.0, 1.0 / 35.0, -78.0 / 35.0, 12.0 / 35.0, -18.0 / 35.0, 2.0 / 7.0,
-    2.0 / 7.0, -12.0 / 7.0, 1.0 / 35.0, -4.0 / 35.0, -4.0 / 35.0, -3.0 / 35.0,
-    -3.0 / 35.0, 27.0 / 35.0, 1.0 / 7.0, 1.0 / 7.0, -6.0 / 7.0, 10.0 / 7.0,
-    -4.0 / 7.0, -18.0 / 7.0, -1.0 / 7.0, -1.0 / 7.0, 6.0 / 7.0, 1.0 / 7.0,
-    1.0 / 7.0, -6.0 / 7.0, -6.0 / 7.0, 1.0 / 7.0, 15.0 / 7.0, -2.0 / 7.0,
-    -2.0 / 7.0, 12.0 / 7.0, 6.0 / 7.0, -1.0 / 7.0, -15.0 / 7.0, 2.0 / 7.0,
-    2.0 / 7.0, -12.0 / 7.0, -3.0 / 7.0, 4.0 / 7.0, -3.0 / 7.0, 3.0 / 7.0,
-    -4.0 / 7.0, 3.0 / 7.0, 2.0 / 7.0, -2.0 / 7.0, -12.0 / 7.0, 12.0 / 7.0,
+template <typename Launch>
+void dispatch_spin_channels(int channels, const Launch& launch) {
+  switch (channels) {
+    case 1:
+      launch(std::integral_constant<int, 1>{});
+      break;
+    case 2:
+      launch(std::integral_constant<int, 2>{});
+      break;
+    case 3:
+      launch(std::integral_constant<int, 3>{});
+      break;
+    case 4:
+      launch(std::integral_constant<int, 4>{});
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
+  }
+}
+
+template <typename Launch>
+void dispatch_spin_lmax(int l_max, const Launch& launch) {
+  switch (l_max) {
+    case 0:
+      launch(std::integral_constant<int, 0>{});
+      break;
+    case 1:
+      launch(std::integral_constant<int, 1>{});
+      break;
+    case 2:
+      launch(std::integral_constant<int, 2>{});
+      break;
+    case 3:
+      launch(std::integral_constant<int, 3>{});
+      break;
+    case 4:
+      launch(std::integral_constant<int, 4>{});
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports l_max from 0 to 4");
+  }
+}
+
+template <int C, int LMax>
+struct SpinStaticLayout {
+  static constexpr int Rho0Offset = 2 + 4 * C;
+  static constexpr int L1RdotOffset = Rho0Offset + C;
+  static constexpr int L1CrossOffset = L1RdotOffset + C;
+  static constexpr int L1StfOffset = L1CrossOffset + C;
+  static constexpr int Angular2Offset =
+      Rho0Offset + C + (LMax >= 1 ? 3 * C : 0);
+  static constexpr int Angular3Offset =
+      Angular2Offset + (LMax >= 2 ? C : 0);
+  static constexpr int Angular4Offset =
+      Angular3Offset + (LMax >= 3 ? C : 0);
+  static constexpr int GeomOffset =
+      Angular4Offset + (LMax >= 4 ? C : 0);
+  static constexpr int Rho0DotOffset = GeomOffset + C;
+  static constexpr int Raw1DotOffset = Rho0DotOffset + C;
 };
 
 // Exact Tucker reduction of the STF-projected pseudoscalar
@@ -204,149 +200,113 @@ class PhaseTimer {
 #include "spin_onsite_descriptors.cuh"
 #include "spin_onsite_forces.cuh"
 
-template <bool AtomMajor>
-void launch_spin_density_forces_c4_l4(
+void launch_spin_density_forces(
     const ModelProtocol& protocol,
     int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    SpinVirialMode virial_mode,
-    int blocks,
-    int threads) {
-  if constexpr (AtomMajor) {
-    if (virial_mode != SpinVirialMode::disabled) {
-      prepare_spin_density_pulls_c4_l4<true><<<blocks, threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.struct_descriptor_dim,
-          view.spins_soa3,
-          view.fp,
-          view.spin_density_rho0,
-          view.spin_density_l1_rdot,
-          view.spin_density_l1_cross,
-          view.spin_density_l1_stf,
-          view.spin_density_angular2,
-          view.spin_density_angular3,
-          view.spin_density_angular4,
-          view.spin_density_geom,
-          view.spin_density_rho0_dot,
-          view.spin_density_raw1,
-          view.spin_density_raw1_dot,
-          view.mforce_soa3);
-    }
-  } else {
-    prepare_spin_density_pulls_c4_l4<AtomMajor><<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        view.spins_soa3,
-        view.fp,
-        view.spin_density_rho0,
-        view.spin_density_l1_rdot,
-        view.spin_density_l1_cross,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_geom,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1,
-        view.spin_density_raw1_dot,
-        view.mforce_soa3);
-  }
-  if (virial_mode != SpinVirialMode::disabled) {
-    accumulate_spin_density_forces_c4_l4_pull<AtomMajor><<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        view.spin_density_rho0,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_raw1,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1_dot,
-        view.force_soa3,
-        view.mforce_soa3,
-        virial_mode,
-        view.virial_soa9);
-  } else {
-    accumulate_spin_density_forces_c4_l4_block_f32<AtomMajor>
-        <<<atom_count, threads>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.fp,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_edge_weight_derivatives,
-            view.spin_density_rho0,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
-            view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1,
-            view.spin_density_raw1_dot,
-            view.force_soa3,
-            view.mforce_soa3);
-  }
+    SpinVirialMode virial_mode) {
+  const auto launch_channels = [&](auto channel_tag) {
+    constexpr int C = decltype(channel_tag)::value;
+    const auto launch_lmax = [&](auto lmax_tag) {
+      constexpr int LMax = decltype(lmax_tag)::value;
+      const auto launch_virial = [&](auto virial_tag) {
+        constexpr int AtomsPerWarp = 8;
+        constexpr int EdgesPerAtomBatch = 4;
+        constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
+        const int tile_blocks =
+            (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+        accumulate_spin_density_forces_tile_f32<
+            C,
+            LMax,
+            VirialMode,
+            AtomsPerWarp,
+            EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+                atom_count,
+                static_cast<int>(view.atom_capacity),
+                protocol.struct_descriptor_dim,
+                protocol.num_types,
+                protocol.spin_basis_size,
+                static_cast<float>(protocol.spin_cutoff_radial),
+                box,
+                view.types,
+                view.positions_soa3,
+                view.spins_soa3,
+                view.nn_radial,
+                view.nl_radial_slot_major,
+                view.fp,
+                model_view.descriptor_coefficients,
+                static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+                view.spin_density_rho0,
+                view.spin_density_angular2,
+                view.spin_density_angular3,
+                view.spin_density_angular4,
+                view.spin_density_geom,
+                view.spin_density_rho0_dot,
+                view.spin_density_raw1,
+                view.spin_density_raw1_dot,
+                view.force_soa3,
+                view.mforce_soa3,
+                view.virial_soa9);
+      };
+      dispatch_spin_virial_mode(virial_mode, launch_virial);
+    };
+    dispatch_spin_lmax(protocol.spin_l_max, launch_lmax);
+  };
+  dispatch_spin_channels(protocol.spin_compress, launch_channels);
 }
 
-template <bool AtomMajor>
-void launch_spin_chiral_forces_c4_l4(
+void launch_spin_chiral_forces(
     const ModelProtocol& protocol,
     int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    SpinVirialMode virial_mode,
-    int blocks,
-    int threads) {
-  accumulate_spin_chiral_forces_c4_l4_cached_f32<AtomMajor><<<blocks, threads>>>(
-      atom_count,
-      static_cast<int>(view.atom_capacity),
-      protocol.struct_descriptor_dim,
-      static_cast<float>(protocol.spin_cutoff_radial),
-      view.spins_soa3,
-      view.nn_radial,
-      view.nl_radial_slot_major,
-      view.fp,
-      view.spin_edge_dx,
-      view.spin_edge_dy,
-      view.spin_edge_dz,
-      view.spin_edge_dist,
-      view.spin_edge_weights,
-      view.spin_edge_weight_derivatives,
-      view.spin_density_geom,
-      view.spin_chiral_polar,
-      view.spin_chiral_octupoles_raw,
-      view.spin_chiral_hexadecapoles_raw,
-      view.spin_chiral_chirals,
-      view.spin_chiral_pseudodevs,
-      view.force_soa3,
-      view.mforce_soa3,
-      virial_mode,
-      view.virial_soa9);
+    SpinVirialMode virial_mode) {
+  const SpinCoreLayout layout = make_spin_core_layout(protocol);
+  const auto launch_channels = [&](auto channel_tag) {
+    constexpr int C = decltype(channel_tag)::value;
+    const auto launch_virial = [&](auto virial_tag) {
+      constexpr int AtomsPerWarp = 8;
+      constexpr int EdgesPerAtomBatch = 4;
+      constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
+      const int tile_blocks =
+          (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+      accumulate_spin_chiral_forces_tile_f32<
+          C,
+          VirialMode,
+          AtomsPerWarp,
+          EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+              atom_count,
+              static_cast<int>(view.atom_capacity),
+              protocol.struct_descriptor_dim,
+              protocol.num_types,
+              protocol.spin_basis_size,
+              layout,
+              static_cast<float>(protocol.spin_cutoff_radial),
+              box,
+              view.types,
+              view.positions_soa3,
+              view.spins_soa3,
+              view.nn_radial,
+              view.nl_radial_slot_major,
+              view.fp,
+              model_view.descriptor_coefficients,
+              static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+              view.spin_density_geom,
+              view.spin_density_raw1,
+              view.spin_chiral_polar,
+              view.spin_chiral_octupoles_raw,
+              view.spin_chiral_hexadecapoles_raw,
+              view.spin_chiral_chirals,
+              view.force_soa3,
+              view.mforce_soa3,
+              view.virial_soa9);
+    };
+    dispatch_spin_virial_mode(virial_mode, launch_virial);
+  };
+  dispatch_spin_channels(protocol.spin_compress, launch_channels);
 }
 
 }  // namespace
@@ -358,6 +318,10 @@ void build_spin_descriptors_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace) {
   require(protocol.spin_mode != 0, "spin descriptor requires spin model");
+  require(
+      supports_cuda_spin_shape(protocol),
+      "CUDA spin core requires 1 <= spin_compress <= 4, "
+      "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
   require(protocol.spin_descriptor_dim > 0, "spin descriptor dimension must be positive");
   require(protocol.spin_descriptor_dim <= 96,
           "spin descriptor kernel supports spin descriptor dim <= 96");
@@ -374,6 +338,9 @@ void build_spin_descriptors_on_device(
           "CUDA spin path currently requires all types active for spin dof/env");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
+  const SpinCoreLayout layout = make_spin_core_layout(protocol);
+  require(layout.descriptor_dim == protocol.spin_descriptor_dim,
+          "spin descriptor layout does not match model protocol");
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
@@ -384,12 +351,6 @@ void build_spin_descriptors_on_device(
   require(view.descriptors != nullptr, "workspace missing descriptors");
   require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
   require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
-  require(view.spin_density_l1_rdot != nullptr,
-          "workspace missing spin density l1 rdot");
-  require(view.spin_density_l1_cross != nullptr,
-          "workspace missing spin density l1 cross");
-  require(view.spin_density_l1_stf != nullptr,
-          "workspace missing spin density l1 stf");
   require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
           "workspace missing spin density angular2");
   require(protocol.spin_l_max < 3 || view.spin_density_angular3 != nullptr,
@@ -401,13 +362,6 @@ void build_spin_descriptors_on_device(
           "workspace missing spin density rho0 dot");
   require(view.spin_density_raw1_dot != nullptr,
           "workspace missing spin density raw1 dot");
-  require(view.spin_edge_dx != nullptr, "workspace missing spin edge dx");
-  require(view.spin_edge_dy != nullptr, "workspace missing spin edge dy");
-  require(view.spin_edge_dz != nullptr, "workspace missing spin edge dz");
-  require(view.spin_edge_dist != nullptr, "workspace missing spin edge dist");
-  require(view.spin_edge_weights != nullptr, "workspace missing spin edge weights");
-  require(view.spin_edge_weight_derivatives != nullptr,
-          "workspace missing spin edge weight derivatives");
   require(protocol.spin_chiral == 0 || view.spin_chiral_polar != nullptr,
           "workspace missing spin chiral polar");
   require(protocol.spin_chiral == 0 || view.spin_chiral_octupoles_raw != nullptr,
@@ -416,218 +370,73 @@ void build_spin_descriptors_on_device(
           "workspace missing spin chiral hexadecapoles raw");
   require(protocol.spin_chiral == 0 || view.spin_chiral_chirals != nullptr,
           "workspace missing spin chiral chirals");
-  require(protocol.spin_chiral == 0 || view.spin_chiral_pseudodevs != nullptr,
-          "workspace missing spin chiral pseudodevs");
   require(model_view.descriptor_coefficients != nullptr,
           "model missing descriptor coefficients");
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
-  const bool use_c4_l4_chiral =
-      protocol.spin_compress == 4 && protocol.spin_basis_size == 3 &&
-      protocol.spin_l_max == 4 && protocol.spin_chiral != 0;
-  if (use_c4_l4_chiral) {
-    const int edge_threads = 256;
-    const int edge_items = atom_count * protocol.neighbor_capacity_radial;
-    const int edge_blocks = (edge_items + edge_threads - 1) / edge_threads;
-    if (edge_blocks > 0) {
-      precompute_spin_edge_weights_c4<<<edge_blocks, edge_threads>>>(
-          atom_count,
-          static_cast<int>(view.atom_capacity),
-          protocol.neighbor_capacity_radial,
-          protocol.num_types,
-          static_cast<float>(protocol.spin_cutoff_radial),
-          box,
-          view.types,
-          view.positions_soa3,
-          view.nn_radial,
-          view.nl_radial_slot_major,
-          model_view.descriptor_coefficients,
-          static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-          view.spin_edge_dx,
-          view.spin_edge_dy,
-          view.spin_edge_dz,
-          view.spin_edge_dist,
-          view.spin_edge_weights,
-          view.spin_edge_weight_derivatives);
-    }
-    const int threads = 128;
-    const int work_items = atom_count * 4;
-    const int blocks = (work_items + threads - 1) / threads;
-    if (blocks > 0) {
-      if (protocol.neighbor_capacity_radial <= 32) {
-        build_spin_primitive_cache_c4_l4_warp<32, true><<<atom_count, 128>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_density_rho0,
-            view.spin_density_raw1,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
-            view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1_dot,
-            view.spin_chiral_polar,
-            view.spin_chiral_octupoles_raw,
-            view.spin_chiral_hexadecapoles_raw,
-            view.descriptors);
-      } else if (protocol.neighbor_capacity_radial <= kSpinPrimitiveSlots) {
-        build_spin_primitive_cache_c4_l4_warp<kSpinPrimitiveSlots, false>
-            <<<atom_count, 128>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_density_rho0,
-            view.spin_density_raw1,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
-            view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1_dot,
-            view.spin_chiral_polar,
-            view.spin_chiral_octupoles_raw,
-            view.spin_chiral_hexadecapoles_raw,
-            view.descriptors);
-      } else {
-        build_spin_descriptors_c4_l4_basic<<<blocks, threads>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_density_rho0,
-            view.spin_density_raw1,
-            view.spin_density_l1_rdot,
-            view.spin_density_l1_cross,
-            view.spin_density_l1_stf,
-            view.spin_density_angular2,
-            view.spin_density_angular3,
-            view.spin_density_angular4,
-            view.spin_density_geom,
-            view.spin_density_rho0_dot,
-            view.spin_density_raw1_dot,
-            view.spin_chiral_polar,
-            view.spin_chiral_octupoles_raw,
-            view.spin_chiral_hexadecapoles_raw,
-            view.descriptors);
-      }
-      if (protocol.neighbor_capacity_radial <= 32) {
-        build_spin_chiral_finalize_c4_l4_f32<true><<<blocks, threads>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_density_geom,
-            view.spin_chiral_polar,
-            view.spin_chiral_octupoles_raw,
-            view.spin_chiral_hexadecapoles_raw,
-            view.spin_chiral_chirals,
-            view.spin_chiral_pseudodevs,
-            view.descriptors);
-      } else {
-        build_spin_chiral_finalize_c4_l4_f32<false><<<blocks, threads>>>(
-            atom_count,
-            static_cast<int>(view.atom_capacity),
-            protocol.struct_descriptor_dim,
-            static_cast<float>(protocol.spin_cutoff_radial),
-            view.spins_soa3,
-            view.nn_radial,
-            view.nl_radial_slot_major,
-            view.spin_edge_dx,
-            view.spin_edge_dy,
-            view.spin_edge_dz,
-            view.spin_edge_dist,
-            view.spin_edge_weights,
-            view.spin_density_geom,
-            view.spin_chiral_polar,
-            view.spin_chiral_octupoles_raw,
-            view.spin_chiral_hexadecapoles_raw,
-            view.spin_chiral_chirals,
-            view.spin_chiral_pseudodevs,
-            view.descriptors);
-      }
-    }
-  } else {
-    const int threads = 32;
-    const int blocks = (atom_count + threads - 1) / threads;
-    if (blocks > 0) {
-    build_spin_descriptors<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        protocol.spin_descriptor_dim,
-        protocol.num_types,
-        protocol.spin_compress,
-        protocol.spin_basis_size,
-        protocol.spin_l_max,
-        protocol.spin_chiral,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        box,
-        view.types,
-        view.positions_soa3,
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        model_view.descriptor_coefficients,
-        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-        view.spin_density_rho0,
-        view.spin_density_raw1,
-        view.spin_density_l1_rdot,
-        view.spin_density_l1_cross,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_geom,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1_dot,
-        view.spin_chiral_polar,
-        view.spin_chiral_octupoles_raw,
-        view.spin_chiral_hexadecapoles_raw,
-        view.spin_chiral_chirals,
-        view.spin_chiral_pseudodevs,
-        view.descriptors);
-    }
+  if (atom_count > 0) {
+    const auto launch_channels = [&](auto channel_tag) {
+      constexpr int C = decltype(channel_tag)::value;
+      const auto launch_lmax = [&](auto lmax_tag) {
+        constexpr int LMax = decltype(lmax_tag)::value;
+        const auto launch_core = [&](auto chiral_tag) {
+          constexpr bool Chiral = decltype(chiral_tag)::value;
+          build_spin_descriptor_core_streaming<
+              C,
+              LMax,
+              Chiral><<<atom_count, 128>>>(
+                  atom_count,
+                  static_cast<int>(view.atom_capacity),
+                  protocol.struct_descriptor_dim,
+                  protocol.num_types,
+                  protocol.spin_basis_size,
+                  static_cast<float>(protocol.spin_cutoff_radial),
+                  box,
+                  view.types,
+                  view.positions_soa3,
+                  view.spins_soa3,
+                  view.nn_radial,
+                  view.nl_radial_slot_major,
+                  model_view.descriptor_coefficients,
+                  static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+                  view.spin_density_rho0,
+                  view.spin_density_raw1,
+                  view.spin_density_angular2,
+                  view.spin_density_angular3,
+                  view.spin_density_angular4,
+                  view.spin_density_geom,
+                  view.spin_density_rho0_dot,
+                  view.spin_density_raw1_dot,
+                  view.spin_chiral_polar,
+                  view.spin_chiral_octupoles_raw,
+                  view.spin_chiral_hexadecapoles_raw,
+                  view.descriptors);
+        };
+        if (protocol.spin_chiral != 0) {
+          launch_core(std::true_type{});
+          const int threads = 128;
+          const int work_items = atom_count * C;
+          const int blocks = (work_items + threads - 1) / threads;
+          build_spin_chiral_descriptors_f32<C><<<blocks, threads>>>(
+              atom_count,
+              static_cast<int>(view.atom_capacity),
+              protocol.struct_descriptor_dim,
+              layout,
+              view.spins_soa3,
+              view.spin_density_geom,
+              view.spin_density_raw1,
+              view.spin_chiral_polar,
+              view.spin_chiral_octupoles_raw,
+              view.spin_chiral_hexadecapoles_raw,
+              view.spin_chiral_chirals,
+              view.descriptors);
+        } else {
+          launch_core(std::false_type{});
+        }
+      };
+      dispatch_spin_lmax(protocol.spin_l_max, launch_lmax);
+    };
+    dispatch_spin_channels(protocol.spin_compress, launch_channels);
   }
   check_cuda(cudaGetLastError(), "build spin descriptors kernel launch failed");
 }
@@ -656,89 +465,6 @@ static void accumulate_spin_onsite_mforces_impl(
         view.mforce_soa3);
   }
   check_cuda(cudaGetLastError(), "accumulate spin onsite mforces");
-}
-
-static void accumulate_spin_scalar_forces_impl(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    SpinVirialMode virial_mode) {
-  require(protocol.spin_mode != 0, "spin scalar force requires spin model");
-  require(protocol.spin_compress > 0 &&
-              protocol.spin_compress <= kMaxSpinCompress,
-          "spin scalar force kernel supports spin_compress <= 4");
-  require(protocol.spin_basis_size >= 0 &&
-              protocol.spin_basis_size + 1 <= kMaxSpinBasis,
-          "spin scalar force kernel supports spin_basis_size + 1 <= 8");
-  require(all_active(protocol.spin_dof_type_active, protocol.num_types) &&
-              all_active(protocol.spin_env_type_active, protocol.num_types),
-          "CUDA spin path currently requires all types active for spin dof/env");
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView view = workspace.view();
-  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(view.types != nullptr, "workspace missing types");
-  require(view.positions_soa3 != nullptr, "workspace missing positions");
-  require(view.spins_soa3 != nullptr, "workspace missing spins");
-  require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
-  require(view.nl_radial_slot_major != nullptr, "workspace missing radial neighbors");
-  require(view.fp != nullptr, "workspace missing descriptor derivatives");
-  require(view.force_soa3 != nullptr, "workspace missing forces");
-  require(view.mforce_soa3 != nullptr, "workspace missing mforces");
-  require(view.virial_soa9 != nullptr, "workspace missing virials");
-  require(model_view.descriptor_coefficients != nullptr,
-          "model missing descriptor coefficients");
-  require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
-          "model descriptor coefficient buffer is too small");
-  const bool use_cached_geometry =
-      protocol.spin_compress == 4 && protocol.spin_basis_size == 3 &&
-      protocol.spin_l_max == 4 && protocol.spin_chiral != 0;
-  require(!use_cached_geometry || view.spin_edge_dx != nullptr,
-          "workspace missing spin edge dx");
-  require(!use_cached_geometry || view.spin_edge_dy != nullptr,
-          "workspace missing spin edge dy");
-  require(!use_cached_geometry || view.spin_edge_dz != nullptr,
-          "workspace missing spin edge dz");
-  require(!use_cached_geometry || view.spin_edge_dist != nullptr,
-          "workspace missing spin edge dist");
-  if (use_cached_geometry && virial_mode == SpinVirialMode::disabled) {
-    return;
-  }
-  const int threads = 32;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0) {
-    accumulate_spin_scalar_forces<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        protocol.num_types,
-        protocol.spin_compress,
-        protocol.spin_basis_size,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        box,
-        view.types,
-        view.positions_soa3,
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        model_view.descriptor_coefficients,
-        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        use_cached_geometry,
-        view.force_soa3,
-        view.mforce_soa3,
-        virial_mode,
-        view.virial_soa9);
-  }
-  check_cuda(cudaGetLastError(), "accumulate spin scalar forces");
 }
 
 static void accumulate_spin_density_forces_impl(
@@ -775,12 +501,6 @@ static void accumulate_spin_density_forces_impl(
   require(view.virial_soa9 != nullptr, "workspace missing virials");
   require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
   require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
-  require(view.spin_density_l1_rdot != nullptr,
-          "workspace missing spin density l1 rdot");
-  require(view.spin_density_l1_cross != nullptr,
-          "workspace missing spin density l1 cross");
-  require(view.spin_density_l1_stf != nullptr,
-          "workspace missing spin density l1 stf");
   require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
           "workspace missing spin density angular2");
   require(protocol.spin_l_max < 3 || view.spin_density_angular3 != nullptr,
@@ -792,80 +512,18 @@ static void accumulate_spin_density_forces_impl(
           "workspace missing spin density rho0 dot");
   require(view.spin_density_raw1_dot != nullptr,
           "workspace missing spin density raw1 dot");
-  require(view.spin_edge_weights != nullptr, "workspace missing spin edge weights");
-  require(view.spin_edge_weight_derivatives != nullptr,
-          "workspace missing spin edge weight derivatives");
   require(model_view.descriptor_coefficients != nullptr,
           "model missing descriptor coefficients");
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
-  const bool use_cached_geometry =
-      protocol.spin_compress == 4 && protocol.spin_basis_size == 3 &&
-      protocol.spin_l_max == 4 && protocol.spin_chiral != 0;
-  require(!use_cached_geometry || view.spin_edge_dx != nullptr,
-          "workspace missing spin edge dx");
-  require(!use_cached_geometry || view.spin_edge_dy != nullptr,
-          "workspace missing spin edge dy");
-  require(!use_cached_geometry || view.spin_edge_dz != nullptr,
-          "workspace missing spin edge dz");
-  require(!use_cached_geometry || view.spin_edge_dist != nullptr,
-          "workspace missing spin edge dist");
-  const int threads = 32;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0 && use_cached_geometry) {
-    if (protocol.neighbor_capacity_radial <= 32) {
-      launch_spin_density_forces_c4_l4<true>(
-          protocol, atom_count, view, virial_mode, blocks, threads);
-    } else {
-      launch_spin_density_forces_c4_l4<false>(
-          protocol, atom_count, view, virial_mode, blocks, threads);
-    }
-  } else if (blocks > 0) {
-    accumulate_spin_density_forces<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        protocol.num_types,
-        protocol.spin_compress,
-        protocol.spin_basis_size,
-        protocol.spin_l_max,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        box,
-        view.types,
-        view.positions_soa3,
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        model_view.descriptor_coefficients,
-        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-        view.spin_edge_dx,
-        view.spin_edge_dy,
-        view.spin_edge_dz,
-        view.spin_edge_dist,
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        use_cached_geometry,
-        view.spin_density_rho0,
-        view.spin_density_raw1,
-        view.spin_density_l1_rdot,
-        view.spin_density_l1_cross,
-        view.spin_density_l1_stf,
-        view.spin_density_angular2,
-        view.spin_density_angular3,
-        view.spin_density_angular4,
-        view.spin_density_geom,
-        view.spin_density_rho0_dot,
-        view.spin_density_raw1_dot,
-        view.force_soa3,
-        view.mforce_soa3,
-        virial_mode,
-        view.virial_soa9);
+  if (atom_count > 0) {
+    launch_spin_density_forces(
+        protocol, atom_count, box, model_view, view, virial_mode);
   }
   check_cuda(cudaGetLastError(), "accumulate spin density forces");
 }
 
-static void accumulate_spin_chiral_polar_forces_impl(
+static void accumulate_spin_chiral_forces_impl(
     const ModelProtocol& protocol,
     int atom_count,
     const SimulationBox& box,
@@ -874,14 +532,9 @@ static void accumulate_spin_chiral_polar_forces_impl(
     SpinVirialMode virial_mode) {
   require(protocol.spin_mode != 0, "spin chiral polar force requires spin model");
   require(protocol.spin_chiral != 0, "spin chiral polar force requires chiral model");
-  require(protocol.spin_compress > 0 &&
-              protocol.spin_compress <= kMaxSpinCompress,
-          "spin chiral polar kernel supports spin_compress <= 4");
-  require(protocol.spin_basis_size >= 0 &&
-              protocol.spin_basis_size + 1 <= kMaxSpinBasis,
-          "spin chiral polar kernel supports spin_basis_size + 1 <= 8");
-  require(protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4,
-          "spin chiral polar kernel supports spin_l_max <= 4");
+  require(
+      supports_cuda_spin_shape(protocol),
+      "CUDA chiral spin force received an unsupported spin shape");
   require(all_active(protocol.spin_dof_type_active, protocol.num_types) &&
               all_active(protocol.spin_env_type_active, protocol.num_types),
           "CUDA spin path currently requires all types active for spin dof/env");
@@ -898,74 +551,22 @@ static void accumulate_spin_chiral_polar_forces_impl(
   require(view.force_soa3 != nullptr, "workspace missing forces");
   require(view.mforce_soa3 != nullptr, "workspace missing mforces");
   require(view.virial_soa9 != nullptr, "workspace missing virials");
-  const bool use_cached_geometry =
-      protocol.spin_compress == 4 && protocol.spin_basis_size == 3 &&
-      protocol.spin_l_max == 4 && protocol.spin_chiral != 0;
   require(view.spin_density_geom != nullptr, "workspace missing spin density geom");
+  require(view.spin_density_raw1 != nullptr,
+          "workspace missing spin density raw1");
   require(view.spin_chiral_polar != nullptr, "workspace missing spin chiral polar");
   require(view.spin_chiral_octupoles_raw != nullptr,
           "workspace missing spin chiral octupoles raw");
   require(view.spin_chiral_hexadecapoles_raw != nullptr,
           "workspace missing spin chiral hexadecapoles raw");
   require(view.spin_chiral_chirals != nullptr, "workspace missing spin chiral chirals");
-  require(view.spin_chiral_pseudodevs != nullptr,
-          "workspace missing spin chiral pseudodevs");
-  require(view.spin_edge_weights != nullptr, "workspace missing spin edge weights");
-  require(view.spin_edge_weight_derivatives != nullptr,
-          "workspace missing spin edge weight derivatives");
   require(model_view.descriptor_coefficients != nullptr,
           "model missing descriptor coefficients");
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
-  require(!use_cached_geometry || view.spin_edge_dx != nullptr,
-          "workspace missing spin edge dx");
-  require(!use_cached_geometry || view.spin_edge_dy != nullptr,
-          "workspace missing spin edge dy");
-  require(!use_cached_geometry || view.spin_edge_dz != nullptr,
-          "workspace missing spin edge dz");
-  require(!use_cached_geometry || view.spin_edge_dist != nullptr,
-          "workspace missing spin edge dist");
-  const int threads = 32;
-  const int blocks = (atom_count + threads - 1) / threads;
-  if (blocks > 0 && use_cached_geometry) {
-    if (protocol.neighbor_capacity_radial <= 32) {
-      launch_spin_chiral_forces_c4_l4<true>(
-          protocol, atom_count, view, virial_mode, blocks, threads);
-    } else {
-      launch_spin_chiral_forces_c4_l4<false>(
-          protocol, atom_count, view, virial_mode, blocks, threads);
-    }
-  } else if (blocks > 0) {
-    accumulate_spin_chiral_forces<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        protocol.num_types,
-        protocol.spin_compress,
-        protocol.spin_basis_size,
-        protocol.spin_l_max,
-        static_cast<float>(protocol.spin_cutoff_radial),
-        box,
-        view.types,
-        view.positions_soa3,
-        view.spins_soa3,
-        view.nn_radial,
-        view.nl_radial_slot_major,
-        view.fp,
-        model_view.descriptor_coefficients,
-        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-        view.spin_edge_weights,
-        view.spin_edge_weight_derivatives,
-        view.spin_density_geom,
-        view.spin_chiral_polar,
-        view.spin_chiral_octupoles_raw,
-        view.spin_chiral_hexadecapoles_raw,
-        view.spin_chiral_chirals,
-        view.spin_chiral_pseudodevs,
-        view.force_soa3,
-        view.mforce_soa3,
-        virial_mode,
-        view.virial_soa9);
+  if (atom_count > 0) {
+    launch_spin_chiral_forces(
+        protocol, atom_count, box, model_view, view, virial_mode);
   }
   check_cuda(cudaGetLastError(), "accumulate spin chiral polar forces");
 }
@@ -980,6 +581,10 @@ void accumulate_spin_forces_on_device(
     bool cpu_atom_virial,
     SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
+  require(
+      supports_cuda_spin_shape(protocol),
+      "CUDA spin core requires 1 <= spin_compress <= 4, "
+      "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
   SpinForceTimings ignored_timings;
   SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
@@ -992,8 +597,7 @@ void accumulate_spin_forces_on_device(
   accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
   timer.split(measured.onsite_ms);
 
-  accumulate_spin_scalar_forces_impl(
-      protocol, atom_count, box, model, workspace, virial_mode);
+  measured.scalar_ms = 0.0f;
   timer.split(measured.scalar_ms);
 
   accumulate_spin_density_forces_impl(
@@ -1001,7 +605,7 @@ void accumulate_spin_forces_on_device(
   timer.split(measured.density_ms);
 
   if (protocol.spin_chiral != 0) {
-    accumulate_spin_chiral_polar_forces_impl(
+    accumulate_spin_chiral_forces_impl(
         protocol, atom_count, box, model, workspace, virial_mode);
   }
   timer.split(measured.chiral_ms);

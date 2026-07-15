@@ -486,8 +486,11 @@ CaseData make_dense_spin_case() {
   CaseData out;
   out.name = "spin_chiral_dense_neighbors";
   out.model_path = NEP_ADAPTERS_FP64_SPIN_MODEL_PATH;
-  constexpr int width = 4;
-  constexpr double spacing = 3.25;
+  // This shape has more than 64 radial spin neighbors while keeping the
+  // shorter angular list below its capacity, so the compact primitive core
+  // must carry moments across multiple 64-slot chunks.
+  constexpr int width = 6;
+  constexpr double spacing = 2.4;
   constexpr int atom_count = width * width * width;
   out.types.assign(atom_count, 0);
   out.positions.reserve(static_cast<std::size_t>(atom_count) * 3);

@@ -37,64 +37,6 @@ DescriptorCoreOptions make_descriptor_options(
   return options;
 }
 
-void build_staged_radial_descriptors(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool has_angular) {
-  if (has_angular) {
-    build_angular_geometry_cache_on_device(protocol, atom_count, box, workspace);
-  }
-  if (!build_radial_descriptors_from_geometry_on_device(
-          protocol, atom_count, box, model, workspace)) {
-    if (has_angular) {
-      build_pair_geometry_cache_on_device(protocol, atom_count, box, workspace);
-      build_radial_basis_cache_on_device(protocol, atom_count, workspace);
-    } else {
-      build_radial_geometry_basis_cache_on_device(
-          protocol, atom_count, box, workspace);
-    }
-    build_radial_descriptors_on_device(protocol, atom_count, model, workspace);
-  }
-}
-
-void build_batched_radial_descriptors(
-    const ModelProtocol& protocol,
-    const ForceEvaluationRequest& request,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool has_angular) {
-  if (!request.orthorhombic_batched && has_angular) {
-    build_pair_geometry_cache_batched(protocol, atom_count, workspace);
-    build_radial_basis_cache_on_device(protocol, atom_count, workspace);
-  } else if (!request.orthorhombic_batched) {
-    build_radial_geometry_basis_cache_batched(protocol, atom_count, workspace);
-  } else {
-    build_radial_basis_cache_on_device(protocol, atom_count, workspace);
-  }
-  build_radial_descriptors_on_device(protocol, atom_count, model, workspace);
-}
-
-void finish_angular_descriptors_and_ann(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace,
-    bool has_angular) {
-  if (has_angular) {
-    if (try_build_angular_descriptors_and_ann_from_geometry_on_device(
-            protocol, atom_count, model, workspace)) {
-      return;
-    }
-    build_angular_descriptors_from_geometry_on_device(
-        protocol, atom_count, model, workspace);
-  }
-  evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-}
-
 void build_ordinary_descriptors_and_ann(
     const ModelProtocol& protocol,
     const ForceEvaluationRequest& request,
@@ -103,31 +45,12 @@ void build_ordinary_descriptors_and_ann(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     bool has_angular) {
-  DescriptorCoreOptions options = make_descriptor_options(
+  const DescriptorCoreOptions options = make_descriptor_options(
       request,
       has_angular,
       DescriptorCoreOutput::ann_energy_and_derivatives);
-  if (try_build_descriptor_core_from_positions_on_device(
-          protocol, atom_count, box, model, workspace, options)) {
-    return;
-  }
-
-  options.output = DescriptorCoreOutput::structural_descriptors;
-  if (try_build_descriptor_core_from_positions_on_device(
-          protocol, atom_count, box, model, workspace, options)) {
-    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-    return;
-  }
-
-  if (request.topology == ForceNeighborTopology::batched_multi_box) {
-    build_batched_radial_descriptors(
-        protocol, request, atom_count, model, workspace, has_angular);
-  } else {
-    build_staged_radial_descriptors(
-        protocol, atom_count, box, model, workspace, has_angular);
-  }
-  finish_angular_descriptors_and_ann(
-      protocol, atom_count, model, workspace, has_angular);
+  build_descriptor_core_from_positions_on_device(
+      protocol, atom_count, box, model, workspace, options);
 }
 
 void build_spin_descriptors_and_ann(
@@ -142,20 +65,11 @@ void build_spin_descriptors_and_ann(
       request,
       has_angular,
       DescriptorCoreOutput::structural_descriptors);
-  if (try_build_descriptor_core_from_positions_on_device(
-          protocol, atom_count, box, model, workspace, options)) {
-    build_spin_descriptors_on_device(
-        protocol, atom_count, box, model, workspace);
-    evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
-    return;
-  }
-
-  build_staged_radial_descriptors(
-      protocol, atom_count, box, model, workspace, has_angular);
+  build_descriptor_core_from_positions_on_device(
+      protocol, atom_count, box, model, workspace, options);
   build_spin_descriptors_on_device(
       protocol, atom_count, box, model, workspace);
-  finish_angular_descriptors_and_ann(
-      protocol, atom_count, model, workspace, has_angular);
+  evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
 }
 
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
