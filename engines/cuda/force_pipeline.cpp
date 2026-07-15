@@ -133,6 +133,9 @@ void execute_force_pipeline(
       virial_target == VirialTarget::neighbor_float_sink;
   const bool zbl_outputs =
       request.store_potential || accumulates_virial(virial_target);
+  const bool fuse_external_zbl =
+      request.topology == ForceNeighborTopology::external_full &&
+      protocol.has_zbl;
   const bool fuse_radial_zbl =
       request.topology == ForceNeighborTopology::single_box_symmetric &&
       protocol.has_zbl && !zbl_outputs;
@@ -169,7 +172,8 @@ void execute_force_pipeline(
             box,
             model,
             workspace,
-            virial_target);
+            virial_target,
+            request.store_potential);
         break;
     }
   }
@@ -197,7 +201,7 @@ void execute_force_pipeline(
   }
   timer.split(measured.angular_force_ms);
 
-  if (protocol.has_zbl && !fuse_radial_zbl) {
+  if (protocol.has_zbl && !fuse_radial_zbl && !fuse_external_zbl) {
     if (request.topology == ForceNeighborTopology::batched_multi_box) {
       accumulate_zbl_forces_batched(
           protocol,

@@ -243,7 +243,8 @@ void accumulate_lammps_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    VirialTarget virial_target = VirialTarget::center_atom);
+    VirialTarget virial_target,
+    bool accumulate_zbl_energy);
 
 void accumulate_radial_and_zbl_forces_on_device(
     const ModelProtocol& protocol,

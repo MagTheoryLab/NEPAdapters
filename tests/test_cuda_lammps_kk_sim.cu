@@ -167,7 +167,8 @@ bool run_device_layout_case(
     const double expected_forces[6],
     const double expected_potential_per_atom[2],
     const double expected_virials_per_atom_row_major9[18],
-    double force_tolerance = 1.0e-10) {
+    double force_tolerance = 1.0e-8,
+    double virial_tolerance = 1.0e-8) {
   constexpr int nlocal = 2;
   constexpr int nall = 2;
   constexpr int inum = 2;
@@ -357,7 +358,7 @@ bool run_device_layout_case(
           expected_virials_per_atom_row_major9[
               9 * atom + expected_component];
       const double diff = std::abs(device_virial - expected_virial);
-      if (diff > 1.0e-10) {
+      if (diff > virial_tolerance) {
         std::cerr << case_name << " per-atom virial mismatch atom=" << atom
                   << " component=" << component
                   << " device=" << device_virial

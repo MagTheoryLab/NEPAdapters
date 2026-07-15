@@ -1000,7 +1000,6 @@ void run_reused_workspace_once(
   nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
       protocol, storage.atom_count, model, workspace);
   const bool accumulate_virial = options.write_totals || options.write_per_atom;
-  const bool zbl_outputs = options.write_totals || options.write_per_atom;
   const auto virial_target = accumulate_virial
       ? nep_adapters::cuda_backend::VirialTarget::center_atom
       : nep_adapters::cuda_backend::VirialTarget::none;
@@ -1010,7 +1009,8 @@ void run_reused_workspace_once(
       box,
       model,
       workspace,
-      virial_target);
+      virial_target,
+      store_potential);
   if (has_angular) {
     nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
         protocol,
@@ -1018,15 +1018,6 @@ void run_reused_workspace_once(
         model,
         workspace,
         virial_target);
-  }
-  if (protocol.has_zbl && zbl_outputs) {
-    nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
-        protocol,
-        storage.atom_count,
-        box,
-        model,
-        workspace,
-        true);
   }
   nep_adapters::cuda_backend::write_lammps_device_outputs(
       input,
@@ -1091,7 +1082,6 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
   timing.force_ms = time_synchronized_phase([&]() {
     const bool accumulate_virial =
         options.write_totals || options.write_per_atom;
-    const bool zbl_outputs = options.write_totals || options.write_per_atom;
     const auto virial_target = accumulate_virial
         ? nep_adapters::cuda_backend::VirialTarget::center_atom
         : nep_adapters::cuda_backend::VirialTarget::none;
@@ -1101,7 +1091,8 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
         box,
         model,
         workspace,
-        virial_target);
+        virial_target,
+        store_potential);
     if (has_angular) {
       nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
           protocol,
@@ -1109,15 +1100,6 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
           model,
           workspace,
           virial_target);
-    }
-    if (protocol.has_zbl && zbl_outputs) {
-      nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
-          protocol,
-          storage.atom_count,
-          box,
-          model,
-          workspace,
-          true);
     }
   });
   timing.output_ms = time_synchronized_phase([&]() {

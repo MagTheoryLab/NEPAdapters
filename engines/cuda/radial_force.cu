@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -85,6 +86,51 @@ __device__ __forceinline__ void find_fn_and_fnp(
   fnp = fnp * fc + fn * fcp;
   fn *= fc;
 }
+
+struct RadialDerivativeLadder {
+  float fc = 0.0f;
+  float fcp = 0.0f;
+  float rcinv = 0.0f;
+  float radial_shift = 0.0f;
+  float x = 0.0f;
+  float t_minus_2 = 1.0f;
+  float t_minus_1 = 0.0f;
+  float u_minus_2 = 1.0f;
+  float u_minus_1 = 0.0f;
+
+  __device__ __forceinline__ RadialDerivativeLadder(
+      float cutoff, float inverse_cutoff, float r)
+      : rcinv(inverse_cutoff) {
+    find_fc_and_fcp(cutoff, inverse_cutoff, r, fc, fcp);
+    radial_shift = r * inverse_cutoff - 1.0f;
+    x = 2.0f * radial_shift * radial_shift - 1.0f;
+    t_minus_1 = x;
+    u_minus_1 = 2.0f * x;
+  }
+
+  __device__ __forceinline__ float next(int k) {
+    if (k == 0) {
+      return fcp;
+    }
+    if (k == 1) {
+      const float base = (x + 1.0f) * 0.5f;
+      return 2.0f * radial_shift * rcinv * fc + base * fcp;
+    }
+
+    const float t = 2.0f * x * t_minus_1 - t_minus_2;
+    t_minus_2 = t_minus_1;
+    t_minus_1 = t;
+    const float base = (t + 1.0f) * 0.5f;
+    float derivative =
+        static_cast<float>(k) * u_minus_1 * 2.0f * radial_shift * rcinv;
+    derivative = derivative * fc + base * fcp;
+
+    const float u = 2.0f * x * u_minus_1 - u_minus_2;
+    u_minus_2 = u_minus_1;
+    u_minus_1 = u;
+    return derivative;
+  }
+};
 
 __device__ __forceinline__ void find_fc_and_fcp_zbl(
     float inner,
@@ -359,7 +405,11 @@ __global__ void accumulate_radial_forces(
   virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
 }
 
-template <bool VirialToNeighbor, bool FloatVirialSink>
+template <
+    bool IncludeZbl,
+    bool AccumulateZblEnergy,
+    bool VirialToNeighbor,
+    bool FloatVirialSink>
 __global__ void accumulate_lammps_radial_forces(
     int atom_count,
     int atom_stride,
@@ -367,18 +417,23 @@ __global__ void accumulate_lammps_radial_forces(
     int n_max_radial,
     int basis_size_radial,
     float cutoff_radial,
+    float zbl_inner,
+    float zbl_outer,
     SimulationBox box,
     const int* __restrict__ types,
+    const int* __restrict__ atomic_numbers,
     const double* __restrict__ positions_soa3,
     const int* __restrict__ nn_radial,
     const int* __restrict__ nl_radial,
     const float* __restrict__ fp,
     const float* __restrict__ descriptor_coefficients,
+    double* __restrict__ potential,
     float* __restrict__ virial_float_soa9,
     double* __restrict__ force_soa3,
     double* __restrict__ virial_soa9,
     int accumulate_virial) {
   static_assert(!(VirialToNeighbor && FloatVirialSink));
+  extern __shared__ float radial_pull_shared[];
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
     return;
@@ -389,8 +444,15 @@ __global__ void accumulate_lammps_radial_forces(
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
   const float rcinv = 1.0f / cutoff_radial;
-  const int radial_basis_count =
-      (n_max_radial + 1) * (basis_size_radial + 1);
+  const int basis_count = basis_size_radial + 1;
+  const int radial_basis_count = (n_max_radial + 1) * basis_count;
+  float* radial_pull = radial_pull_shared + threadIdx.x;
+  int pull_type = -1;
+  int zi = 0;
+  float pow_zi = 0.0f;
+  bool zbl_center_initialized = false;
+  float s_pe = 0.0f;
+  const float zbl_outer_squared = zbl_outer * zbl_outer;
 
   float s_fx = 0.0f;
   float s_fy = 0.0f;
@@ -409,6 +471,22 @@ __global__ void accumulate_lammps_radial_forces(
     const int pair_offset = atom + atom_stride * slot;
     const int neighbor = nl_radial[pair_offset];
     const int type2 = types[neighbor];
+    if (type2 != pull_type) {
+      for (int k = 0; k < basis_count; ++k) {
+        radial_pull[k * blockDim.x] = 0.0f;
+      }
+      const int coefficient_base =
+          (type1 * num_types + type2) * radial_basis_count;
+      for (int n = 0; n <= n_max_radial; ++n) {
+        const float center_pull = fp[atom + atom_stride * n];
+        const int coefficient_row = coefficient_base + n * basis_count;
+        for (int k = 0; k < basis_count; ++k) {
+          radial_pull[k * blockDim.x] +=
+              center_pull * descriptor_coefficients[coefficient_row + k];
+        }
+      }
+      pull_type = type2;
+    }
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -426,46 +504,16 @@ __global__ void accumulate_lammps_radial_forces(
       continue;
     }
 
-    float fc = 0.0f;
-    float fcp = 0.0f;
-    find_fc_and_fcp(cutoff_radial, rcinv, r, fc, fcp);
-    float fnp_cache[kMaxCachedRadialBasisDerivatives];
-    const bool cache_basis =
-        basis_size_radial + 1 <= kMaxCachedRadialBasisDerivatives;
-    if (cache_basis) {
-      for (int k = 0; k <= basis_size_radial; ++k) {
-        float fn = 0.0f;
-        float fnp = 0.0f;
-        find_fn_and_fnp(k, rcinv, r, fc, fcp, fn, fnp);
-        fnp_cache[k] = fnp;
-      }
-    }
-
     const float rinv = 1.0f / r;
-    float f12x = 0.0f;
-    float f12y = 0.0f;
-    float f12z = 0.0f;
-    for (int n = 0; n <= n_max_radial; ++n) {
-      float gnp12 = 0.0f;
-      for (int k = 0; k <= basis_size_radial; ++k) {
-        float fnp = 0.0f;
-        if (cache_basis) {
-          fnp = fnp_cache[k];
-        } else {
-          float fn = 0.0f;
-          find_fn_and_fnp(k, rcinv, r, fc, fcp, fn, fnp);
-        }
-        const int coefficient_base = n * (basis_size_radial + 1) + k;
-        const int coefficient_index =
-            (type1 * num_types + type2) * radial_basis_count +
-            coefficient_base;
-        gnp12 += fnp * descriptor_coefficients[coefficient_index];
-      }
-      const float tmp12 = fp[atom + atom_stride * n] * gnp12 * rinv;
-      f12x += tmp12 * x12;
-      f12y += tmp12 * y12;
-      f12z += tmp12 * z12;
+    RadialDerivativeLadder ladder(cutoff_radial, rcinv, r);
+    float radial_scale = 0.0f;
+    for (int k = 0; k < basis_count; ++k) {
+      radial_scale += ladder.next(k) * radial_pull[k * blockDim.x];
     }
+    radial_scale *= rinv;
+    const float f12x = radial_scale * x12;
+    const float f12y = radial_scale * y12;
+    const float f12z = radial_scale * z12;
 
     s_fx += f12x;
     s_fy += f12y;
@@ -477,6 +525,44 @@ __global__ void accumulate_lammps_radial_forces(
     atomicAdd(
         &force_soa3[2 * atom_stride + neighbor],
         -static_cast<double>(f12z));
+
+    float zbl_f12x = 0.0f;
+    float zbl_f12y = 0.0f;
+    float zbl_f12z = 0.0f;
+    if constexpr (IncludeZbl) {
+      if (r2 < zbl_outer_squared) {
+        if (!zbl_center_initialized) {
+          zi = atomic_numbers[type1];
+          pow_zi = powf(static_cast<float>(zi), 0.23f);
+          zbl_center_initialized = true;
+        }
+        const int zj = atomic_numbers[type2];
+        const float a_inv =
+            (pow_zi + powf(static_cast<float>(zj), 0.23f)) * 2.134563f;
+        const float zizj = kCoulomb * static_cast<float>(zi * zj);
+        float zbl_f = 0.0f;
+        float zbl_fp = 0.0f;
+        find_f_and_fp_zbl(
+            zizj,
+            a_inv,
+            zbl_inner,
+            zbl_outer,
+            r,
+            rinv,
+            zbl_f,
+            zbl_fp);
+        const float zbl_force_scale = 0.5f * zbl_fp * rinv;
+        zbl_f12x = x12 * zbl_force_scale;
+        zbl_f12y = y12 * zbl_force_scale;
+        zbl_f12z = z12 * zbl_force_scale;
+        s_fx += 2.0f * zbl_f12x;
+        s_fy += 2.0f * zbl_f12y;
+        s_fz += 2.0f * zbl_f12z;
+        if constexpr (AccumulateZblEnergy) {
+          s_pe += 0.5f * zbl_f;
+        }
+      }
+    }
 
     if constexpr (FloatVirialSink) {
       atomic_add_per_atom_virial_float(
@@ -531,11 +617,57 @@ __global__ void accumulate_lammps_radial_forces(
         }
       }
     }
+    if constexpr (IncludeZbl) {
+      if (accumulate_virial && r2 < zbl_outer_squared) {
+        if constexpr (VirialToNeighbor || FloatVirialSink) {
+          atomicAdd(
+              &virial_soa9[neighbor],
+              -static_cast<double>(x12 * zbl_f12x));
+          atomicAdd(
+              &virial_soa9[atom_stride + neighbor],
+              -static_cast<double>(y12 * zbl_f12y));
+          atomicAdd(
+              &virial_soa9[2 * atom_stride + neighbor],
+              -static_cast<double>(z12 * zbl_f12z));
+          atomicAdd(
+              &virial_soa9[3 * atom_stride + neighbor],
+              -static_cast<double>(x12 * zbl_f12y));
+          atomicAdd(
+              &virial_soa9[4 * atom_stride + neighbor],
+              -static_cast<double>(x12 * zbl_f12z));
+          atomicAdd(
+              &virial_soa9[5 * atom_stride + neighbor],
+              -static_cast<double>(y12 * zbl_f12z));
+          atomicAdd(
+              &virial_soa9[6 * atom_stride + neighbor],
+              -static_cast<double>(y12 * zbl_f12x));
+          atomicAdd(
+              &virial_soa9[7 * atom_stride + neighbor],
+              -static_cast<double>(z12 * zbl_f12x));
+          atomicAdd(
+              &virial_soa9[8 * atom_stride + neighbor],
+              -static_cast<double>(z12 * zbl_f12y));
+        } else {
+          s_sxx -= x12 * zbl_f12x;
+          s_syy -= y12 * zbl_f12y;
+          s_szz -= z12 * zbl_f12z;
+          s_sxy -= x12 * zbl_f12y;
+          s_sxz -= x12 * zbl_f12z;
+          s_syx -= y12 * zbl_f12x;
+          s_syz -= y12 * zbl_f12z;
+          s_szx -= z12 * zbl_f12x;
+          s_szy -= z12 * zbl_f12y;
+        }
+      }
+    }
   }
 
   atomicAdd(&force_soa3[atom], static_cast<double>(s_fx));
   atomicAdd(&force_soa3[atom_stride + atom], static_cast<double>(s_fy));
   atomicAdd(&force_soa3[2 * atom_stride + atom], static_cast<double>(s_fz));
+  if constexpr (AccumulateZblEnergy) {
+    potential[atom] += static_cast<double>(s_pe);
+  }
   if (!accumulate_virial) {
     return;
   }
@@ -834,13 +966,22 @@ void accumulate_lammps_radial_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    VirialTarget virial_target) {
+    VirialTarget virial_target,
+    bool accumulate_zbl_energy) {
   const bool accumulate_virial = accumulates_virial(virial_target);
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
   require(protocol.n_max_radial >= 0, "n_max_radial must be non-negative");
   require(protocol.basis_size_radial >= 0, "basis_size_radial must be non-negative");
   require(protocol.cutoff_radial > 0.0, "radial cutoff must be positive");
+  if (protocol.has_zbl) {
+    require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
+    require(protocol.zbl_inner >= 0.0, "ZBL inner cutoff must be non-negative");
+    require(protocol.zbl_outer > protocol.zbl_inner,
+            "ZBL outer cutoff must exceed inner");
+    require(protocol.zbl_outer <= protocol.cutoff_radial,
+            "fused LAMMPS radial/ZBL kernel reuses the radial neighbor list");
+  }
 
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
@@ -861,6 +1002,15 @@ void accumulate_lammps_radial_forces_on_device(
   }
   require(model_view.descriptor_coefficients_type_pair_major != nullptr,
           "model missing type-pair-major descriptor coefficients");
+  if (protocol.has_zbl) {
+    require(model_view.atomic_numbers != nullptr, "model missing atomic numbers");
+    require(model_view.atomic_numbers_count >=
+                static_cast<std::size_t>(protocol.num_types),
+            "model atomic number buffer is too small");
+    if (accumulate_zbl_energy) {
+      require(view.potential != nullptr, "workspace missing potential output");
+    }
+  }
 
   check_cuda(
       cudaMemset(
@@ -877,44 +1027,118 @@ void accumulate_lammps_radial_forces_on_device(
         "clear virial output");
   }
 
-  const int threads = 64;
+  const int basis_count = protocol.basis_size_radial + 1;
+  int threads = 64;
+  std::size_t shared_bytes =
+      static_cast<std::size_t>(threads) * basis_count * sizeof(float);
+  constexpr std::size_t kPortableDefaultSharedBytes = 48 * 1024;
+  std::size_t optin_shared_bytes = kPortableDefaultSharedBytes;
+  if (shared_bytes > kPortableDefaultSharedBytes) {
+    int device = 0;
+    check_cuda(cudaGetDevice(&device), "get CUDA device for radial pull");
+    cudaDeviceProp device_properties{};
+    check_cuda(
+        cudaGetDeviceProperties(&device_properties, device),
+        "get CUDA device properties for radial pull");
+    optin_shared_bytes = std::max(
+        static_cast<std::size_t>(device_properties.sharedMemPerBlock),
+        static_cast<std::size_t>(device_properties.sharedMemPerBlockOptin));
+    while (threads > 1 && shared_bytes > optin_shared_bytes) {
+      threads /= 2;
+      shared_bytes =
+          static_cast<std::size_t>(threads) * basis_count * sizeof(float);
+    }
+  }
+  require(shared_bytes <= optin_shared_bytes,
+          "radial pull state exceeds the CUDA shared-memory limit");
+  const bool needs_shared_memory_optin =
+      shared_bytes > kPortableDefaultSharedBytes;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    const auto launch = [&](auto virial_to_neighbor_tag, auto float_sink_tag) {
+    const auto launch = [&](auto include_zbl_tag,
+                            auto accumulate_zbl_energy_tag,
+                            auto virial_to_neighbor_tag,
+                            auto float_sink_tag) {
+      constexpr bool kIncludeZbl = decltype(include_zbl_tag)::value;
+      constexpr bool kAccumulateZblEnergy =
+          decltype(accumulate_zbl_energy_tag)::value;
       constexpr bool kVirialToNeighbor =
           decltype(virial_to_neighbor_tag)::value;
       constexpr bool kFloatSink = decltype(float_sink_tag)::value;
-      accumulate_lammps_radial_forces<kVirialToNeighbor, kFloatSink>
-          <<<blocks, threads>>>(
+      if (needs_shared_memory_optin) {
+        check_cuda(
+            cudaFuncSetAttribute(
+                accumulate_lammps_radial_forces<
+                    kIncludeZbl,
+                    kAccumulateZblEnergy,
+                    kVirialToNeighbor,
+                    kFloatSink>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                static_cast<int>(shared_bytes)),
+            "configure radial pull shared memory");
+      }
+      accumulate_lammps_radial_forces<
+          kIncludeZbl,
+          kAccumulateZblEnergy,
+          kVirialToNeighbor,
+          kFloatSink><<<blocks, threads, shared_bytes>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
           protocol.num_types,
           protocol.n_max_radial,
           protocol.basis_size_radial,
           static_cast<float>(protocol.cutoff_radial),
+          kIncludeZbl ? static_cast<float>(protocol.zbl_inner) : 0.0f,
+          kIncludeZbl ? static_cast<float>(protocol.zbl_outer) : 0.0f,
           box,
           view.types,
+          kIncludeZbl ? model_view.atomic_numbers : nullptr,
           view.positions_soa3,
           view.nn_radial,
           view.nl_radial_slot_major,
           view.fp,
           model_view.descriptor_coefficients_type_pair_major,
+          kAccumulateZblEnergy ? view.potential : nullptr,
           kFloatSink ? view.per_atom_virial_float_soa9 : nullptr,
           view.force_soa3,
           view.virial_soa9,
           accumulate_virial ? 1 : 0);
     };
-    switch (virial_target) {
-      case VirialTarget::none:
-      case VirialTarget::center_atom:
-        launch(std::false_type{}, std::false_type{});
-        break;
-      case VirialTarget::neighbor_atom:
-        launch(std::true_type{}, std::false_type{});
-        break;
-      case VirialTarget::neighbor_float_sink:
-        launch(std::false_type{}, std::true_type{});
-        break;
+    const auto launch_outputs = [&](auto include_zbl_tag,
+                                    auto accumulate_zbl_energy_tag) {
+      switch (virial_target) {
+        case VirialTarget::none:
+        case VirialTarget::center_atom:
+          launch(
+              include_zbl_tag,
+              accumulate_zbl_energy_tag,
+              std::false_type{},
+              std::false_type{});
+          break;
+        case VirialTarget::neighbor_atom:
+          launch(
+              include_zbl_tag,
+              accumulate_zbl_energy_tag,
+              std::true_type{},
+              std::false_type{});
+          break;
+        case VirialTarget::neighbor_float_sink:
+          launch(
+              include_zbl_tag,
+              accumulate_zbl_energy_tag,
+              std::false_type{},
+              std::true_type{});
+          break;
+      }
+    };
+    if (protocol.has_zbl) {
+      if (accumulate_zbl_energy) {
+        launch_outputs(std::true_type{}, std::true_type{});
+      } else {
+        launch_outputs(std::true_type{}, std::false_type{});
+      }
+    } else {
+      launch_outputs(std::false_type{}, std::false_type{});
     }
   }
   check_cuda(cudaGetLastError(), "accumulate LAMMPS radial forces kernel launch failed");
