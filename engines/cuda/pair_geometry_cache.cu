@@ -357,38 +357,6 @@ void build_pair_geometry_cache_on_device(
   check_cuda(cudaDeviceSynchronize(), "synchronize pair geometry cache");
 }
 
-void build_angular_geometry_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    DeviceWorkspace& workspace) {
-  const DeviceWorkspaceView view = workspace.view();
-  require(atom_count > 0, "atom_count must be positive");
-  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
-  require(view.positions_soa3 != nullptr, "workspace missing positions");
-  require(view.nn_angular != nullptr, "workspace missing angular counts");
-  require(view.nl_angular_slot_major != nullptr,
-          "workspace missing angular neighbors");
-  require(view.f12x != nullptr && view.f12y != nullptr && view.f12z != nullptr,
-          "workspace missing angular delta cache");
-
-  const int blocks = (atom_count + kBlockSize - 1) / kBlockSize;
-  build_angular_delta_cache<<<blocks, kBlockSize>>>(
-      atom_count,
-      static_cast<int>(view.atom_capacity),
-      protocol.neighbor_capacity_angular,
-      box,
-      view.positions_soa3,
-      view.nn_angular,
-      view.nl_angular_slot_major,
-      view.f12x,
-      view.f12y,
-      view.f12z);
-  check_cuda(cudaGetLastError(), "build angular geometry cache");
-  check_cuda(cudaDeviceSynchronize(), "synchronize angular geometry cache");
-}
-
 void build_pair_geometry_cache_batched(
     const ModelProtocol& protocol,
     int atom_count,

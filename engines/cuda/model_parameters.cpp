@@ -110,6 +110,9 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
   packed.descriptor_coefficients_type_pair_major.assign(
       protocol.ordinary_descriptor_parameter_count,
       0.0f);
+  packed.angular_coefficients_center_type_major.assign(
+      packed.descriptor_layout.angular_count,
+      0.0f);
   const std::size_t type_pairs = num_types * num_types;
   const std::size_t radial_basis_count =
       (checked_count(protocol.n_max_radial, "n_max_radial") + 1) *
@@ -127,6 +130,15 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
       packed.descriptor_coefficients_type_pair_major[
           packed.descriptor_layout.radial_count +
           type_pair * angular_basis_count + basis] =
+          packed.descriptor_coefficients[
+              packed.descriptor_layout.angular_offset +
+              basis * type_pairs + type_pair];
+
+      const std::size_t center_type = type_pair / num_types;
+      const std::size_t neighbor_type = type_pair % num_types;
+      packed.angular_coefficients_center_type_major[
+          (center_type * angular_basis_count + basis) * num_types +
+          neighbor_type] =
           packed.descriptor_coefficients[
               packed.descriptor_layout.angular_offset +
               basis * type_pairs + type_pair];

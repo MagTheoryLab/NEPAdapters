@@ -253,6 +253,10 @@ void build_charge_descriptors_and_ann_stage(
       protocol, atom_count, box, device, workspace, has_angular);
   nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
       protocol, atom_count, device, workspace);
+  if (has_angular) {
+    nep_adapters::cuda_backend::build_atom_type_schedule_on_device(
+        protocol, atom_count, workspace);
+  }
 }
 
 int lammps_atom_capacity(const NepaLammpsNeighborInput& input) {

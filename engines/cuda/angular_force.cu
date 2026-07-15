@@ -788,37 +788,64 @@ __device__ __forceinline__ void accumulate_angular_component(
 
 // Keep the model-size specialization inside reusable fixed-extent primitives;
 // the pull construction and edge traversal remain one algorithm.
-template <int NCount>
+struct TypePairAngularCoefficients {
+  const float* pair = nullptr;
+
+  __device__ __forceinline__ float load(
+      int n, int k, int basis_count) const {
+    return pair[n * basis_count + k];
+  }
+};
+
+struct CenterMajorAngularCoefficients {
+  const float* center = nullptr;
+  int num_types = 0;
+  int neighbor_type = 0;
+
+  __device__ __forceinline__ float load(
+      int n, int k, int basis_count) const {
+    return center[
+        (n * basis_count + k) * num_types + neighbor_type];
+  }
+};
+
+template <int NCount, typename Coefficients>
 __device__ __forceinline__ void accumulate_angular_radial_basis(
     int basis_count,
     int k,
     float fn,
     float fnp,
-    const float* coefficient_pair,
+    const Coefficients& coefficients,
     float (&gn)[NCount],
     float (&gnp)[NCount]) {
 #pragma unroll
   for (int n = 0; n < NCount; ++n) {
-    const float coefficient = coefficient_pair[n * basis_count + k];
+    const float coefficient = coefficients.load(n, k, basis_count);
     gn[n] += fn * coefficient;
     gnp[n] += fnp * coefficient;
   }
 }
 
-template <int NCount>
+template <int NCount, typename Coefficients>
 __device__ __forceinline__ void evaluate_angular_radial_response(
     int basis_count,
     float cutoff_angular,
     float rcinv,
     float r,
-    const float* coefficient_pair,
+    const Coefficients& coefficients,
     float (&gn)[NCount],
     float (&gnp)[NCount]) {
   float fc = 0.0f;
   float fcp = 0.0f;
   find_fc_and_fcp(cutoff_angular, rcinv, r, fc, fcp);
   accumulate_angular_radial_basis<NCount>(
-      basis_count, 0, fc, fcp, coefficient_pair, gn, gnp);
+      basis_count,
+      0,
+      fc,
+      fcp,
+      coefficients,
+      gn,
+      gnp);
   if (basis_count == 1) {
     return;
   }
@@ -830,7 +857,13 @@ __device__ __forceinline__ void evaluate_angular_radial_response(
   float fnp = 2.0f * radial_offset * rcinv * fc + fn * fcp;
   fn *= fc;
   accumulate_angular_radial_basis<NCount>(
-      basis_count, 1, fn, fnp, coefficient_pair, gn, gnp);
+      basis_count,
+      1,
+      fn,
+      fnp,
+      coefficients,
+      gn,
+      gnp);
 
   float t0 = 1.0f;
   float t1 = x;
@@ -843,7 +876,13 @@ __device__ __forceinline__ void evaluate_angular_radial_response(
     fnp = fnp * fc + fn * fcp;
     fn *= fc;
     accumulate_angular_radial_basis<NCount>(
-        basis_count, k, fn, fnp, coefficient_pair, gn, gnp);
+        basis_count,
+        k,
+        fn,
+        fnp,
+        coefficients,
+        gn,
+        gnp);
 
     t0 = t1;
     t1 = t2;
@@ -1021,9 +1060,7 @@ __global__ void accumulate_angular_forces_pull_tile(
     int atom_count,
     int atom_stride,
     int num_types,
-    int num_type_pairs,
     int n_max_radial,
-    int basis_size_radial,
     int basis_size_angular,
     int l_max_3body,
     int has_q_222,
@@ -1040,6 +1077,8 @@ __global__ void accumulate_angular_forces_pull_tile(
     const double* __restrict__ box_inverse_row_major9,
     const int* __restrict__ pbc_flags3,
     const int* __restrict__ types,
+    const int* __restrict__ scheduled_atoms,
+    const int* __restrict__ schedule_active_type_counts,
     const double* __restrict__ positions_soa3,
     const int* __restrict__ nn_angular,
     const int* __restrict__ nl_angular,
@@ -1049,7 +1088,8 @@ __global__ void accumulate_angular_forces_pull_tile(
     const float* __restrict__ f12z,
     const float* __restrict__ fp,
     const float* __restrict__ sum_fxyz,
-    const float* __restrict__ descriptor_coefficients,
+    const float* __restrict__ angular_coefficients_type_pair_major,
+    const float* __restrict__ angular_coefficients_center_type_major,
     float* __restrict__ virial_float_soa9,
     double* __restrict__ force_soa3,
     double* __restrict__ virial_soa9,
@@ -1071,9 +1111,33 @@ __global__ void accumulate_angular_forces_pull_tile(
   const int atom_in_tile = lane / EdgesPerAtomBatch;
   const int edge_lane = lane - atom_in_tile * EdgesPerAtomBatch;
   const int atom_base = blockIdx.x * AtomsPerWarp;
-  const int raw_atom = atom_base + atom_in_tile;
-  const bool valid_atom = raw_atom < atom_count;
-  const int atom = valid_atom ? raw_atom : atom_count - 1;
+  const int grouped_atom = atom_base + atom_in_tile;
+  const bool valid_atom = grouped_atom < atom_count;
+  int active_type_count = 1;
+  if (lane == 0 && schedule_active_type_counts != nullptr) {
+    active_type_count = schedule_active_type_counts[
+        atom_base / kTypeScheduleWindowAtoms];
+  }
+  active_type_count = __shfl_sync(
+      kFullWarpMask, active_type_count, 0);
+  // When all active center types fit in one raw tile, regrouping does not repay
+  // scattered atom/edge reads. The uniform condition keeps one force kernel;
+  // each side reuses the coefficient view already suited to its access shape.
+  const bool use_center_grouping =
+      scheduled_atoms != nullptr && active_type_count > AtomsPerWarp;
+  __shared__ int tile_atoms[AtomsPerWarp];
+  if (use_center_grouping && lane < AtomsPerWarp) {
+    const int tile_grouped_atom = atom_base + lane;
+    tile_atoms[lane] = tile_grouped_atom < atom_count
+        ? scheduled_atoms[tile_grouped_atom]
+        : atom_count - 1;
+  }
+  if (use_center_grouping) {
+    __syncwarp();
+  }
+  const int atom = use_center_grouping
+      ? tile_atoms[atom_in_tile]
+      : (valid_atom ? grouped_atom : atom_count - 1);
   const int radial_dim = n_max_radial + 1;
   const int channel_count = l_max_3body + has_q_222 + has_q_1111 +
       has_q_112 + has_q_123 + has_q_233 + has_q_134;
@@ -1105,8 +1169,9 @@ __global__ void accumulate_angular_forces_pull_tile(
     const int n = component / kAngularComponents;
     const int alpha = component - n * kAngularComponents;
     const int candidate_atom = atom_base + local_atom;
-    const int source_atom =
-        candidate_atom < atom_count ? candidate_atom : atom_count - 1;
+    const int source_atom = use_center_grouping
+        ? tile_atoms[local_atom]
+        : (candidate_atom < atom_count ? candidate_atom : atom_count - 1);
     tile_sum[local_atom * kSumPerAtom + component] = alpha < abc_count
         ? sum_fxyz[source_atom + atom_stride * (n * abc_count + alpha)]
         : 0.0f;
@@ -1118,8 +1183,9 @@ __global__ void accumulate_angular_forces_pull_tile(
     const int n = component / kMaxFpChannels;
     const int channel = component - n * kMaxFpChannels;
     const int candidate_atom = atom_base + local_atom;
-    const int source_atom =
-        candidate_atom < atom_count ? candidate_atom : atom_count - 1;
+    const int source_atom = use_center_grouping
+        ? tile_atoms[local_atom]
+        : (candidate_atom < atom_count ? candidate_atom : atom_count - 1);
     const int descriptor = radial_dim + channel * NCount + n;
     tile_fp[local_atom * kFpPerAtom + component] = channel < channel_count
         ? fp[source_atom + atom_stride * descriptor]
@@ -1173,10 +1239,10 @@ __global__ void accumulate_angular_forces_pull_tile(
     max_edge_count = other > max_edge_count ? other : max_edge_count;
   }
 
-  const int angular_coefficient_offset =
-      num_type_pairs * radial_dim * (basis_size_radial + 1);
   const int basis_count = basis_size_angular + 1;
   const int angular_basis_count = NCount * basis_count;
+  const float* center_coefficients = angular_coefficients_center_type_major +
+      type1 * angular_basis_count * num_types;
   const float rcinv = 1.0f / cutoff_angular;
   float center_fx = 0.0f;
   float center_fy = 0.0f;
@@ -1223,17 +1289,31 @@ __global__ void accumulate_angular_forces_pull_tile(
         unit[2] = z12 * rinv;
 
         const int type2 = types[neighbor];
-        const int type_pair = type1 * num_types + type2;
-        const float* coefficient_pair = descriptor_coefficients +
-            angular_coefficient_offset + type_pair * angular_basis_count;
-        evaluate_angular_radial_response<NCount>(
-            basis_count,
-            cutoff_angular,
-            rcinv,
-            r,
-            coefficient_pair,
-            gn,
-            gnp);
+        if (use_center_grouping) {
+          const CenterMajorAngularCoefficients coefficients{
+              center_coefficients, num_types, type2};
+          evaluate_angular_radial_response<NCount>(
+              basis_count,
+              cutoff_angular,
+              rcinv,
+              r,
+              coefficients,
+              gn,
+              gnp);
+        } else {
+          const int type_pair = type1 * num_types + type2;
+          const TypePairAngularCoefficients coefficients{
+              angular_coefficients_type_pair_major +
+              type_pair * angular_basis_count};
+          evaluate_angular_radial_response<NCount>(
+              basis_count,
+              cutoff_angular,
+              rcinv,
+              r,
+              coefficients,
+              gn,
+              gnp);
+        }
       }
     }
 
@@ -1354,6 +1434,10 @@ void launch_angular_pull_tile(
   static_assert(32 % EdgesPerAtomBatch == 0);
   const int tile_blocks =
       (atom_count + kAtomsPerWarp - 1) / kAtomsPerWarp;
+  const std::size_t radial_coefficient_count =
+      static_cast<std::size_t>(protocol.num_types) * protocol.num_types *
+      static_cast<std::size_t>(protocol.n_max_radial + 1) *
+      static_cast<std::size_t>(protocol.basis_size_radial + 1);
   accumulate_angular_forces_pull_tile<
       AccumulateVirial,
       FloatVirialSink,
@@ -1365,9 +1449,7 @@ void launch_angular_pull_tile(
           atom_count,
           static_cast<int>(view.atom_capacity),
           protocol.num_types,
-          protocol.num_types * protocol.num_types,
           protocol.n_max_radial,
-          protocol.basis_size_radial,
           protocol.basis_size_angular,
           protocol.body_channels.l_max_3body,
           protocol.body_channels.has_q_222 ? 1 : 0,
@@ -1384,6 +1466,10 @@ void launch_angular_pull_tile(
           batched ? view.box_inverse_row_major9 : nullptr,
           batched ? view.pbc_flags3 : nullptr,
           view.types,
+          protocol.num_types > 1 ? view.type_scheduled_atoms : nullptr,
+          protocol.num_types > 1
+              ? view.type_schedule_active_type_counts
+              : nullptr,
           view.positions_soa3,
           view.nn_angular,
           view.nl_angular_slot_major,
@@ -1393,7 +1479,9 @@ void launch_angular_pull_tile(
           view.f12z,
           view.fp,
           view.sum_fxyz,
-          model_view.descriptor_coefficients_type_pair_major,
+          model_view.descriptor_coefficients_type_pair_major +
+              radial_coefficient_count,
+          model_view.angular_coefficients_center_type_major,
           FloatVirialSink ? view.per_atom_virial_float_soa9 : nullptr,
           view.force_soa3,
           view.virial_soa9,
@@ -1538,6 +1626,12 @@ void validate_angular_force_inputs(
     require(view.pbc_flags3 != nullptr, "workspace missing pbc flags");
   }
   require(view.types != nullptr, "workspace missing atom types");
+  if (protocol.num_types > 1) {
+    require(view.type_scheduled_atoms != nullptr,
+            "workspace missing atom type schedule");
+    require(view.type_schedule_active_type_counts != nullptr,
+            "workspace missing atom type schedule active-type counts");
+  }
   require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.nn_angular != nullptr, "workspace missing angular counts");
   require(view.nl_angular_slot_major != nullptr,
@@ -1548,10 +1642,24 @@ void validate_angular_force_inputs(
   require(view.sum_fxyz != nullptr, "workspace missing angular sums");
   require(view.force_soa3 != nullptr, "workspace missing force output");
   require(view.virial_soa9 != nullptr, "workspace missing virial output");
-  require(model_view.descriptor_coefficients != nullptr,
-          "model missing descriptor coefficients");
   require(model_view.descriptor_coefficients_type_pair_major != nullptr,
           "model missing type-pair-major descriptor coefficients");
+  require(model_view.angular_coefficients_center_type_major != nullptr,
+          "model missing center-type-major angular coefficients");
+  const std::size_t radial_coefficient_count =
+      static_cast<std::size_t>(protocol.num_types) * protocol.num_types *
+      static_cast<std::size_t>(protocol.n_max_radial + 1) *
+      static_cast<std::size_t>(protocol.basis_size_radial + 1);
+  const std::size_t angular_coefficient_count =
+      static_cast<std::size_t>(protocol.num_types) * protocol.num_types *
+      static_cast<std::size_t>(protocol.n_max_angular + 1) *
+      static_cast<std::size_t>(protocol.basis_size_angular + 1);
+  require(model_view.angular_coefficients_center_type_major_count >=
+              angular_coefficient_count,
+          "model center-type-major angular coefficient buffer is too small");
+  require(model_view.descriptor_coefficients_type_pair_major_count >=
+              radial_coefficient_count + angular_coefficient_count,
+          "model type-pair-major angular coefficient buffer is too small");
 }
 
 }  // namespace

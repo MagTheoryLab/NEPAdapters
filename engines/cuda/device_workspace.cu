@@ -64,10 +64,10 @@ void set_view_pointer(
     view.structure_virial_row_major9 = static_cast<double*>(device);
   } else if (name == "active_atom_indices") {
     view.active_atom_indices = static_cast<int*>(device);
-  } else if (name == "ann_scheduled_atoms") {
-    view.ann_scheduled_atoms = static_cast<int*>(device);
-  } else if (name == "ann_schedule_identity") {
-    view.ann_schedule_identity = static_cast<int*>(device);
+  } else if (name == "type_scheduled_atoms") {
+    view.type_scheduled_atoms = static_cast<int*>(device);
+  } else if (name == "type_schedule_active_type_counts") {
+    view.type_schedule_active_type_counts = static_cast<int*>(device);
   } else if (name == "nn_radial") {
     view.nn_radial = static_cast<int*>(device);
   } else if (name == "nl_radial_slot_major") {

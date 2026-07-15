@@ -356,6 +356,7 @@ int main() {
   if (packed.protocol.descriptor_dim != 2 ||
       packed.ann_type_major.size() != 9 ||
       packed.descriptor_coefficients.size() != 2 ||
+      packed.angular_coefficients_center_type_major.size() != 1 ||
       packed.q_scaler.size() != 2 ||
       packed.ann_blocks.size() != 1 ||
       packed.ann_blocks[0].w0_offset != 0 ||
@@ -371,9 +372,42 @@ int main() {
   if (packed.ann_type_major[0] != 1.0f || packed.ann_type_major[8] != 9.0f ||
       packed.descriptor_coefficients[0] != 10.0f ||
       packed.descriptor_coefficients[1] != 11.0f ||
+      packed.angular_coefficients_center_type_major[0] != 11.0f ||
       packed.q_scaler[0] != 12.0f ||
       packed.q_scaler[1] != 13.0f) {
     return EXIT_FAILURE;
+  }
+
+  const std::string multi_type_model_path =
+      (std::filesystem::temp_directory_path() /
+       "cuda_center_type_major_parameters.nep").string();
+  {
+    std::ofstream out(multi_type_model_path);
+    out << "nep4 2 C H\n"
+        << "cutoff 5 4 8 6\n"
+        << "n_max 0 0\n"
+        << "basis_size 0 1\n"
+        << "l_max 1 0 0\n"
+        << "ANN 1 0\n";
+    for (int value = 1; value <= 23; ++value) {
+      out << value << "\n";
+    }
+  }
+  const nep_adapters::cuda_backend::HostModelParameters multi_type_packed =
+      nep_adapters::cuda_backend::load_host_model_parameters(
+          multi_type_model_path);
+  const float expected_center_type_major[] = {
+      14.0f, 15.0f, 18.0f, 19.0f,
+      16.0f, 17.0f, 20.0f, 21.0f,
+  };
+  if (multi_type_packed.angular_coefficients_center_type_major.size() != 8) {
+    return EXIT_FAILURE;
+  }
+  for (std::size_t index = 0; index < 8; ++index) {
+    if (multi_type_packed.angular_coefficients_center_type_major[index] !=
+        expected_center_type_major[index]) {
+      return EXIT_FAILURE;
+    }
   }
 
   const std::string qnep_model_path =

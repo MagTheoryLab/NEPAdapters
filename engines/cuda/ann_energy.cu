@@ -14,8 +14,9 @@ constexpr int kAnnThreadsPerAtom = 4;
 constexpr int kAnnAtomsPerWarp = kWarpSize / kAnnThreadsPerAtom;
 constexpr int kPreferredAnnWarpsPerBlock = 4;
 constexpr int kAnnScheduleThreads = 256;
-// Reorder only independent ANN work inside a bounded window. Descriptors and
-// derivatives remain in atom order so descriptor and force accesses stay coalesced.
+// Reorder independent center-atom work inside a bounded window. Descriptor
+// storage stays in raw atom order; ANN and angular force map through the same
+// schedule when type locality is useful.
 constexpr std::size_t kDefaultDynamicSharedMemoryBytes = 48 * 1024;
 constexpr unsigned kFullWarpMask = 0xffffffffu;
 
@@ -45,7 +46,7 @@ __global__ void build_local_type_schedule(
     int num_types,
     const int* __restrict__ types,
     int* __restrict__ scheduled_atoms,
-    int* __restrict__ schedule_identity) {
+    int* __restrict__ schedule_active_type_counts) {
   extern __shared__ int shared_group_storage[];
   int* counts = shared_group_storage;
   int* offsets = counts + num_types;
@@ -56,8 +57,8 @@ __global__ void build_local_type_schedule(
   }
   __syncthreads();
 
-  const int atom_base = blockIdx.x * kAnnScheduleWindowAtoms;
-  const int local_count = min(kAnnScheduleWindowAtoms, atom_count - atom_base);
+  const int atom_base = blockIdx.x * kTypeScheduleWindowAtoms;
+  const int local_count = min(kTypeScheduleWindowAtoms, atom_count - atom_base);
   for (int local_atom = threadIdx.x; local_atom < local_count;
        local_atom += blockDim.x) {
     const int atom = atom_base + local_atom;
@@ -78,7 +79,7 @@ __global__ void build_local_type_schedule(
     }
     active_type_count = active;
     invalid_offset = next;
-    schedule_identity[blockIdx.x] = active <= 1 ? 1 : 0;
+    schedule_active_type_counts[blockIdx.x] = active;
   }
   __syncthreads();
 
@@ -109,7 +110,7 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
     int num_types,
     const int* __restrict__ types,
     const int* __restrict__ scheduled_atoms,
-    const int* __restrict__ schedule_identity,
+    const int* __restrict__ schedule_active_type_counts,
     const float* __restrict__ descriptors,
     const float* __restrict__ ann_type_major,
     const float* __restrict__ spin_baseline,
@@ -127,14 +128,13 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
   const int grouped_atom = warp_atom_base + atom_in_warp;
   const bool atom_is_valid = grouped_atom < atom_count;
   const bool identity_schedule =
-      schedule_identity == nullptr ||
-      schedule_identity[grouped_atom / kAnnScheduleWindowAtoms] != 0;
+      schedule_active_type_counts == nullptr ||
+      schedule_active_type_counts[
+          grouped_atom / kTypeScheduleWindowAtoms] <= 1;
   int atom = -1;
   if (atom_is_valid) {
-    atom = grouped_atom;
-    if (!identity_schedule) {
-      atom = scheduled_atoms[grouped_atom];
-    }
+    atom = scheduled_atom_index(
+        grouped_atom, scheduled_atoms, schedule_active_type_counts, 1);
   }
 
   const int shared_stride =
@@ -330,31 +330,27 @@ __global__ void add_charge_chain_to_fp(
 
 }  // namespace
 
-static void build_local_type_schedule_on_device(
+void build_atom_type_schedule_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     DeviceWorkspace& workspace) {
   require(atom_count >= 0, "atom_count must be non-negative");
-  require(protocol.charge_mode == 0,
-          "type-scheduled ANN requires a non-charge model");
-  require(protocol.num_types > 1,
-          "type-scheduled ANN requires more than one model type");
+  require(protocol.num_types > 0, "num_types must be positive");
+  if (protocol.num_types == 1 || atom_count == 0) {
+    return;
+  }
   const DeviceWorkspaceView view = workspace.view();
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing atom types");
-  require(view.ann_scheduled_atoms != nullptr,
-          "workspace missing ANN atom schedule");
-  require(view.ann_schedule_identity != nullptr,
-          "workspace missing ANN schedule identity flags");
+  require(view.type_scheduled_atoms != nullptr,
+          "workspace missing atom type schedule");
+  require(view.type_schedule_active_type_counts != nullptr,
+          "workspace missing atom type schedule active-type counts");
 
   const int blocks =
-      (atom_count + kAnnScheduleWindowAtoms - 1) /
-      kAnnScheduleWindowAtoms;
-  if (blocks == 0) {
-    return;
-  }
-
+      (atom_count + kTypeScheduleWindowAtoms - 1) /
+      kTypeScheduleWindowAtoms;
   const std::size_t shared_bytes =
       2 * static_cast<std::size_t>(protocol.num_types) * sizeof(int);
   if (shared_bytes > kDefaultDynamicSharedMemoryBytes) {
@@ -381,8 +377,8 @@ static void build_local_type_schedule_on_device(
       atom_count,
       protocol.num_types,
       view.types,
-      view.ann_scheduled_atoms,
-      view.ann_schedule_identity);
+      view.type_scheduled_atoms,
+      view.type_schedule_active_type_counts);
   check_cuda(cudaGetLastError(), "build local type schedule launch failed");
 }
 
@@ -400,7 +396,7 @@ void evaluate_ann_energy_on_device(
 
   const bool uses_type_schedule = protocol.num_types > 1;
   if (uses_type_schedule) {
-    build_local_type_schedule_on_device(protocol, atom_count, workspace);
+    build_atom_type_schedule_on_device(protocol, atom_count, workspace);
   }
 
   const DeviceModelView model_view = model.view();
@@ -419,10 +415,10 @@ void evaluate_ann_energy_on_device(
   require(workspace_view.potential != nullptr, "workspace missing potential output");
   require(workspace_view.fp != nullptr, "workspace missing descriptor derivative cache");
   if (uses_type_schedule) {
-    require(workspace_view.ann_scheduled_atoms != nullptr,
-            "workspace missing ANN atom schedule");
-    require(workspace_view.ann_schedule_identity != nullptr,
-            "workspace missing ANN schedule identity flags");
+    require(workspace_view.type_scheduled_atoms != nullptr,
+            "workspace missing atom type schedule");
+    require(workspace_view.type_schedule_active_type_counts != nullptr,
+            "workspace missing atom type schedule active-type counts");
   }
 
   int warps_per_block = kPreferredAnnWarpsPerBlock;
@@ -469,8 +465,8 @@ void evaluate_ann_energy_on_device(
         protocol.hidden_neurons,
         protocol.num_types,
         workspace_view.types,
-        workspace_view.ann_scheduled_atoms,
-        workspace_view.ann_schedule_identity,
+        workspace_view.type_scheduled_atoms,
+        workspace_view.type_schedule_active_type_counts,
         workspace_view.descriptors,
         model_view.ann_type_major_qscaled,
         model_view.spin_baseline,

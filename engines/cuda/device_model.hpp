@@ -33,6 +33,7 @@ struct HostModelParameters {
   std::vector<float> ann_type_major_qscaled;
   std::vector<float> descriptor_coefficients;
   std::vector<float> descriptor_coefficients_type_pair_major;
+  std::vector<float> angular_coefficients_center_type_major;
   std::vector<float> q_scaler;
   std::vector<float> spin_baseline;
   std::vector<int> atomic_numbers;
@@ -51,6 +52,7 @@ struct DeviceModelUploadSummary {
   std::size_t ann_type_major_qscaled_bytes = 0;
   std::size_t descriptor_coefficients_bytes = 0;
   std::size_t descriptor_coefficients_type_pair_major_bytes = 0;
+  std::size_t angular_coefficients_center_type_major_bytes = 0;
   std::size_t q_scaler_bytes = 0;
   std::size_t spin_baseline_bytes = 0;
   std::size_t atomic_numbers_bytes = 0;
@@ -62,6 +64,7 @@ struct DeviceModelView {
   const float* ann_type_major_qscaled = nullptr;
   const float* descriptor_coefficients = nullptr;
   const float* descriptor_coefficients_type_pair_major = nullptr;
+  const float* angular_coefficients_center_type_major = nullptr;
   const float* q_scaler = nullptr;
   const float* spin_baseline = nullptr;
   const int* atomic_numbers = nullptr;
@@ -69,6 +72,7 @@ struct DeviceModelView {
   std::size_t ann_type_major_qscaled_count = 0;
   std::size_t descriptor_coefficients_count = 0;
   std::size_t descriptor_coefficients_type_pair_major_count = 0;
+  std::size_t angular_coefficients_center_type_major_count = 0;
   std::size_t q_scaler_count = 0;
   std::size_t spin_baseline_count = 0;
   std::size_t atomic_numbers_count = 0;
@@ -97,6 +101,7 @@ class DeviceModel {
   float* ann_type_major_qscaled_device_ = nullptr;
   float* descriptor_coefficients_device_ = nullptr;
   float* descriptor_coefficients_type_pair_major_device_ = nullptr;
+  float* angular_coefficients_center_type_major_device_ = nullptr;
   float* q_scaler_device_ = nullptr;
   float* spin_baseline_device_ = nullptr;
   int* atomic_numbers_device_ = nullptr;

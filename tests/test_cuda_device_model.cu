@@ -1077,12 +1077,16 @@ int main() {
           host.descriptor_coefficients.size() * sizeof(float) ||
       summary.descriptor_coefficients_type_pair_major_bytes !=
           host.descriptor_coefficients_type_pair_major.size() * sizeof(float) ||
+      summary.angular_coefficients_center_type_major_bytes !=
+          host.angular_coefficients_center_type_major.size() * sizeof(float) ||
       summary.q_scaler_bytes != host.q_scaler.size() * sizeof(float) ||
       summary.atomic_numbers_bytes != host.atomic_numbers.size() * sizeof(int) ||
       summary.total_bytes !=
           (host.ann_type_major.size() + host.ann_type_major_qscaled.size() +
            host.descriptor_coefficients.size() +
-           host.descriptor_coefficients_type_pair_major.size() + host.q_scaler.size()) *
+           host.descriptor_coefficients_type_pair_major.size() +
+           host.angular_coefficients_center_type_major.size() +
+           host.q_scaler.size()) *
                   sizeof(float) +
               host.atomic_numbers.size() * sizeof(int)) {
     std::fprintf(stderr, "device model upload summary contract failed\n");
@@ -1099,6 +1103,9 @@ int main() {
       !copy_matches(
           device.view().descriptor_coefficients_type_pair_major,
           host.descriptor_coefficients_type_pair_major) ||
+      !copy_matches(
+          device.view().angular_coefficients_center_type_major,
+          host.angular_coefficients_center_type_major) ||
       !copy_matches(device.q_scaler_device(), host.q_scaler) ||
       copy_ints(device.view().atomic_numbers, host.atomic_numbers.size()) !=
           host.atomic_numbers) {

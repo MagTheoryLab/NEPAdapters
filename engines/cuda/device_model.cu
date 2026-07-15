@@ -94,6 +94,13 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.descriptor_coefficients_type_pair_major_count =
         host.descriptor_coefficients_type_pair_major.size();
     upload_float_array(
+        host.angular_coefficients_center_type_major,
+        angular_coefficients_center_type_major_device_,
+        summary_.angular_coefficients_center_type_major_bytes,
+        "upload center-type-major angular coefficients");
+    view_.angular_coefficients_center_type_major_count =
+        host.angular_coefficients_center_type_major.size();
+    upload_float_array(
         host.q_scaler,
         q_scaler_device_,
         summary_.q_scaler_bytes,
@@ -116,6 +123,8 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.descriptor_coefficients = descriptor_coefficients_device_;
     view_.descriptor_coefficients_type_pair_major =
         descriptor_coefficients_type_pair_major_device_;
+    view_.angular_coefficients_center_type_major =
+        angular_coefficients_center_type_major_device_;
     view_.q_scaler = q_scaler_device_;
     view_.spin_baseline = spin_baseline_device_;
     view_.atomic_numbers = atomic_numbers_device_;
@@ -124,6 +133,7 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.ann_type_major_qscaled_bytes +
         summary_.descriptor_coefficients_bytes +
         summary_.descriptor_coefficients_type_pair_major_bytes +
+        summary_.angular_coefficients_center_type_major_bytes +
         summary_.q_scaler_bytes +
         summary_.spin_baseline_bytes +
         summary_.atomic_numbers_bytes;
@@ -152,6 +162,8 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   descriptor_coefficients_device_ = other.descriptor_coefficients_device_;
   descriptor_coefficients_type_pair_major_device_ =
       other.descriptor_coefficients_type_pair_major_device_;
+  angular_coefficients_center_type_major_device_ =
+      other.angular_coefficients_center_type_major_device_;
   q_scaler_device_ = other.q_scaler_device_;
   spin_baseline_device_ = other.spin_baseline_device_;
   atomic_numbers_device_ = other.atomic_numbers_device_;
@@ -162,6 +174,7 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   other.ann_type_major_qscaled_device_ = nullptr;
   other.descriptor_coefficients_device_ = nullptr;
   other.descriptor_coefficients_type_pair_major_device_ = nullptr;
+  other.angular_coefficients_center_type_major_device_ = nullptr;
   other.q_scaler_device_ = nullptr;
   other.spin_baseline_device_ = nullptr;
   other.atomic_numbers_device_ = nullptr;
@@ -195,6 +208,7 @@ void DeviceModel::release() {
   free_device(ann_type_major_qscaled_device_);
   free_device(descriptor_coefficients_device_);
   free_device(descriptor_coefficients_type_pair_major_device_);
+  free_device(angular_coefficients_center_type_major_device_);
   free_device(q_scaler_device_);
   free_device(spin_baseline_device_);
   free_device(atomic_numbers_device_);

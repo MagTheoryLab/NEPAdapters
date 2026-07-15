@@ -36,6 +36,19 @@ constexpr bool virial_targets_neighbor(VirialTarget target) {
 }
 
 #if defined(__CUDACC__)
+__device__ __forceinline__ int scheduled_atom_index(
+    int grouped_atom,
+    const int* scheduled_atoms,
+    const int* schedule_active_type_counts,
+    int max_active_types_without_grouping) {
+  const bool use_schedule =
+      schedule_active_type_counts != nullptr &&
+      schedule_active_type_counts[
+          grouped_atom / kTypeScheduleWindowAtoms] >
+          max_active_types_without_grouping;
+  return use_schedule ? scheduled_atoms[grouped_atom] : grouped_atom;
+}
+
 template <typename T>
 __device__ __forceinline__ T warp_sum_equal_atom(
     unsigned peer_mask,
@@ -189,12 +202,6 @@ void build_pair_geometry_cache_on_device(
     const SimulationBox& box,
     DeviceWorkspace& workspace);
 
-void build_angular_geometry_cache_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    DeviceWorkspace& workspace);
-
 void build_pair_geometry_cache_batched(
     const ModelProtocol& protocol,
     int atom_count,
@@ -211,11 +218,6 @@ void build_radial_geometry_basis_cache_on_device(
     const SimulationBox& box,
     DeviceWorkspace& workspace);
 
-void build_radial_geometry_basis_cache_batched(
-    const ModelProtocol& protocol,
-    int atom_count,
-    DeviceWorkspace& workspace);
-
 void build_angular_basis_cache_on_device(
     const ModelProtocol& protocol,
     int atom_count,
@@ -227,20 +229,7 @@ void build_radial_descriptors_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace);
 
-bool build_radial_descriptors_from_geometry_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const SimulationBox& box,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
-
 void build_angular_descriptors_on_device(
-    const ModelProtocol& protocol,
-    int atom_count,
-    const DeviceModel& model,
-    DeviceWorkspace& workspace);
-
-void build_angular_descriptors_from_geometry_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
@@ -275,6 +264,11 @@ void evaluate_ann_energy_on_device(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
+void build_atom_type_schedule_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
     DeviceWorkspace& workspace);
 
 void evaluate_qnep_ann_on_device(

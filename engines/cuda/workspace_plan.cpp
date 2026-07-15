@@ -178,14 +178,14 @@ void add_execution_scratch(
       "descriptors",
       ScalarType::float32,
       plan.atom_capacity * static_cast<std::size_t>(protocol.descriptor_dim));
-  if (protocol.charge_mode == 0 && protocol.num_types > 1) {
-    add_array(plan, "ann_scheduled_atoms", ScalarType::int32, plan.atom_capacity);
+  if (protocol.num_types > 1) {
+    add_array(plan, "type_scheduled_atoms", ScalarType::int32, plan.atom_capacity);
     add_array(
         plan,
-        "ann_schedule_identity",
+        "type_schedule_active_type_counts",
         ScalarType::int32,
-        (plan.atom_capacity + kAnnScheduleWindowAtoms - 1) /
-            kAnnScheduleWindowAtoms);
+        (plan.atom_capacity + kTypeScheduleWindowAtoms - 1) /
+            kTypeScheduleWindowAtoms);
   }
   add_array(
       plan,
