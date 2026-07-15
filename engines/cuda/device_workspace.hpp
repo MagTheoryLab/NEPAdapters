@@ -8,6 +8,8 @@
 
 namespace nep_adapters::cuda_backend {
 
+inline constexpr int kAnnScheduleWindowAtoms = 1024;
+
 enum class ScalarType {
   int32,
   float32,
@@ -92,6 +94,9 @@ struct DeviceWorkspaceView {
   double* structure_energy = nullptr;
   double* structure_virial_row_major9 = nullptr;
   int* active_atom_indices = nullptr;
+
+  int* ann_scheduled_atoms = nullptr;
+  int* ann_schedule_identity = nullptr;
 
   int* nn_radial = nullptr;
   int* nl_radial_slot_major = nullptr;
