@@ -18,7 +18,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,6 +35,49 @@ bool valid_batch(const NepaStructureBatch& batch) {
          batch.boxes_row_major9 != nullptr;
 }
 
+std::size_t max_structure_atom_count(const NepaStructureBatch& batch) {
+  std::size_t maximum = 0;
+  for (std::int32_t structure = 0; structure < batch.num_structures;
+       ++structure) {
+    maximum = std::max(
+        maximum,
+        static_cast<std::size_t>(batch.atom_counts[structure]));
+  }
+  return maximum;
+}
+
+struct StructureBatchView {
+  StructureBatchView(const NepaStructureBatch& source, int structure)
+      : atom_count(source.atom_counts[structure]),
+        atom_offset(source.atom_offsets[structure]) {
+    local_atom_counts[0] = atom_count;
+    local_atom_offsets[0] = 0;
+    batch.num_structures = 1;
+    batch.total_atoms = atom_count;
+    batch.atom_counts = local_atom_counts;
+    batch.atom_offsets = local_atom_offsets;
+    batch.types = source.types + atom_offset;
+    batch.positions_aos3 =
+        source.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
+    batch.spins_aos3 =
+        source.spins_aos3 != nullptr
+            ? source.spins_aos3 + 3 * static_cast<std::size_t>(atom_offset)
+            : nullptr;
+    batch.boxes_row_major9 =
+        source.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
+    batch.pbc_flags3 =
+        source.pbc_flags3 != nullptr
+            ? source.pbc_flags3 + 3 * static_cast<std::size_t>(structure)
+            : nullptr;
+  }
+
+  std::int32_t local_atom_counts[1]{};
+  std::int32_t local_atom_offsets[1]{};
+  std::int32_t atom_count = 0;
+  std::int32_t atom_offset = 0;
+  NepaStructureBatch batch{};
+};
+
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 bool supports_cuda_force_protocol(
     const nep_adapters::cuda_backend::ModelProtocol& protocol) {
@@ -49,11 +91,6 @@ bool supports_cuda_force_protocol(
            protocol.zbl_outer > protocol.zbl_inner &&
            protocol.zbl_outer <= protocol.cutoff_radial)) &&
          body.l_max_3body <= 4;
-}
-
-bool supports_batched_execution(
-    const nep_adapters::cuda_backend::ModelProtocol& protocol) {
-  return supports_cuda_force_protocol(protocol) && protocol.spin_mode == 0;
 }
 
 bool needs_angular_terms(
@@ -273,27 +310,6 @@ bool invert_row_major3(const double* matrix, double* inverse) {
   return true;
 }
 
-bool batch_boxes_are_orthorhombic(const NepaStructureBatch& batch) {
-  constexpr double kTolerance = 1.0e-14;
-  for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-    const double* box = batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
-    if (!std::isfinite(box[0]) || !std::isfinite(box[4]) ||
-        !std::isfinite(box[8]) || box[0] <= 0.0 || box[4] <= 0.0 ||
-        box[8] <= 0.0) {
-      return false;
-    }
-    for (int component = 0; component < 9; ++component) {
-      if (component == 0 || component == 4 || component == 8) {
-        continue;
-      }
-      if (std::abs(box[component]) > kTolerance) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 bool make_simulation_box(
     const NepaStructureBatch& batch,
     nep_adapters::cuda_backend::SimulationBox& box) {
@@ -360,9 +376,90 @@ void clear_device_doubles(double* device, std::size_t count) {
   }
 }
 
-int public_virial_component_to_cuda_internal(int component) {
-  constexpr int map[] = {0, 3, 4, 6, 1, 5, 7, 8, 2};
-  return map[component];
+void copy_prepared_batch_results_to_host(
+    const nep_adapters::cuda_backend::DeviceWorkspaceView& view,
+    int structure_count,
+    int atom_count,
+    int structure_offset,
+    int atom_offset,
+    const NepaStructureBatch& source_batch,
+    bool spin_model,
+    bool charge_model,
+    NepaFindForceResult& result) {
+  copy_device_doubles_to_host(
+      view.structure_energy,
+      static_cast<std::size_t>(structure_count),
+      result.energy_per_structure + structure_offset,
+      "failed to copy CUDA structure energies");
+  copy_device_doubles_to_host(
+      view.output_forces_aos3,
+      static_cast<std::size_t>(atom_count) * 3,
+      result.forces_aos3 + 3 * static_cast<std::size_t>(atom_offset),
+      "failed to copy CUDA forces");
+  if (result.potential_per_atom != nullptr) {
+    copy_device_doubles_to_host(
+        view.potential,
+        static_cast<std::size_t>(atom_count),
+        result.potential_per_atom + atom_offset,
+        "failed to copy CUDA per-atom potentials");
+  }
+  if (result.virials_per_atom_row_major9 != nullptr) {
+    copy_device_doubles_to_host(
+        view.output_virials_per_atom_row_major9,
+        static_cast<std::size_t>(atom_count) * 9,
+        result.virials_per_atom_row_major9 +
+            9 * static_cast<std::size_t>(atom_offset),
+        "failed to copy CUDA per-atom virials");
+  }
+  if (result.virials_row_major9 != nullptr) {
+    copy_device_doubles_to_host(
+        view.structure_virial_row_major9,
+        static_cast<std::size_t>(structure_count) * 9,
+        result.virials_row_major9 +
+            9 * static_cast<std::size_t>(structure_offset),
+        "failed to copy CUDA structure virials");
+  }
+  if (charge_model && result.charge_per_atom != nullptr) {
+    copy_device_doubles_to_host(
+        view.charge,
+        static_cast<std::size_t>(atom_count),
+        result.charge_per_atom + atom_offset,
+        "failed to copy CUDA per-atom charges");
+  }
+
+  if (!spin_model ||
+      (result.mforces_aos3 == nullptr && result.tau_aos3 == nullptr)) {
+    return;
+  }
+  std::vector<double> local_mforces;
+  double* mforces = result.mforces_aos3 != nullptr
+      ? result.mforces_aos3 + 3 * static_cast<std::size_t>(atom_offset)
+      : nullptr;
+  if (mforces == nullptr) {
+    local_mforces.resize(static_cast<std::size_t>(atom_count) * 3);
+    mforces = local_mforces.data();
+  }
+  copy_device_doubles_to_host(
+      view.output_mforces_aos3,
+      static_cast<std::size_t>(atom_count) * 3,
+      mforces,
+      "failed to copy CUDA mforces");
+  if (result.tau_aos3 == nullptr) {
+    return;
+  }
+  for (int atom = 0; atom < atom_count; ++atom) {
+    const std::size_t global_atom =
+        static_cast<std::size_t>(atom_offset + atom);
+    const double sx = source_batch.spins_aos3[3 * global_atom + 0];
+    const double sy = source_batch.spins_aos3[3 * global_atom + 1];
+    const double sz = source_batch.spins_aos3[3 * global_atom + 2];
+    const double mx = mforces[3 * static_cast<std::size_t>(atom) + 0];
+    const double my = mforces[3 * static_cast<std::size_t>(atom) + 1];
+    const double mz = mforces[3 * static_cast<std::size_t>(atom) + 2];
+    result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
+    result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
+    result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
+  }
 }
 
 #endif
@@ -436,25 +533,33 @@ class CudaModel : public nep_adapters::Model {
       if (protocol_.charge_mode > 0 && batch.num_structures != 1) {
         return NEPA_STATUS_UNSUPPORTED;
       }
-      if (supports_batched_execution(protocol_)) {
-        nep_adapters::cuda_backend::DeviceWorkspace workspace(
-            nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
-                protocol_,
-                static_cast<std::size_t>(batch.total_atoms),
-                static_cast<std::size_t>(batch.num_structures)));
+      const bool multi_box_execution =
+          protocol_.charge_mode == 0 && protocol_.spin_mode == 0;
+      const std::size_t workspace_atom_capacity =
+          multi_box_execution
+              ? static_cast<std::size_t>(batch.total_atoms)
+              : max_structure_atom_count(batch);
+      const std::size_t workspace_structure_capacity =
+          multi_box_execution
+              ? static_cast<std::size_t>(batch.num_structures)
+              : 1;
+      nep_adapters::cuda_backend::DeviceWorkspace& workspace =
+          batch_workspace(
+              workspace_atom_capacity,
+              workspace_structure_capacity);
 
+      if (multi_box_execution) {
         nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
-        const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+        const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
-        const bool orthorhombic_fast_path = batch_boxes_are_orthorhombic(batch);
         nep_adapters::cuda_backend::build_internal_neighbors_batched(
             protocol_,
             batch.num_structures,
             batch.total_atoms,
             workspace,
-            orthorhombic_fast_path);
+            nep_adapters::cuda_backend::batch_boxes_are_orthorhombic(batch));
         const auto force_request = make_force_evaluation_request(
             nep_adapters::cuda_backend::
                 ForceNeighborTopology::batched_multi_box,
@@ -473,81 +578,29 @@ class CudaModel : public nep_adapters::Model {
             batch.num_structures,
             batch.total_atoms,
             workspace);
-        copy_device_doubles_to_host(
-            view.structure_energy,
-            static_cast<std::size_t>(batch.num_structures),
-            result.energy_per_structure,
-            "failed to copy CUDA structure energies");
-        copy_device_doubles_to_host(
-            view.output_forces_aos3,
-            static_cast<std::size_t>(batch.total_atoms) * 3,
-            result.forces_aos3,
-            "failed to copy CUDA forces");
-        if (result.potential_per_atom != nullptr) {
-          copy_device_doubles_to_host(
-              view.potential,
-              static_cast<std::size_t>(batch.total_atoms),
-              result.potential_per_atom,
-              "failed to copy CUDA per-atom potentials");
-        }
-        if (result.virials_per_atom_row_major9 != nullptr) {
-          copy_device_doubles_to_host(
-              view.output_virials_per_atom_row_major9,
-              static_cast<std::size_t>(batch.total_atoms) * 9,
-              result.virials_per_atom_row_major9,
-              "failed to copy CUDA per-atom virials");
-        }
-        if (result.virials_row_major9 != nullptr) {
-          copy_device_doubles_to_host(
-              view.structure_virial_row_major9,
-              static_cast<std::size_t>(batch.num_structures) * 9,
-              result.virials_row_major9,
-              "failed to copy CUDA structure virials");
-        }
+        copy_prepared_batch_results_to_host(
+            view,
+            batch.num_structures,
+            batch.total_atoms,
+            0,
+            0,
+            batch,
+            false,
+            false,
+            result);
         return NEPA_STATUS_OK;
       }
-      std::size_t max_structure_atoms = 0;
-      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-        max_structure_atoms = std::max(
-            max_structure_atoms,
-            static_cast<std::size_t>(batch.atom_counts[structure]));
-      }
-      nep_adapters::cuda_backend::DeviceWorkspace workspace(
-          nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
-              protocol_,
-              max_structure_atoms,
-              1));
 
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-        const std::int32_t atom_count = batch.atom_counts[structure];
-        const std::int32_t atom_offset = batch.atom_offsets[structure];
-        const std::int32_t local_atom_counts[] = {atom_count};
-        const std::int32_t local_atom_offsets[] = {0};
-        NepaStructureBatch single{};
-        single.num_structures = 1;
-        single.total_atoms = atom_count;
-        single.atom_counts = local_atom_counts;
-        single.atom_offsets = local_atom_offsets;
-        single.types = batch.types + atom_offset;
-        single.positions_aos3 =
-            batch.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
-        single.spins_aos3 =
-            batch.spins_aos3 != nullptr
-                ? batch.spins_aos3 + 3 * static_cast<std::size_t>(atom_offset)
-                : nullptr;
-        single.boxes_row_major9 =
-            batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
-        single.pbc_flags3 =
-            batch.pbc_flags3 != nullptr
-                ? batch.pbc_flags3 + 3 * static_cast<std::size_t>(structure)
-                : nullptr;
+        const StructureBatchView single(batch, structure);
 
         nep_adapters::cuda_backend::SimulationBox box;
-        if (!make_simulation_box(single, box)) {
+        if (!make_simulation_box(single.batch, box)) {
           return NEPA_STATUS_UNSUPPORTED;
         }
-        nep_adapters::cuda_backend::stage_batch_on_device(single, workspace);
-        const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
+        nep_adapters::cuda_backend::stage_batch_on_device(
+            single.batch, workspace);
+        const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
         if (view.mforce_soa3 != nullptr) {
@@ -556,7 +609,7 @@ class CudaModel : public nep_adapters::Model {
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
         nep_adapters::cuda_backend::build_internal_neighbors_on_device(
             protocol_,
-            atom_count,
+            single.atom_count,
             box,
             workspace);
         const bool has_angular = needs_angular_terms(protocol_);
@@ -570,44 +623,44 @@ class CudaModel : public nep_adapters::Model {
           nep_adapters::cuda_backend::run_force_pipeline(
               protocol_,
               force_request,
-              atom_count,
+              single.atom_count,
               box,
               device_,
               workspace);
         } else {
           nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
               protocol_,
-              atom_count,
+              single.atom_count,
               box,
               device_,
               workspace,
               nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
           nep_adapters::cuda_backend::evaluate_qnep_ann_on_device(
-              protocol_, atom_count, device_, workspace);
+              protocol_, single.atom_count, device_, workspace);
           if (has_angular) {
             nep_adapters::cuda_backend::build_atom_type_schedule_on_device(
-                protocol_, atom_count, workspace);
+                protocol_, single.atom_count, workspace);
           }
           nep_adapters::cuda_backend::zero_total_charge_on_device(
-              atom_count,
+              single.atom_count,
               workspace);
           nep_adapters::cuda_backend::apply_qnep_charge_terms_on_device(
               protocol_,
-              atom_count,
+              single.atom_count,
               box,
               workspace,
               result.potential_per_atom != nullptr,
               result.virials_per_atom_row_major9 != nullptr);
           nep_adapters::cuda_backend::add_charge_chain_to_fp_on_device(
               protocol_,
-              atom_count,
+              single.atom_count,
               workspace);
           const auto charge_virial_target = select_fp64_virial_target(
               true,
               result.virials_per_atom_row_major9 != nullptr);
           nep_adapters::cuda_backend::accumulate_radial_forces_on_device(
               protocol_,
-              atom_count,
+              single.atom_count,
               box,
               device_,
               workspace,
@@ -616,7 +669,7 @@ class CudaModel : public nep_adapters::Model {
           if (has_angular) {
             nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
                 protocol_,
-                atom_count,
+                single.atom_count,
                 device_,
                 workspace,
                 charge_virial_target);
@@ -624,7 +677,7 @@ class CudaModel : public nep_adapters::Model {
           if (protocol_.has_zbl) {
             nep_adapters::cuda_backend::accumulate_zbl_forces_on_device(
                 protocol_,
-                atom_count,
+                single.atom_count,
                 box,
                 device_,
                 workspace,
@@ -633,87 +686,18 @@ class CudaModel : public nep_adapters::Model {
           }
         }
 
-        const std::vector<double> potential =
-            copy_device_doubles(view.potential, view.atom_capacity);
-        const std::vector<double> force_soa =
-            copy_device_doubles(view.force_soa3, view.atom_capacity * 3);
-        const bool needs_mforce_copy =
-            protocol_.spin_mode != 0 &&
-            (result.mforces_aos3 != nullptr || result.tau_aos3 != nullptr);
-        const std::vector<double> mforce_soa =
-            needs_mforce_copy
-                ? copy_device_doubles(view.mforce_soa3, view.atom_capacity * 3)
-                : std::vector<double>{};
-        const std::vector<double> virial_soa =
-            copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
-        const std::vector<double> charge =
-            result.charge_per_atom != nullptr && protocol_.charge_mode > 0
-                ? copy_device_doubles(view.charge, view.atom_capacity)
-                : std::vector<double>{};
-        result.energy_per_structure[structure] =
-            std::accumulate(potential.begin(), potential.begin() + atom_count, 0.0);
-        for (int atom = 0; atom < atom_count; ++atom) {
-          const std::size_t global_atom =
-              static_cast<std::size_t>(atom_offset + atom);
-          if (result.potential_per_atom != nullptr) {
-            result.potential_per_atom[global_atom] =
-                potential[static_cast<std::size_t>(atom)];
-          }
-          if (result.charge_per_atom != nullptr && protocol_.charge_mode > 0) {
-            result.charge_per_atom[global_atom] =
-                charge[static_cast<std::size_t>(atom)];
-          }
-          result.forces_aos3[3 * global_atom + 0] =
-              force_soa[static_cast<std::size_t>(atom)];
-          result.forces_aos3[3 * global_atom + 1] =
-              force_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
-          result.forces_aos3[3 * global_atom + 2] =
-              force_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
-          if (result.mforces_aos3 != nullptr && protocol_.spin_mode != 0) {
-            result.mforces_aos3[3 * global_atom + 0] =
-                mforce_soa[static_cast<std::size_t>(atom)];
-            result.mforces_aos3[3 * global_atom + 1] =
-                mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
-            result.mforces_aos3[3 * global_atom + 2] =
-                mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
-          }
-          if (result.tau_aos3 != nullptr && protocol_.spin_mode != 0) {
-            const double sx = batch.spins_aos3[3 * global_atom + 0];
-            const double sy = batch.spins_aos3[3 * global_atom + 1];
-            const double sz = batch.spins_aos3[3 * global_atom + 2];
-            const double mx = mforce_soa[static_cast<std::size_t>(atom)];
-            const double my =
-                mforce_soa[view.atom_capacity + static_cast<std::size_t>(atom)];
-            const double mz =
-                mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
-            result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
-            result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
-            result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
-          }
-          if (result.virials_per_atom_row_major9 != nullptr) {
-            for (int component = 0; component < 9; ++component) {
-              const int internal_component =
-                  public_virial_component_to_cuda_internal(component);
-              result.virials_per_atom_row_major9[9 * global_atom + component] =
-                  virial_soa[internal_component * view.atom_capacity +
-                             static_cast<std::size_t>(atom)];
-            }
-          }
-        }
-        if (result.virials_row_major9 != nullptr) {
-          double* structure_virial =
-              result.virials_row_major9 + 9 * static_cast<std::size_t>(structure);
-          for (int component = 0; component < 9; ++component) {
-            const int internal_component =
-                public_virial_component_to_cuda_internal(component);
-            double total = 0.0;
-            for (int atom = 0; atom < atom_count; ++atom) {
-              total += virial_soa[internal_component * view.atom_capacity +
-                                  static_cast<std::size_t>(atom)];
-            }
-            structure_virial[component] = total;
-          }
-        }
+        nep_adapters::cuda_backend::prepare_batched_outputs(
+            1, single.atom_count, workspace);
+        copy_prepared_batch_results_to_host(
+            view,
+            1,
+            single.atom_count,
+            structure,
+            single.atom_offset,
+            batch,
+            protocol_.spin_mode != 0,
+            protocol_.charge_mode > 0,
+            result);
       }
       return NEPA_STATUS_OK;
 #else
@@ -740,53 +724,24 @@ class CudaModel : public nep_adapters::Model {
       if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
-      std::size_t max_structure_atoms = 0;
+      nep_adapters::cuda_backend::DeviceWorkspace& workspace =
+          batch_workspace(max_structure_atom_count(batch), 1);
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-        max_structure_atoms = std::max(
-            max_structure_atoms,
-            static_cast<std::size_t>(batch.atom_counts[structure]));
-      }
-      nep_adapters::cuda_backend::DeviceWorkspace workspace(
-          nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
-              protocol_,
-              max_structure_atoms,
-              1));
-      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-        const std::int32_t atom_count = batch.atom_counts[structure];
-        const std::int32_t atom_offset = batch.atom_offsets[structure];
-        const std::int32_t local_atom_counts[] = {atom_count};
-        const std::int32_t local_atom_offsets[] = {0};
-        NepaStructureBatch single{};
-        single.num_structures = 1;
-        single.total_atoms = atom_count;
-        single.atom_counts = local_atom_counts;
-        single.atom_offsets = local_atom_offsets;
-        single.types = batch.types + atom_offset;
-        single.positions_aos3 =
-            batch.positions_aos3 + 3 * static_cast<std::size_t>(atom_offset);
-        single.spins_aos3 =
-            batch.spins_aos3 != nullptr
-                ? batch.spins_aos3 + 3 * static_cast<std::size_t>(atom_offset)
-                : nullptr;
-        single.boxes_row_major9 =
-            batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
-        single.pbc_flags3 =
-            batch.pbc_flags3 != nullptr
-                ? batch.pbc_flags3 + 3 * static_cast<std::size_t>(structure)
-                : nullptr;
+        const StructureBatchView single(batch, structure);
         nep_adapters::cuda_backend::SimulationBox box;
-        if (!make_simulation_box(single, box)) {
+        if (!make_simulation_box(single.batch, box)) {
           return NEPA_STATUS_UNSUPPORTED;
         }
-        nep_adapters::cuda_backend::stage_batch_on_device(single, workspace);
+        nep_adapters::cuda_backend::stage_batch_on_device(
+            single.batch, workspace);
         nep_adapters::cuda_backend::build_internal_neighbors_on_device(
             protocol_,
-            atom_count,
+            single.atom_count,
             box,
             workspace);
         nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
             protocol_,
-            atom_count,
+            single.atom_count,
             box,
             device_,
             workspace,
@@ -794,7 +749,7 @@ class CudaModel : public nep_adapters::Model {
         if (protocol_.spin_mode != 0) {
           nep_adapters::cuda_backend::build_spin_descriptors_on_device(
               protocol_,
-              atom_count,
+              single.atom_count,
               box,
               device_,
               workspace);
@@ -803,9 +758,9 @@ class CudaModel : public nep_adapters::Model {
         const std::vector<float> descriptor_soa = copy_device_floats(
             view.descriptors,
             view.atom_capacity * static_cast<std::size_t>(protocol_.descriptor_dim));
-        for (int atom = 0; atom < atom_count; ++atom) {
+        for (int atom = 0; atom < single.atom_count; ++atom) {
           const std::size_t global_atom =
-              static_cast<std::size_t>(atom_offset + atom);
+              static_cast<std::size_t>(single.atom_offset + atom);
           for (int dim = 0; dim < protocol_.descriptor_dim; ++dim) {
             double value = descriptor_soa[
                 static_cast<std::size_t>(dim) * view.atom_capacity +
@@ -1154,6 +1109,26 @@ class CudaModel : public nep_adapters::Model {
 
  private:
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
+  nep_adapters::cuda_backend::DeviceWorkspace& batch_workspace(
+      std::size_t atom_capacity,
+      std::size_t structure_capacity) {
+    const bool same_execution_shape =
+        (structure_capacity == 1) == (batch_structure_capacity_ == 1);
+    if (batch_workspace_ != nullptr && same_execution_shape &&
+        atom_capacity <= batch_atom_capacity_ &&
+        structure_capacity <= batch_structure_capacity_) {
+      return *batch_workspace_;
+    }
+
+    batch_workspace_ =
+        std::make_unique<nep_adapters::cuda_backend::DeviceWorkspace>(
+            nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+                protocol_, atom_capacity, structure_capacity));
+    batch_atom_capacity_ = atom_capacity;
+    batch_structure_capacity_ = structure_capacity;
+    return *batch_workspace_;
+  }
+
   nep_adapters::cuda_backend::DeviceWorkspace& lammps_device_workspace(
       const nep_adapters::cuda_backend::ModelProtocol& protocol,
       std::size_t atom_capacity,
@@ -1189,6 +1164,9 @@ class CudaModel : public nep_adapters::Model {
   nep_adapters::cuda_backend::ModelProtocol protocol_;
 #if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
   nep_adapters::cuda_backend::DeviceModel device_;
+  std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> batch_workspace_;
+  std::size_t batch_atom_capacity_ = 0;
+  std::size_t batch_structure_capacity_ = 0;
   std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> lammps_device_workspace_;
   std::size_t lammps_device_atom_capacity_ = 0;
   std::size_t lammps_device_active_atom_capacity_ = 0;

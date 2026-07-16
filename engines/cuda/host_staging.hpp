@@ -33,6 +33,8 @@ struct HostExternalNeighborStaging {
 HostBatchStaging stage_batch_for_internal_neighbors(
     const NepaStructureBatch& batch);
 
+bool batch_boxes_are_orthorhombic(const NepaStructureBatch& batch);
+
 HostExternalNeighborStaging stage_lammps_external_neighbors(
     const NepaLammpsNeighborInput& input,
     const ModelProtocol& protocol);

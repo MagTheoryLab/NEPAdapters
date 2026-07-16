@@ -6,6 +6,7 @@
 #include "device_model.hpp"
 #include "device_workspace.hpp"
 #include "force_pipeline.hpp"
+#include "host_staging.hpp"
 
 #include <cuda_runtime.h>
 #endif
@@ -302,27 +303,6 @@ void check_cuda(cudaError_t status, const char* action) {
   }
 }
 
-bool batch_boxes_are_orthorhombic(const NepaStructureBatch& batch) {
-  constexpr double kTolerance = 1.0e-14;
-  for (int structure = 0; structure < batch.num_structures; ++structure) {
-    const double* box = batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
-    if (!std::isfinite(box[0]) || !std::isfinite(box[4]) ||
-        !std::isfinite(box[8]) || box[0] <= 0.0 || box[4] <= 0.0 ||
-        box[8] <= 0.0) {
-      return false;
-    }
-    for (int component = 0; component < 9; ++component) {
-      if (component == 0 || component == 4 || component == 8) {
-        continue;
-      }
-      if (std::abs(box[component]) > kTolerance) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 void clear_device_outputs(nep_adapters::cuda_backend::DeviceWorkspace& workspace) {
   const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
   check_cuda(
@@ -383,7 +363,8 @@ double time_device_pipeline(
           static_cast<std::size_t>(batch.num_structures)));
   workspace_bytes = workspace.summary().total_bytes;
   nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
-  const bool orthorhombic_fast_path = batch_boxes_are_orthorhombic(batch);
+  const bool orthorhombic_fast_path =
+      nep_adapters::cuda_backend::batch_boxes_are_orthorhombic(batch);
 
   for (int i = 0; i < options.warmup; ++i) {
     run_device_pipeline(

@@ -482,60 +482,52 @@ void stage_batch_on_device(
     DeviceWorkspace& workspace) {
   const DeviceWorkspaceView view = workspace.view();
   validate_batch_for_device_staging(batch, view);
+  require(view.output_forces_aos3 != nullptr,
+          "workspace missing batch AoS staging buffer");
+  if (view.spins_soa3 != nullptr) {
+    require(view.output_mforces_aos3 != nullptr,
+            "workspace missing spin AoS staging buffer");
+  }
+  // The packed output buffers are dead until prepare_batched_outputs(), so
+  // Batch staging can reuse them instead of allocating temporary device arrays.
+  double* const positions_aos3_staging = view.output_forces_aos3;
+  double* const spins_aos3_staging = view.output_mforces_aos3;
 
-  const std::vector<int> types(batch.types, batch.types + batch.total_atoms);
-  const std::vector<int> atom_counts(
-      batch.atom_counts,
-      batch.atom_counts + batch.num_structures);
-  const std::vector<int> atom_offsets(
-      batch.atom_offsets,
-      batch.atom_offsets + batch.num_structures);
-  const std::vector<double> boxes(
-      batch.boxes_row_major9,
-      batch.boxes_row_major9 + static_cast<std::size_t>(batch.num_structures) * 9);
   std::vector<double> box_inverses(static_cast<std::size_t>(batch.num_structures) * 9);
   for (int structure = 0; structure < batch.num_structures; ++structure) {
     require(
         invert_row_major3(
-            boxes.data() + static_cast<std::size_t>(structure) * 9,
+            batch.boxes_row_major9 + static_cast<std::size_t>(structure) * 9,
             box_inverses.data() + static_cast<std::size_t>(structure) * 9),
         "singular simulation box");
-  }
-  std::vector<int> pbc(
-      static_cast<std::size_t>(batch.num_structures) * 3,
-      0);
-  if (batch.pbc_flags3 != nullptr) {
-    pbc.assign(
-        batch.pbc_flags3,
-        batch.pbc_flags3 + static_cast<std::size_t>(batch.num_structures) * 3);
   }
 
   check_cuda(
       cudaMemcpy(
           view.types,
-          types.data(),
-          types.size() * sizeof(int),
+          batch.types,
+          static_cast<std::size_t>(batch.total_atoms) * sizeof(int),
           cudaMemcpyHostToDevice),
       "copy batch types");
   check_cuda(
       cudaMemcpy(
           view.structure_atom_counts,
-          atom_counts.data(),
-          atom_counts.size() * sizeof(int),
+          batch.atom_counts,
+          static_cast<std::size_t>(batch.num_structures) * sizeof(int),
           cudaMemcpyHostToDevice),
       "copy structure atom counts");
   check_cuda(
       cudaMemcpy(
           view.structure_atom_offsets,
-          atom_offsets.data(),
-          atom_offsets.size() * sizeof(int),
+          batch.atom_offsets,
+          static_cast<std::size_t>(batch.num_structures) * sizeof(int),
           cudaMemcpyHostToDevice),
       "copy structure atom offsets");
   check_cuda(
       cudaMemcpy(
           view.boxes_row_major9,
-          boxes.data(),
-          boxes.size() * sizeof(double),
+          batch.boxes_row_major9,
+          static_cast<std::size_t>(batch.num_structures) * 9 * sizeof(double),
           cudaMemcpyHostToDevice),
       "copy boxes");
   check_cuda(
@@ -545,65 +537,62 @@ void stage_batch_on_device(
           box_inverses.size() * sizeof(double),
           cudaMemcpyHostToDevice),
       "copy box inverses");
+  const std::size_t pbc_bytes =
+      static_cast<std::size_t>(batch.num_structures) * 3 * sizeof(int);
+  if (batch.pbc_flags3 != nullptr) {
+    check_cuda(
+        cudaMemcpy(
+            view.pbc_flags3,
+            batch.pbc_flags3,
+            pbc_bytes,
+            cudaMemcpyHostToDevice),
+        "copy pbc flags");
+  } else {
+    check_cuda(cudaMemset(view.pbc_flags3, 0, pbc_bytes), "clear pbc flags");
+  }
+
+  const std::size_t aos3_bytes =
+      static_cast<std::size_t>(batch.total_atoms) * 3 * sizeof(double);
   check_cuda(
       cudaMemcpy(
-          view.pbc_flags3,
-          pbc.data(),
-          pbc.size() * sizeof(int),
+          positions_aos3_staging,
+          batch.positions_aos3,
+          aos3_bytes,
           cudaMemcpyHostToDevice),
-      "copy pbc flags");
-
-  std::vector<double> positions_aos3(
-      batch.positions_aos3,
-      batch.positions_aos3 + static_cast<std::size_t>(batch.total_atoms) * 3);
-  double* positions_aos3_device = upload_temp(positions_aos3, "upload positions_aos3");
-  std::vector<double> spins_aos3;
-  double* spins_aos3_device = nullptr;
+      "copy batch positions");
   if (view.spins_soa3 != nullptr) {
-    spins_aos3.assign(
-        batch.spins_aos3,
-        batch.spins_aos3 + static_cast<std::size_t>(batch.total_atoms) * 3);
-    spins_aos3_device = upload_temp(spins_aos3, "upload spins_aos3");
+    check_cuda(
+        cudaMemcpy(
+            spins_aos3_staging,
+            batch.spins_aos3,
+            aos3_bytes,
+            cudaMemcpyHostToDevice),
+        "copy batch spins");
   }
-  int* atom_counts_device = upload_temp(atom_counts, "upload atom_counts");
-  int* atom_offsets_device = upload_temp(atom_offsets, "upload atom_offsets");
 
-  try {
-    const int atom_blocks = (batch.total_atoms + kBlockSize - 1) / kBlockSize;
+  const int atom_blocks = (batch.total_atoms + kBlockSize - 1) / kBlockSize;
+  stage_positions_aos_to_soa<<<atom_blocks, kBlockSize>>>(
+      batch.total_atoms,
+      static_cast<int>(view.atom_capacity),
+      positions_aos3_staging,
+      view.positions_soa3);
+  check_cuda(cudaGetLastError(), "stage positions AoS to SoA");
+  if (view.spins_soa3 != nullptr) {
     stage_positions_aos_to_soa<<<atom_blocks, kBlockSize>>>(
         batch.total_atoms,
         static_cast<int>(view.atom_capacity),
-        positions_aos3_device,
-        view.positions_soa3);
-    check_cuda(cudaGetLastError(), "stage positions AoS to SoA");
-    if (view.spins_soa3 != nullptr) {
-      stage_positions_aos_to_soa<<<atom_blocks, kBlockSize>>>(
-          batch.total_atoms,
-          static_cast<int>(view.atom_capacity),
-          spins_aos3_device,
-          view.spins_soa3);
-      check_cuda(cudaGetLastError(), "stage spins AoS to SoA");
-    }
-
-    stage_atom_to_structure<<<batch.num_structures, kBlockSize>>>(
-        batch.num_structures,
-        atom_counts_device,
-        atom_offsets_device,
-        view.atom_to_structure);
-    check_cuda(cudaGetLastError(), "stage atom_to_structure");
-    check_cuda(cudaDeviceSynchronize(), "synchronize batch staging");
-  } catch (...) {
-    free_temp(positions_aos3_device);
-    free_temp(spins_aos3_device);
-    free_temp(atom_counts_device);
-    free_temp(atom_offsets_device);
-    throw;
+        spins_aos3_staging,
+        view.spins_soa3);
+    check_cuda(cudaGetLastError(), "stage spins AoS to SoA");
   }
 
-  free_temp(positions_aos3_device);
-  free_temp(spins_aos3_device);
-  free_temp(atom_counts_device);
-  free_temp(atom_offsets_device);
+  stage_atom_to_structure<<<batch.num_structures, kBlockSize>>>(
+      batch.num_structures,
+      view.structure_atom_counts,
+      view.structure_atom_offsets,
+      view.atom_to_structure);
+  check_cuda(cudaGetLastError(), "stage atom_to_structure");
+  check_cuda(cudaDeviceSynchronize(), "synchronize batch staging");
 }
 
 void stage_lammps_external_neighbors_on_device(

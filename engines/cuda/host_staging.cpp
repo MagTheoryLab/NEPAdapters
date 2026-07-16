@@ -1,6 +1,7 @@
 #include "host_staging.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace nep_adapters::cuda_backend {
@@ -126,6 +127,26 @@ HostBatchStaging stage_batch_for_internal_neighbors(
   }
 
   return staging;
+}
+
+bool batch_boxes_are_orthorhombic(const NepaStructureBatch& batch) {
+  constexpr double kTolerance = 1.0e-14;
+  for (int structure = 0; structure < batch.num_structures; ++structure) {
+    const double* box =
+        batch.boxes_row_major9 + 9 * static_cast<std::size_t>(structure);
+    if (!std::isfinite(box[0]) || !std::isfinite(box[4]) ||
+        !std::isfinite(box[8]) || box[0] <= 0.0 || box[4] <= 0.0 ||
+        box[8] <= 0.0) {
+      return false;
+    }
+    for (int component = 0; component < 9; ++component) {
+      if (component != 0 && component != 4 && component != 8 &&
+          std::abs(box[component]) > kTolerance) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 HostExternalNeighborStaging stage_lammps_external_neighbors(
