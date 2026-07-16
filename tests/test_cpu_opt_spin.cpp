@@ -702,6 +702,97 @@ bool run_lammps(
   return true;
 }
 
+bool check_lammps_neighbor_virial_ownership(
+    NepaModel* model,
+    const std::vector<double>& positions,
+    const std::vector<double>& spins) {
+  const int atom_count = static_cast<int>(spins.size() / 3);
+  int ilist[1] = {0};
+  std::vector<int> numneigh(static_cast<std::size_t>(atom_count), 0);
+  numneigh[0] = atom_count - 1;
+  std::vector<int> neighbors(static_cast<std::size_t>(atom_count - 1));
+  for (int atom = 1; atom < atom_count; ++atom) {
+    neighbors[static_cast<std::size_t>(atom - 1)] = atom;
+  }
+  std::vector<int*> firstneigh(static_cast<std::size_t>(atom_count), nullptr);
+  firstneigh[0] = neighbors.data();
+  std::vector<int> types(static_cast<std::size_t>(atom_count), 1);
+  int type_map[2] = {-1, 0};
+  std::vector<double> position_storage = positions;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
+  std::vector<double*> position_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> spin_rows(static_cast<std::size_t>(atom_count));
+  for (int atom = 0; atom < atom_count; ++atom) {
+    position_rows[static_cast<std::size_t>(atom)] = position_storage.data() + 3 * atom;
+    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 4 * atom;
+  }
+
+  double total_potential = 0.0;
+  double total_virial[6] = {};
+  std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> mforces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> atom_virial(static_cast<std::size_t>(atom_count) * 9, 0.0);
+  std::vector<double*> force_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> mforce_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> virial_rows(static_cast<std::size_t>(atom_count));
+  for (int atom = 0; atom < atom_count; ++atom) {
+    force_rows[static_cast<std::size_t>(atom)] = forces.data() + 3 * atom;
+    mforce_rows[static_cast<std::size_t>(atom)] = mforces.data() + 3 * atom;
+    virial_rows[static_cast<std::size_t>(atom)] = atom_virial.data() + 9 * atom;
+  }
+
+  NepaLammpsNeighborInput input{};
+  input.nlocal = 1;
+  input.inum = 1;
+  input.ilist = ilist;
+  input.numneigh = numneigh.data();
+  input.firstneigh = firstneigh.data();
+  input.types = types.data();
+  input.type_map = type_map;
+  input.positions = position_rows.data();
+  input.spins = spin_rows.data();
+
+  NepaLammpsNeighborResult result{};
+  result.total_potential = &total_potential;
+  result.total_virial6 = total_virial;
+  result.forces = force_rows.data();
+  result.mforces = mforce_rows.data();
+  result.virials_per_atom9 = virial_rows.data();
+  if (nepa_find_force_lammps_neighbors(model, &input, &result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  double center_max = 0.0;
+  double neighbor_max = 0.0;
+  for (int component = 0; component < 9; ++component) {
+    center_max = std::max(center_max, std::abs(atom_virial[component]));
+    for (int atom = 1; atom < atom_count; ++atom) {
+      neighbor_max = std::max(
+          neighbor_max,
+          std::abs(atom_virial[static_cast<std::size_t>(atom) * 9 + component]));
+    }
+  }
+  const int raw9_to_total6[6] = {0, 1, 2, 3, 4, 5};
+  double total_diff = 0.0;
+  for (int component = 0; component < 6; ++component) {
+    double atom_sum = 0.0;
+    for (int atom = 1; atom < atom_count; ++atom) {
+      atom_sum += atom_virial[
+          static_cast<std::size_t>(atom) * 9 + raw9_to_total6[component]];
+    }
+    total_diff = std::max(
+        total_diff,
+        std::abs(total_virial[component] - atom_sum));
+  }
+  if (center_max > 1.0e-12 || neighbor_max < 1.0e-12 || total_diff > 1.0e-10) {
+    std::cerr << "LAMMPS spin virial ownership mismatch: center_max=" << center_max
+              << " neighbor_max=" << neighbor_max
+              << " total_diff=" << total_diff << '\n';
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -795,7 +886,8 @@ int main() {
   NepaModel* edge_model = nullptr;
   const bool edge_ok =
       nepa_load_model("cpu_opt", edge_path.c_str(), &edge_model) == NEPA_STATUS_OK &&
-      edge_model != nullptr && check_edge_derivatives(edge_model, positions, spins);
+      edge_model != nullptr && check_edge_derivatives(edge_model, positions, spins) &&
+      check_lammps_neighbor_virial_ownership(edge_model, positions, spins);
   nepa_free_model(edge_model);
 
   NepaModel* baseline_model = nullptr;
@@ -824,6 +916,8 @@ int main() {
         nepa_load_model("cpu_opt", path.c_str(), &chiral_numeric_model) == NEPA_STATUS_OK &&
         chiral_numeric_model != nullptr &&
         check_chiral_derivatives(chiral_numeric_model, chiral_positions, chiral_spins) &&
+        check_lammps_neighbor_virial_ownership(
+            chiral_numeric_model, chiral_positions, chiral_spins) &&
         run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins) &&
         run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins, true);
     nepa_free_model(chiral_numeric_model);

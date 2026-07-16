@@ -5868,6 +5868,7 @@ void add_spin_chiral_gradient(
   std::vector<double>& grad_spin,
   double* force,
   double* virial,
+  const bool lammps_neighbor_virial_ownership,
   LammpsThreadLocalScratchView* lammps_scratch = nullptr,
   NEP::SpinGradientScratch* scratch = nullptr)
 {
@@ -6455,7 +6456,9 @@ void add_spin_chiral_gradient(
           if (use_private_edges) {
             local_virial[a * 3 + b] -= rij_a * grad_rij[b];
           } else {
-            virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+            const int owner = lammps_neighbor_virial_ownership ? edge.j : 0;
+            virial[static_cast<std::size_t>(a * 3 + b) * N + owner] -=
+              rij_a * grad_rij[b];
           }
         }
       }
@@ -6900,7 +6903,6 @@ void add_spin_gradient(
   double** lammps_mforce = nullptr,
   double* lammps_total_virial = nullptr,
   double** lammps_virial = nullptr,
-  int lammps_nlocal = 0,
   LammpsThreadLocalScratchView* lammps_scratch = nullptr,
   NEP::SpinGradientScratch* scratch = nullptr,
   int center_count = 0,
@@ -6912,6 +6914,7 @@ void add_spin_gradient(
   const int offset0 = paramb.struct_dim;
   const bool lammps_output = lammps_force && lammps_mforce && lammps_total_virial;
   const bool use_lammps_scratch = lammps_output && lammps_spin_scratch_active(lammps_scratch);
+  const bool lammps_neighbor_virial_ownership = lammps_output && !use_lammps_scratch;
   std::vector<double> lammps_force_work;
   std::vector<double> lammps_virial_work;
   if (lammps_output && !use_lammps_scratch) {
@@ -7403,7 +7406,9 @@ void add_spin_gradient(
           if (use_private_edges) {
             local_virial[a * 3 + b] -= rij_a * grad_rij[b];
           } else {
-            virial[static_cast<std::size_t>(a * 3 + b) * N] -= rij_a * grad_rij[b];
+            const int owner = lammps_neighbor_virial_ownership ? edge.j : 0;
+            virial[static_cast<std::size_t>(a * 3 + b) * N + owner] -=
+              rij_a * grad_rij[b];
           }
         }
       }
@@ -7437,6 +7442,7 @@ void add_spin_gradient(
   }
   add_spin_chiral_gradient(
     paramb, annmb, N, spins, cache, Fp, grad_spin, force, virial,
+    lammps_neighbor_virial_ownership,
     use_lammps_scratch ? lammps_scratch : nullptr,
     scratch);
   if (phase) {
@@ -7457,7 +7463,7 @@ void add_spin_gradient(
     auto raw = [&](const int comp, const int atom) {
       return lammps_virial_work[static_cast<std::size_t>(comp) * N + atom];
     };
-    for (int atom = 0; atom < lammps_nlocal; ++atom) {
+    for (int atom = 0; atom < N; ++atom) {
       lammps_total_virial[0] += raw(0, atom);
       lammps_total_virial[1] += raw(4, atom);
       lammps_total_virial[2] += raw(8, atom);
@@ -7553,7 +7559,6 @@ void find_spin_force_for_lammps(
   const int atom_capacity,
   const int inum,
   const int* ilist,
-  const int nlocal,
   const int* spin_types,
   const double* spins_soa,
   const SpinCache& cache,
@@ -7569,7 +7574,7 @@ void find_spin_force_for_lammps(
   add_spin_gradient(
     paramb, annmb, atom_capacity, spin_types, spins_soa, cache, Fp,
     nullptr, nullptr, nullptr, phase, force, mforce, total_virial, virial,
-    nlocal, lammps_scratch, scratch, inum, ilist);
+    lammps_scratch, scratch, inum, ilist);
 }
 
 bool compute_spin_lammps_fused_center(
@@ -9991,7 +9996,7 @@ void NEP::compute_for_lammps(
 
   if (!fused_spin) {
     find_spin_force_for_lammps(
-      paramb, annmb, atom_capacity, inum, ilist, nlocal, lammps_spin_types.data(),
+      paramb, annmb, atom_capacity, inum, ilist, lammps_spin_types.data(),
       lammps_spin_spins_soa.data(), lammps_spin_cache, Fp.data(), force, mforce,
       total_virial, virial, &lammps_scratch, &lammps_spin_gradient_scratch,
       phase_timing ? &spin_phase : nullptr);
