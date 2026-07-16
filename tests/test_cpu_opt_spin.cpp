@@ -641,9 +641,12 @@ bool run_lammps(
     NepaModel* model,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    double spin_baseline = 0.0) {
+    double spin_baseline = 0.0,
+    bool zero_neighbors = false) {
   int ilist[kAtomCount] = {0, 1};
-  int numneigh[kAtomCount] = {1, 1};
+  int numneigh[kAtomCount] = {
+      zero_neighbors ? 0 : 1,
+      zero_neighbors ? 0 : 1};
   int neigh0[1] = {1};
   int neigh1[1] = {0};
   int* firstneigh[kAtomCount] = {neigh0, neigh1};
@@ -785,7 +788,8 @@ int main() {
   const bool ok = flip_diff < 1.0e-10 && rotate_diff < 1.0e-10 &&
                   run_batch(model, positions, spins) &&
                   run_multi_structure_batch_matches_single(model) &&
-                  run_lammps(model, positions, spins);
+                  run_lammps(model, positions, spins) &&
+                  run_lammps(model, positions, spins, 0.0, true);
   nepa_free_model(model);
 
   NepaModel* edge_model = nullptr;
