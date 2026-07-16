@@ -290,6 +290,7 @@ void PairNEPAdaptersCUDA::coeff(int narg, char** arg) {
 #ifdef LMP_KOKKOS
   datamask_read = X_MASK | TYPE_MASK | (spin_model_ ? SP_MASK : EMPTY_MASK);
   datamask_modify = F_MASK | (spin_model_ ? FM_MASK : EMPTY_MASK);
+  comm_reverse_off = spin_model_ ? 6 : 3;
   d_type_map_ = Kokkos::View<int*, LMPDeviceType>();
   d_type_map_length_ = 0;
 #endif
@@ -491,11 +492,7 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
   pack_kokkos_per_atom_tallies();
   profiler.split(pack_ms);
 
-  if (want_global_tally) {
-    atom_kk->modified(execution_space, datamask_modify);
-  } else {
-    atom_kk->modified(execution_space, F_MASK);
-  }
+  atom_kk->modified(execution_space, datamask_modify);
   profiler.split(mark_ms);
   if (nall > nlocal) {
     const bool reverse_force_comm_on_device =
@@ -503,13 +500,13 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
         lmp->kokkos->reverse_comm_on_host == 0 &&
         lmp->kokkos->reverse_pair_comm_classic == 0;
     if (reverse_force_comm_on_device) {
-      comm->reverse_comm(this, 3);
+      comm->reverse_comm(this, comm_reverse_off);
     } else {
       comm->reverse_comm();
-      atom_kk->sync(execution_space, F_MASK);
+      atom_kk->sync(execution_space, datamask_modify);
       Kokkos::fence();
     }
-    atom_kk->modified(execution_space, F_MASK);
+    atom_kk->modified(execution_space, datamask_modify);
   }
   profiler.split(reverse_ms);
 
@@ -536,17 +533,25 @@ int PairNEPAdaptersCUDA::pack_reverse_comm_kokkos(
     int first,
     DAT::tdual_xfloat_1d& buf) {
   auto f = lmp->atomKK->k_f.template view<LMPDeviceType>();
+  auto fm = lmp->atomKK->k_fm.template view<LMPDeviceType>();
   auto out = buf.template view<LMPDeviceType>();
+  const int communicate_mforce = spin_model_ ? 1 : 0;
+  const int width = communicate_mforce ? 6 : 3;
   Kokkos::parallel_for(
       Kokkos::RangePolicy<LMPDeviceType>(0, n),
       KOKKOS_LAMBDA(const int i) {
         const int atom = first + i;
-        const int offset = 3 * i;
+        const int offset = width * i;
         out(offset) = f(atom, 0);
         out(offset + 1) = f(atom, 1);
         out(offset + 2) = f(atom, 2);
+        if (communicate_mforce) {
+          out(offset + 3) = fm(atom, 0);
+          out(offset + 4) = fm(atom, 1);
+          out(offset + 5) = fm(atom, 2);
+        }
       });
-  return 3 * n;
+  return width * n;
 }
 
 void PairNEPAdaptersCUDA::unpack_reverse_comm_kokkos(
@@ -554,16 +559,24 @@ void PairNEPAdaptersCUDA::unpack_reverse_comm_kokkos(
     DAT::tdual_int_1d list,
     DAT::tdual_xfloat_1d& buf) {
   auto f = lmp->atomKK->k_f.template view<LMPDeviceType>();
+  auto fm = lmp->atomKK->k_fm.template view<LMPDeviceType>();
   auto in = buf.template view<LMPDeviceType>();
   auto sendlist = list.template view<LMPDeviceType>();
+  const int communicate_mforce = spin_model_ ? 1 : 0;
+  const int width = communicate_mforce ? 6 : 3;
   Kokkos::parallel_for(
       Kokkos::RangePolicy<LMPDeviceType>(0, n),
       KOKKOS_LAMBDA(const int i) {
         const int atom = sendlist(i);
-        const int offset = 3 * i;
+        const int offset = width * i;
         Kokkos::atomic_add(&f(atom, 0), in(offset));
         Kokkos::atomic_add(&f(atom, 1), in(offset + 1));
         Kokkos::atomic_add(&f(atom, 2), in(offset + 2));
+        if (communicate_mforce) {
+          Kokkos::atomic_add(&fm(atom, 0), in(offset + 3));
+          Kokkos::atomic_add(&fm(atom, 1), in(offset + 4));
+          Kokkos::atomic_add(&fm(atom, 2), in(offset + 5));
+        }
       });
 }
 
