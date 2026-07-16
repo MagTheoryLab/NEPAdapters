@@ -340,11 +340,16 @@ void PairNEPAdaptersCUDA::init_style() {
 
 void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
 #ifndef LMP_KOKKOS
-  PairNEPAdaptersCommon::compute(eflag_in, vflag_in);
+  (void)eflag_in;
+  (void)vflag_in;
+  error->all(
+      FLERR,
+      "NEPAdapters GPU pair requires a CUDA-enabled LAMMPS Kokkos build");
 #else
   if (lmp->kokkos == nullptr || lmp->atomKK == nullptr) {
-    PairNEPAdaptersCommon::compute(eflag_in, vflag_in);
-    return;
+    error->all(
+        FLERR,
+        "NEPAdapters GPU pair requires Kokkos device atom storage");
   }
   if (model_ == nullptr) {
     const std::string message =

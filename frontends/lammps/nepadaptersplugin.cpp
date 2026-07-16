@@ -1,7 +1,9 @@
 #include "lammpsplugin.h"
 #include "version.h"
 
+#if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CPU)
 #include "pair_nep_adapters_cpu.h"
+#endif
 #if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CUDA)
 #include "pair_nep_adapters_cuda.h"
 #endif
@@ -10,9 +12,11 @@ using namespace LAMMPS_NS;
 
 namespace {
 
+#if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CPU)
 static Pair* pair_nep_adapters_cpu_creator(LAMMPS* lmp) {
   return new PairNEPAdaptersCPU(lmp);
 }
+#endif
 
 #if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CUDA)
 static Pair* pair_nep_adapters_cuda_creator(LAMMPS* lmp) {
@@ -42,6 +46,7 @@ void register_pair_style(
 
 extern "C" void lammpsplugin_init(void* lmp, void* handle, void* regfunc) {
   auto register_plugin = reinterpret_cast<lammpsplugin_regfunc>(regfunc);
+#if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CPU)
   register_pair_style(
       lmp,
       handle,
@@ -49,6 +54,7 @@ extern "C" void lammpsplugin_init(void* lmp, void* handle, void* regfunc) {
       "nep/cpu",
       "NEPAdapters CPU pair style",
       reinterpret_cast<lammpsplugin_factory1*>(&pair_nep_adapters_cpu_creator));
+#endif
 #if defined(NEP_ADAPTERS_LAMMPS_ENABLE_CUDA)
   register_pair_style(
       lmp,

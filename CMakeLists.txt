@@ -1,11 +1,22 @@
 cmake_minimum_required(VERSION 3.20)
 
-if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME AND
+option(NEP_ADAPTERS_ENABLE_CUDA "Enable the CUDA engine" OFF)
+option(
+  NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM
+  "Build the optional qNEP PPPM implementation and link cuFFT"
+  OFF)
+
+if(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM AND NOT NEP_ADAPTERS_ENABLE_CUDA)
+  message(FATAL_ERROR
+    "NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON requires NEP_ADAPTERS_ENABLE_CUDA=ON.")
+endif()
+
+if(NEP_ADAPTERS_ENABLE_CUDA AND
    NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 89)
 endif()
 
-if(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME)
+if(NEP_ADAPTERS_ENABLE_CUDA)
   project(NEPAdapters VERSION 0.1.0 LANGUAGES CXX CUDA)
 else()
   project(NEPAdapters VERSION 0.1.0 LANGUAGES CXX)
@@ -16,12 +27,17 @@ include(GNUInstallDirs)
 
 option(NEP_ADAPTERS_BUILD_TESTS "Build NEPAdapters tests" ON)
 option(NEP_ADAPTERS_BUILD_BENCHMARKS "Build NEPAdapters performance benchmarks" OFF)
-option(NEP_ADAPTERS_ENABLE_CPU_NEP3 "Enable the NEP3 CPU reference engine shim" ON)
-option(NEP_ADAPTERS_ENABLE_CPU_OPT "Enable the optimized CPU engine" OFF)
-option(NEP_ADAPTERS_ENABLE_CUDA "Enable the CUDA engine" OFF)
-option(NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME "Build CUDA runtime upload/device code" OFF)
+option(NEP_ADAPTERS_ENABLE_CPU "Enable the CPU engine" ON)
 option(NEP_ADAPTERS_ENABLE_PYTHON "Enable the Python frontend" OFF)
 option(NEP_ADAPTERS_ENABLE_LAMMPS "Enable the LAMMPS frontend" OFF)
+option(
+  NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES
+  "Install C/C++ libraries, headers, and CMake package metadata"
+  ON)
+
+set(NEP_ADAPTERS_PACKAGE_NEEDS_OPENMP OFF)
+set(NEP_ADAPTERS_PACKAGE_NEEDS_BLAS OFF)
+set(NEP_ADAPTERS_PACKAGE_NEEDS_CUDATOOLKIT OFF)
 
 if(NEP_ADAPTERS_BUILD_TESTS OR NEP_ADAPTERS_BUILD_BENCHMARKS)
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/NEPAdaptersTestData.cmake")
@@ -30,12 +46,8 @@ endif()
 
 add_subdirectory(src)
 
-if(NEP_ADAPTERS_ENABLE_CPU_NEP3)
-  add_subdirectory(engines/cpu_nep3)
-endif()
-
-if(NEP_ADAPTERS_ENABLE_CPU_OPT)
-  add_subdirectory(engines/cpu_opt)
+if(NEP_ADAPTERS_ENABLE_CPU)
+  add_subdirectory(engines/cpu)
 endif()
 
 if(NEP_ADAPTERS_ENABLE_CUDA)
@@ -58,24 +70,26 @@ if(NEP_ADAPTERS_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)
 endif()
 
-install(
-  DIRECTORY include/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+if(NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES)
+  install(
+    DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
 
-install(
-  TARGETS nep_adapters
-  EXPORT NEPAdaptersTargets
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+  install(
+    TARGETS nep_adapters
+    EXPORT NEPAdaptersTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
 
-install(
-  EXPORT NEPAdaptersTargets
-  NAMESPACE NEPAdapters::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NEPAdapters
-)
+  install(
+    EXPORT NEPAdaptersTargets
+    NAMESPACE NEPAdapters::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NEPAdapters
+  )
+endif()
 
 configure_package_config_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/NEPAdaptersConfig.cmake.in
@@ -89,9 +103,11 @@ write_basic_package_version_file(
   COMPATIBILITY SameMajorVersion
 )
 
-install(
-  FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/NEPAdaptersConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/NEPAdaptersConfigVersion.cmake
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NEPAdapters
-)
+if(NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES)
+  install(
+    FILES
+      ${CMAKE_CURRENT_BINARY_DIR}/NEPAdaptersConfig.cmake
+      ${CMAKE_CURRENT_BINARY_DIR}/NEPAdaptersConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NEPAdapters
+  )
+endif()

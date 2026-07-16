@@ -495,7 +495,7 @@ bool run_zbl_force_only_case() {
       0.0, 8.0, 0.0,
       0.0, 0.0, 8.0,
   };
-  int pbc[] = {0, 0, 0};
+  int pbc[] = {1, 1, 1};
   double batch_energy[] = {0.0};
   double batch_potential[2] = {};
   double batch_forces[6] = {};
@@ -796,7 +796,7 @@ int main() {
       0.0, 8.0, 0.0,
       0.0, 0.0, 8.0,
   };
-  int pbc[] = {0, 0, 0};
+  int pbc[] = {1, 1, 1};
   double batch_energy[] = {0.0};
   double batch_potential[2] = {};
   double batch_forces[6] = {};

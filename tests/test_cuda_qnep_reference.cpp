@@ -1,7 +1,7 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cuda.hpp"
 
-#include "cpu_nep3_test_utils.hpp"
+#include "cpu_test_utils.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -15,7 +15,7 @@
 
 namespace {
 
-cpu_nep3_test::Frame read_xyz_in(
+cpu_test::Frame read_xyz_in(
     const std::string& xyz_path,
     const std::unordered_map<std::string, std::int32_t>& type_map) {
   std::ifstream input(xyz_path);
@@ -25,7 +25,7 @@ cpu_nep3_test::Frame read_xyz_in(
     std::exit(EXIT_FAILURE);
   }
 
-  cpu_nep3_test::Frame frame;
+  cpu_test::Frame frame;
   frame.types.resize(static_cast<std::size_t>(atom_count));
   frame.positions_aos3.resize(static_cast<std::size_t>(atom_count) * 3);
   input >> frame.box[0] >> frame.box[3] >> frame.box[6] >> frame.box[1] >>
@@ -101,8 +101,8 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  const auto type_map = cpu_nep3_test::read_type_map(model_path);
-  const cpu_nep3_test::Frame frame = read_xyz_in(xyz_path, type_map);
+  const auto type_map = cpu_test::read_type_map(model_path);
+  const cpu_test::Frame frame = read_xyz_in(xyz_path, type_map);
   const std::int32_t atom_count = static_cast<std::int32_t>(frame.types.size());
   std::int32_t atom_counts[] = {atom_count};
   std::int32_t atom_offsets[] = {0};
@@ -140,14 +140,24 @@ int main() {
   result.charge_per_atom = charge.data();
 
   const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  const std::string error_message = nepa_last_error_message();
   nepa_free_model(model);
+  if (std::getenv("NEP_ADAPTERS_TEST_EXPECT_PPPM_DISABLED") != nullptr) {
+    if (status == NEPA_STATUS_RUNTIME_ERROR &&
+        error_message.find("PPPM support is disabled") != std::string::npos) {
+      return EXIT_SUCCESS;
+    }
+    std::cerr << "disabled PPPM did not fail closed: status=" << status
+              << " error=" << error_message << '\n';
+    return EXIT_FAILURE;
+  }
   if (status != NEPA_STATUS_OK || !std::isfinite(energy[0]) ||
-      !cpu_nep3_test::all_finite(forces) ||
-      !cpu_nep3_test::all_finite(total_virial) ||
-      !cpu_nep3_test::all_finite(per_atom_virial) ||
-      !cpu_nep3_test::all_finite(charge)) {
+      !cpu_test::all_finite(forces) ||
+      !cpu_test::all_finite(total_virial) ||
+      !cpu_test::all_finite(per_atom_virial) ||
+      !cpu_test::all_finite(charge)) {
     std::cerr << "CUDA qNEP status=" << status
-              << " error=" << nepa_last_error_message() << '\n';
+              << " error=" << error_message << '\n';
     return EXIT_FAILURE;
   }
 

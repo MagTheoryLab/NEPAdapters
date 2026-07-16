@@ -72,6 +72,7 @@ int main() {
   int types[] = {0};
   double positions[] = {0.0, 0.0, 0.0};
   double boxes[] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+  int pbc[] = {1, 1, 1};
   double energy[] = {0.0};
   double forces[] = {0.0, 0.0, 0.0};
 
@@ -83,6 +84,7 @@ int main() {
   batch.types = types;
   batch.positions_aos3 = positions;
   batch.boxes_row_major9 = boxes;
+  batch.pbc_flags3 = pbc;
 
   NepaFindForceResult result{};
   result.energy_per_structure = energy;
@@ -264,7 +266,7 @@ int main() {
       0.0, 9.0, 0.0,
       0.0, 0.0, 9.0,
   };
-  int staged_pbc[] = {1, 1, 1, 0, 0, 0};
+  int staged_pbc[] = {1, 1, 1, 1, 1, 1};
   NepaStructureBatch staged_batch{};
   staged_batch.num_structures = 2;
   staged_batch.total_atoms = 4;
@@ -281,7 +283,7 @@ int main() {
       staged_internal.positions_soa3[5] != 4.0 ||
       staged_internal.positions_soa3[9] != 5.0 ||
       staged_internal.atom_to_structure[3] != 1 ||
-      staged_internal.pbc_flags3[3] != 0 ||
+      staged_internal.pbc_flags3[3] != 1 ||
       staged_internal.boxes_row_major9[9] != 9.0) {
     return EXIT_FAILURE;
   }

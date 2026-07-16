@@ -1,5 +1,9 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_nep3.hpp"
+#if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+#include "nep_adapters/engines/cuda.hpp"
+#else
+#include "nep_adapters/engines/cpu.hpp"
+#endif
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -18,7 +22,15 @@ namespace {
 
 void check_status(NepaStatus status) {
   if (status != NEPA_STATUS_OK) {
-    throw std::runtime_error(nepa_status_message(status));
+    const char* detail = nepa_last_error_message();
+    const std::string message =
+        detail != nullptr && detail[0] != '\0'
+            ? std::string(nepa_status_message(status)) + ": " + detail
+            : nepa_status_message(status);
+    if (status == NEPA_STATUS_INVALID_ARGUMENT) {
+      throw std::invalid_argument(message);
+    }
+    throw std::runtime_error(message);
   }
 }
 
@@ -41,6 +53,14 @@ struct PreparedBatch {
   const double* boxes = nullptr;
   const std::int32_t* pbc = nullptr;
 };
+
+void require_fully_periodic(const std::int32_t* pbc, std::size_t count) {
+  if (pbc == nullptr ||
+      !std::all_of(pbc, pbc + count, [](std::int32_t value) { return value == 1; })) {
+    throw std::invalid_argument(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+  }
+}
 
 PreparedBatch prepare_batch(
     py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>& types,
@@ -132,8 +152,30 @@ PreparedBatch prepare_batch(
       prepared.pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
     }
   }
+  require_fully_periodic(
+      prepared.pbc,
+      static_cast<std::size_t>(prepared.structure_count) * 3);
 
   return prepared;
+}
+
+const double* prepare_spins(
+    py::array_t<double, py::array::c_style | py::array::forcecast>& spins,
+    std::int32_t total_atoms) {
+  const py::buffer_info spin_info = spins.request();
+  if (spin_info.ndim != 2 || spin_info.shape[0] != total_atoms ||
+      spin_info.shape[1] != 3) {
+    throw std::invalid_argument("spins must have shape (natoms, 3)");
+  }
+  return static_cast<const double*>(spin_info.ptr);
+}
+
+void require_spin_model(NepaModel* model) {
+  NepaModelInfo info{};
+  check_status(nepa_model_info(model, &info));
+  if ((info.capabilities & NEPA_CAPABILITY_SPIN) == 0u) {
+    throw std::invalid_argument("spin input requires a spin NEP model");
+  }
 }
 
 class PyModel {
@@ -202,6 +244,59 @@ class PyModel {
     return py::make_tuple(potentials, forces, virials);
   }
 
+  py::tuple calculate_spin(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<double, py::array::c_style | py::array::forcecast> spins,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    if (!model_) {
+      throw std::runtime_error("model is closed");
+    }
+    require_spin_model(model_.get());
+
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    const double* spin_data = prepare_spins(spins, input.total_atoms);
+
+    py::array_t<double> potentials(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
+    py::array_t<double> mforces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> tau({input.total_atoms, static_cast<std::int32_t>(3)});
+    std::vector<double> energies(static_cast<std::size_t>(input.structure_count), 0.0);
+    std::vector<double> structure_virials(
+        static_cast<std::size_t>(input.structure_count) * 9,
+        0.0);
+
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.spins_aos3 = spin_data;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+
+    NepaFindForceResult result{};
+    result.energy_per_structure = energies.data();
+    result.potential_per_atom = static_cast<double*>(potentials.request().ptr);
+    result.forces_aos3 = static_cast<double*>(forces.request().ptr);
+    result.virials_row_major9 = structure_virials.data();
+    result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
+    result.mforces_aos3 = static_cast<double*>(mforces.request().ptr);
+    result.tau_aos3 = static_cast<double*>(tau.request().ptr);
+
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_force_batch(model_.get(), &batch, &result));
+    }
+    return py::make_tuple(potentials, forces, virials, mforces, tau);
+  }
+
   py::array_t<double> descriptors(
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
       py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
@@ -248,6 +343,50 @@ class PyModel {
     return descriptors;
   }
 
+  py::array_t<double> descriptors_spin(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<double, py::array::c_style | py::array::forcecast> spins,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    if (!model_) {
+      throw std::runtime_error("model is closed");
+    }
+    require_spin_model(model_.get());
+
+    NepaModelInfo info{};
+    check_status(nepa_model_info(model_.get(), &info));
+    if ((info.capabilities & NEPA_CAPABILITY_DESCRIPTORS) == 0u ||
+        info.descriptor_dim <= 0) {
+      throw std::runtime_error("descriptors are unsupported by this model");
+    }
+
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    const double* spin_data = prepare_spins(spins, input.total_atoms);
+    py::array_t<double> descriptors({input.total_atoms, info.descriptor_dim});
+
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.spins_aos3 = spin_data;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+
+    NepaFindDescriptorResult result{};
+    result.descriptors = static_cast<double*>(descriptors.request().ptr);
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_descriptors(model_.get(), &batch, &result));
+    }
+    return descriptors;
+  }
+
   py::tuple find_force(
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
       py::array_t<double, py::array::c_style | py::array::forcecast> positions,
@@ -274,6 +413,7 @@ class PyModel {
       }
       pbc_ptr = static_cast<const std::int32_t*>(pbc_info.ptr);
     }
+    require_fully_periodic(pbc_ptr, 3);
 
     if (type_info.ndim != 1) {
       throw std::invalid_argument("types must be a 1D int32 array");
@@ -328,15 +468,25 @@ class PyModel {
 
 }  // namespace
 
-PYBIND11_MODULE(_native, module) {
-  module.doc() = "pybind11 frontend for NEPAdapters";
+#if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+#define NEP_ADAPTERS_PYTHON_MODULE_NAME nep_gpu
+#else
+#define NEP_ADAPTERS_PYTHON_MODULE_NAME nep_cpu
+#endif
 
-  py::class_<BackendInfo>(module, "BackendInfo")
+PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
+#if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+  module.doc() = "NEPAdapters CUDA Python backend";
+#else
+  module.doc() = "NEPAdapters cpu Python backend";
+#endif
+
+  py::class_<BackendInfo>(module, "BackendInfo", py::module_local())
       .def_readonly("name", &BackendInfo::name)
       .def_readonly("version", &BackendInfo::version)
       .def_readonly("capabilities", &BackendInfo::capabilities);
 
-  py::class_<PyModel>(module, "Model")
+  py::class_<PyModel>(module, "Model", py::module_local())
       .def(
           "calculate",
           &PyModel::calculate,
@@ -353,11 +503,29 @@ PYBIND11_MODULE(_native, module) {
           py::arg("box"),
           py::arg("pbc") = py::none())
       .def(
+          "calculate_spin",
+          &PyModel::calculate_spin,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("spins"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::none())
+      .def(
           "descriptors",
           &PyModel::descriptors,
           py::arg("types"),
           py::arg("boxes"),
           py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::none())
+      .def(
+          "descriptors_spin",
+          &PyModel::descriptors_spin,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("spins"),
           py::arg("atom_counts"),
           py::arg("pbc") = py::none())
       .def("close", &PyModel::close)
@@ -370,11 +538,19 @@ PYBIND11_MODULE(_native, module) {
       })
       .def("model_info", &PyModel::model_info);
 
-  module.def("register_cpu_nep3", []() {
-    if (nepa_register_cpu_nep3_engine() != 1) {
-      throw std::runtime_error("failed to register cpu_nep3 engine");
+#if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+  module.def("register_cuda", []() {
+    if (nepa_register_cuda_engine() != 1) {
+      throw std::runtime_error("failed to register cuda engine");
     }
   });
+#else
+  module.def("register_cpu", []() {
+    if (nepa_register_cpu_engine() != 1) {
+      throw std::runtime_error("failed to register cpu engine");
+    }
+  });
+#endif
 
   module.def("backend_count", []() { return nepa_backend_count(); });
 
@@ -388,11 +564,23 @@ PYBIND11_MODULE(_native, module) {
   });
 
   module.def("load_model", [](const std::string& backend_name, const std::string& model_path) {
-    if (backend_name == "cpu_nep3") {
-      if (nepa_register_cpu_nep3_engine() != 1) {
-        throw std::runtime_error("failed to register cpu_nep3 engine");
+#if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+    if (backend_name != "cuda") {
+      throw std::invalid_argument("nep_gpu only supports backend='cuda'");
+    }
+    if (nepa_register_cuda_engine() != 1) {
+      throw std::runtime_error("failed to register cuda engine");
+    }
+#else
+    if (backend_name != "cpu") {
+      throw std::invalid_argument("nep_cpu only supports backend='cpu'");
+    }
+    if (backend_name == "cpu") {
+      if (nepa_register_cpu_engine() != 1) {
+        throw std::runtime_error("failed to register cpu engine");
       }
     }
+#endif
 
     NepaModel* model = nullptr;
     check_status(nepa_load_model(backend_name.c_str(), model_path.c_str(), &model));

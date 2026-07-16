@@ -1,5 +1,5 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_opt.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include <algorithm>
@@ -166,7 +166,7 @@ BatchResult run_batch(NepaModel* model) {
   const double positions[] = {0.0, 0.0, 0.0, 1.3, 0.4, 0.2};
   const double spins[] = {1.2, -0.3, 0.4, -0.5, 0.7, 1.1};
   const double box[] = {16.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0, 16.0};
-  const int pbc[] = {0, 0, 0};
+  const int pbc[] = {1, 1, 1};
 
   NepaStructureBatch batch{};
   batch.num_structures = 1;
@@ -264,7 +264,7 @@ bool check_dim(int active_dim) {
   const std::string model_path = write_model(active_dim);
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+  if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
       nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
     return false;
   }
@@ -302,7 +302,7 @@ bool check_c4_l4_raw1_dot() {
         write_c4_l4_raw1_dot_model(max_neighbors);
     NepaModel* cpu = nullptr;
     NepaModel* gpu = nullptr;
-    if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+    if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
         nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
       std::cerr << "raw1-dot model load failed: "
                 << nepa_last_error_message() << "\n";
@@ -332,7 +332,7 @@ bool check_c4_l4_density_finalize() {
   const std::string model_path = write_c4_l4_density_model();
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+  if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
       nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
     std::cerr << "density model load failed: "
               << nepa_last_error_message() << "\n";
@@ -371,7 +371,7 @@ int main() {
     std::cerr << "max_abs_diff accepted a non-finite comparison\n";
     return EXIT_FAILURE;
   }
-  if (!nep_adapters::register_cpu_opt_engine() ||
+  if (!nep_adapters::register_cpu_engine() ||
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }

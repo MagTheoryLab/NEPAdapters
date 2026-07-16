@@ -2,7 +2,9 @@
 
 #include "simulation_box_device.cuh"
 
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
 #include <cufft.h>
+#endif
 #include <cuda_runtime.h>
 
 #include <cstdlib>
@@ -16,6 +18,7 @@ namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr double kCoulomb = 14.399645;
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
 constexpr float kTwoPiF = 6.28318530717958647692f;
 
 __constant__ float kPppmSincCoeff[6] = {
@@ -37,6 +40,7 @@ __constant__ float kPppmWCoeff[5][5] = {
     {5.9895833e-01f, 0.0000000e+00f, -6.2500000e-01f, 0.0000000e+00f, 2.5000000e-01f},
     {1.9791667e-01f, 4.5833333e-01f, 2.5000000e-01f, -1.6666667e-01f, -1.6666667e-01f},
     {2.6041667e-03f, 2.0833333e-02f, 6.2500000e-02f, 8.3333333e-02f, 4.1666667e-02f}};
+#endif
 
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
@@ -45,11 +49,13 @@ void check_cuda(cudaError_t status, const char* action) {
   }
 }
 
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
 void check_cufft(cufftResult status, const char* action) {
   if (status != CUFFT_SUCCESS) {
     throw std::runtime_error(std::string(action) + ": cuFFT error " + std::to_string(status));
   }
 }
+#endif
 
 void require(bool condition, const char* message) {
   if (!condition) {
@@ -70,6 +76,7 @@ double area(const double* a, const double* b) {
   return std::sqrt(x * x + y * y + z * z);
 }
 
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
 double volume(const SimulationBox& box) {
   const double* h = box.frac_to_cart;
   return std::abs(
@@ -85,6 +92,7 @@ int best_pppm_mesh_dim(int minimum) {
   }
   return dim;
 }
+#endif
 
 struct QnepKSpace {
   std::vector<double> kx;
@@ -348,6 +356,7 @@ __global__ void reciprocal_apply(
   force_soa3[2 * atom_stride + atom] += charge_factor * force_sum[2];
 }
 
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
 struct PppmPara {
   int k[3] = {};
   int k_half[3] = {};
@@ -991,6 +1000,7 @@ void apply_qnep_pppm(
     check_cuda(cudaGetLastError(), "qNEP PPPM total virial launch failed");
   }
 }
+#endif
 
 __global__ void real_space_charge(
     int atom_count,
@@ -1160,10 +1170,12 @@ void apply_qnep_charge_terms_on_device(
   const int blocks = (atom_count + threads - 1) / threads;
   if (protocol.charge_mode == 1 || protocol.charge_mode == 2) {
     const char* kspace = std::getenv("NEP_ADAPTERS_QNEP_KSPACE");
-    const bool use_pppm =
-        kspace != nullptr && std::string(kspace) == "pppm" &&
-        box.pbc[0] && box.pbc[1] && box.pbc[2];
-    if (use_pppm) {
+    const std::string kspace_mode = kspace == nullptr ? "direct" : kspace;
+    require(
+        kspace_mode == "direct" || kspace_mode == "pppm",
+        "NEP_ADAPTERS_QNEP_KSPACE must be 'direct' or 'pppm'");
+    if (kspace_mode == "pppm") {
+#if defined(NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM)
       apply_qnep_pppm(
           atom_count,
           static_cast<int>(view.atom_capacity),
@@ -1172,6 +1184,11 @@ void apply_qnep_charge_terms_on_device(
           view,
           need_per_atom_kspace_potential,
           need_per_atom_kspace_virial);
+#else
+      throw std::runtime_error(
+          "qNEP PPPM support is disabled; rebuild with "
+          "NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON");
+#endif
     } else {
       const QnepKSpace host_kspace = make_qnep_kspace(box, alpha);
       DeviceKSpace device_kspace = copy_kspace_to_device(host_kspace);

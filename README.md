@@ -36,21 +36,16 @@ The project must not let one frontend or one engine define the whole design:
   - `engine.hpp`: C++ engine SPI and registration entry.
   - `views.hpp`: frontend/engine data-view vocabulary.
   - `capability.hpp`: capability flags and helpers.
-  - `backend.hpp`: transitional compatibility include for the old name.
 - `src/`: core registry and API implementation.
-- `engines/cpu_nep3/`: adapter for the official/existing NEP CPU class, used
-  first as the CPU reference engine and parity oracle. The `nep3` name is
-  historical; this is the current NEP CPU code path exposed by that class.
-- `engines/cpu_opt/`: planned optimized CPU engine for OpenMP/SIMD/layout work.
-- `engines/cuda/`: planned CUDA engine, currently corresponding to the maintained
-  NEP_GPU direction.
+- `engines/cpu/`: the supported CPU engine, including spin and charge paths.
+- `engines/cuda/`: the CUDA engine used by batch and Kokkos LAMMPS frontends.
 - `frontends/python/`: Python package boundary. M2 uses a minimal pybind11
   frontend over the C ABI, a NumPy-first calculator facade, and an optional
   `nep_adapters.ase` adapter.
 - `frontends/lammps/`: LAMMPS pair/plugin boundary. The CPU pair style is
   `nep/cpu`; `nep/gpu` is built when the CUDA frontend is enabled.
 - `tests/`: contract, parity, and fixture tests.
-  - `tests/fixtures/cpu_nep3_baseline/`: committed CPU baseline model,
+  - `tests/fixtures/cpu_baseline/`: committed CPU baseline model,
     structure, and golden labels for correctness tests. This is repository test
     data and is not included in the Python package.
 - `benchmarks/`: throughput and scaling probes for engines/frontends.
@@ -64,7 +59,7 @@ notes until the new layout is filled in.
 The useful CPU baseline is:
 
 1. Keep the core buildable without CUDA, Python, or LAMMPS.
-2. Use `cpu_nep3` as the reference CPU engine and parity oracle.
+2. Use `cpu` as the only supported CPU engine.
 3. Expose a CPU-only pybind11 Python frontend returning NumPy arrays directly.
 4. Build a LAMMPS CPU pair/plugin frontend over the same runtime.
 5. Generate a correctness and OpenMP throughput report for the CPU baseline.
@@ -115,13 +110,7 @@ python3 tools/run_cuda_tests.py --cuda-arch 70   # V100
 python3 tools/run_cuda_tests.py --cuda-arch 89   # RTX 4090 / Ada
 ```
 
-If the CPU oracle source is not adjacent to this checkout, pass it explicitly:
-
-```sh
-python3 tools/run_cuda_tests.py \
-  --cuda-arch 89 \
-  --cpu-nep3-source-dir /path/to/nep_cpu
-```
+To compile and test the optional qNEP PPPM/cuFFT path, add `--qnep-pppm`.
 
 This runs the `cuda` CTest label only: contract checks, device-model/layout
 checks, batch force finite-difference gates, triclinic CPU parity, and the
@@ -140,7 +129,7 @@ python3 tools/generate_test_report.py
 The report also writes `reports/performance_conditions.json`, which records the
 fixed future benchmark scale selected by the automatic saturation scan.
 
-The report builds `cpu_nep3` with OpenMP and measures a single model instance
+The report builds `cpu` with OpenMP and measures a single model instance
 with `OMP_NUM_THREADS=4`.
 
 ## Python Package
@@ -153,10 +142,46 @@ conda activate mysci
 python -m build --wheel
 ```
 
-The build currently needs a NEP CPU source tree. On this workstation CMake
-auto-detects `../NepTrainKit/src/nep_cpu`; elsewhere pass
-`-Ccmake.define.NEP_ADAPTERS_CPU_NEP3_SOURCE_DIR=/path/to/nep_cpu`.
+The CPU implementation is vendored under `engines/cpu/native`; no external
+CPU engine source tree is required.
+
+On a CUDA build host, build a GPU-capable wheel with:
+
+```sh
+python -m build --wheel \
+  -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
+```
+
+The GPU-capable wheel keeps the explicit backends in separate ABI-qualified
+extensions: `nep_cpu` for `cpu` and lazily imported `nep_gpu` for CUDA. Use
+`backend="cuda"` to select CUDA; an unavailable GPU extension fails directly
+and never falls back to CPU. PPPM remains disabled unless separately compiled
+in, so this wheel does not require cuFFT.
+
+The default CUDA wheel command targets `sm_89` for local RTX 4090 use. Release
+artifacts should choose and record an explicit architecture set and must be
+compiled in the target manylinux environment; repairing a wheel compiled on a
+newer host cannot lower its required GLIBC or GLIBCXX symbol versions.
 
 The default package depends on NumPy, not ASE. The optional ASE interface is
 available as `nep_adapters.ase` and can be requested with the `ase` extra.
 Repository fixtures under `tests/fixtures/` are not packaged into the wheel.
+
+The wheel does not bundle NumPy, ASE, pybind11, CMake, or scikit-build-core.
+NumPy is a runtime dependency installed separately by the package manager; ASE
+is optional; pybind11, CMake, and scikit-build-core are build-only tools. The
+Linux CUDA wheel also does not vendor `libcuda`, `libcudart`, or `libcufft`.
+The CUDA runtime used by `nep_gpu` is linked statically, while the NVIDIA driver
+is supplied by the target machine. System C/C++ libraries such as glibc,
+libstdc++, libm, and libgcc remain external platform dependencies.
+
+Ordinary and spin Python calls are separate: use `calculate`/`descriptors` for
+ordinary models and `calculate_spin`/`descriptors_spin` for spin models. The
+high-level `NEPCalculator` exposes the corresponding `predict_*`,
+`calculate_spin`, and `get_spin_*descriptor` helpers.
+
+CUDA qNEP builds do not link cuFFT by default. The direct reciprocal-space path
+remains available; the experimental PPPM implementation is compiled only with
+`-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON`. A default build that is explicitly
+asked for `NEP_ADAPTERS_QNEP_KSPACE=pppm` returns an error instead of silently
+switching algorithms.

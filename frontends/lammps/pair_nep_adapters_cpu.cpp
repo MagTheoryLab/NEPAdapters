@@ -1,6 +1,6 @@
 #include "pair_nep_adapters_cpu.h"
 
-#include "nep_adapters/engines/cpu_nep3.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 
 using namespace LAMMPS_NS;
 
@@ -8,6 +8,6 @@ PairNEPAdaptersCPU::PairNEPAdaptersCPU(LAMMPS* lmp)
     : PairNEPAdaptersCommon(
           lmp,
           "nep/cpu",
-          "cpu_nep3",
+          "cpu",
           "NEPAdapters CPU",
-          &nep_adapters::register_cpu_nep3_engine) {}
+          &nep_adapters::register_cpu_engine) {}

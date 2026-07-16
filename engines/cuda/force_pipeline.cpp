@@ -4,9 +4,7 @@
 
 #include <stdexcept>
 
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 #include <cuda_runtime.h>
-#endif
 
 namespace nep_adapters::cuda_backend {
 namespace {
@@ -22,7 +20,6 @@ bool has_angular_terms(const ModelProtocol& protocol) {
   return protocol.body_channels.channel_count() > 0;
 }
 
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 class PhaseTimer {
  public:
   explicit PhaseTimer(bool enabled) : enabled_(enabled) {
@@ -57,13 +54,6 @@ class PhaseTimer {
   cudaEvent_t mark_ = nullptr;
   cudaEvent_t now_ = nullptr;
 };
-#else
-class PhaseTimer {
- public:
-  explicit PhaseTimer(bool) {}
-  void split(float&) {}
-};
-#endif
 
 VirialTarget select_virial_target(const ForceEvaluationRequest& request) {
   switch (request.virial) {

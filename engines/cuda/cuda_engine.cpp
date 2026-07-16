@@ -1,12 +1,10 @@
 #include "nep_adapters/engine.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 #include "device_operations.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
 #include "force_pipeline.hpp"
-#endif
 
 #include "host_staging.hpp"
 #include "model_protocol.hpp"
@@ -22,9 +20,7 @@
 #include <string>
 #include <vector>
 
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 #include <cuda_runtime.h>
-#endif
 
 namespace {
 
@@ -78,7 +74,6 @@ struct StructureBatchView {
   NepaStructureBatch batch{};
 };
 
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
 bool supports_cuda_force_protocol(
     const nep_adapters::cuda_backend::ModelProtocol& protocol) {
   const auto& body = protocol.body_channels;
@@ -91,6 +86,15 @@ bool supports_cuda_force_protocol(
            protocol.zbl_outer > protocol.zbl_inner &&
            protocol.zbl_outer <= protocol.cutoff_radial)) &&
          body.l_max_3body <= 4;
+}
+
+bool supports_cuda_descriptor_protocol(
+    const nep_adapters::cuda_backend::ModelProtocol& protocol) {
+  if (supports_cuda_force_protocol(protocol)) {
+    return true;
+  }
+  return protocol.version == 4 && protocol.charge_mode > 0 &&
+         protocol.spin_mode == 0 && protocol.body_channels.l_max_3body <= 4;
 }
 
 bool needs_angular_terms(
@@ -320,9 +324,13 @@ bool make_simulation_box(
   if (!invert_row_major3(box.frac_to_cart, box.cart_to_frac)) {
     return false;
   }
-  box.pbc[0] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[0] : 0;
-  box.pbc[1] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[1] : 0;
-  box.pbc[2] = batch.pbc_flags3 != nullptr ? batch.pbc_flags3[2] : 0;
+  if (batch.pbc_flags3 == nullptr || batch.pbc_flags3[0] != 1 ||
+      batch.pbc_flags3[1] != 1 || batch.pbc_flags3[2] != 1) {
+    return false;
+  }
+  box.pbc[0] = 1;
+  box.pbc[1] = 1;
+  box.pbc[2] = 1;
   return std::isfinite(box.cart_to_frac[0]) &&
          std::isfinite(box.cart_to_frac[4]) &&
          std::isfinite(box.cart_to_frac[8]);
@@ -462,19 +470,14 @@ void copy_prepared_batch_results_to_host(
   }
 }
 
-#endif
 
 class CudaModel : public nep_adapters::Model {
  public:
   explicit CudaModel(const std::string& model_path)
       :
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
         host_(nep_adapters::cuda_backend::load_host_model_parameters(model_path)),
         protocol_(host_.protocol),
         device_(host_) {}
-#else
-        protocol_(nep_adapters::cuda_backend::parse_model_protocol(model_path)) {}
-#endif
 
   NepaStatus model_info(NepaModelInfo& out) const override {
     out = {};
@@ -485,21 +488,21 @@ class CudaModel : public nep_adapters::Model {
     if (protocol_.spin_mode > 0) {
       out.capabilities |= nep_adapters::to_mask(nep_adapters::Capability::spin);
     }
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
     if (supports_cuda_force_protocol(protocol_)) {
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::external_neighbors);
-      out.capabilities |=
-          nep_adapters::to_mask(nep_adapters::Capability::descriptors);
     } else if (protocol_.charge_mode > 0) {
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::batch_find_force);
       out.capabilities |=
           nep_adapters::to_mask(nep_adapters::Capability::charge);
     }
-#endif
+    if (supports_cuda_descriptor_protocol(protocol_)) {
+      out.capabilities |=
+          nep_adapters::to_mask(nep_adapters::Capability::descriptors);
+    }
     out.num_types = protocol_.num_types;
     out.descriptor_dim = protocol_.descriptor_dim;
     return NEPA_STATUS_OK;
@@ -523,7 +526,6 @@ class CudaModel : public nep_adapters::Model {
     }
 
     try {
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
       if (!supports_cuda_force_protocol(protocol_) && protocol_.charge_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
       }
@@ -700,9 +702,6 @@ class CudaModel : public nep_adapters::Model {
             result);
       }
       return NEPA_STATUS_OK;
-#else
-      (void)nep_adapters::cuda_backend::stage_batch_for_internal_neighbors(batch);
-#endif
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
@@ -720,8 +719,7 @@ class CudaModel : public nep_adapters::Model {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     try {
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
-      if (!supports_cuda_force_protocol(protocol_)) {
+      if (!supports_cuda_descriptor_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
@@ -765,11 +763,9 @@ class CudaModel : public nep_adapters::Model {
             double value = descriptor_soa[
                 static_cast<std::size_t>(dim) * view.atom_capacity +
                 static_cast<std::size_t>(atom)];
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
             if (static_cast<std::size_t>(dim) < host_.q_scaler.size()) {
               value *= host_.q_scaler[static_cast<std::size_t>(dim)];
             }
-#endif
             result.descriptors[
                 global_atom * static_cast<std::size_t>(protocol_.descriptor_dim) +
                 static_cast<std::size_t>(dim)] = value;
@@ -777,10 +773,6 @@ class CudaModel : public nep_adapters::Model {
         }
       }
       return NEPA_STATUS_OK;
-#else
-      (void)batch;
-      (void)result;
-#endif
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
@@ -799,7 +791,6 @@ class CudaModel : public nep_adapters::Model {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     try {
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
       if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
@@ -877,6 +868,8 @@ class CudaModel : public nep_adapters::Model {
           result.mforces[atom][2] =
               mforce_soa[2 * view.atom_capacity + static_cast<std::size_t>(atom)];
         }
+      }
+      for (int atom = 0; atom < atom_capacity; ++atom) {
         if (result.virials_per_atom9 != nullptr &&
             result.virials_per_atom9[atom] != nullptr) {
           for (int component = 0; component < 9; ++component) {
@@ -908,11 +901,6 @@ class CudaModel : public nep_adapters::Model {
                 component);
       }
       return NEPA_STATUS_OK;
-#else
-      (void)nep_adapters::cuda_backend::stage_lammps_external_neighbors(
-          input,
-          protocol_);
-#endif
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -962,7 +950,6 @@ class CudaModel : public nep_adapters::Model {
     }
 
     try {
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
       if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
@@ -1095,10 +1082,6 @@ class CudaModel : public nep_adapters::Model {
           spin_chiral_ms,
           output_ms);
       return NEPA_STATUS_OK;
-#else
-      (void)input;
-      (void)result;
-#endif
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -1107,7 +1090,6 @@ class CudaModel : public nep_adapters::Model {
   }
 
  private:
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
   nep_adapters::cuda_backend::DeviceWorkspace& batch_workspace(
       std::size_t atom_capacity,
       std::size_t structure_capacity) {
@@ -1159,9 +1141,7 @@ class CudaModel : public nep_adapters::Model {
   }
 
   nep_adapters::cuda_backend::HostModelParameters host_;
-#endif
   nep_adapters::cuda_backend::ModelProtocol protocol_;
-#if defined(NEP_ADAPTERS_CUDA_DEVICE_RUNTIME)
   nep_adapters::cuda_backend::DeviceModel device_;
   std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> batch_workspace_;
   std::size_t batch_atom_capacity_ = 0;
@@ -1172,7 +1152,6 @@ class CudaModel : public nep_adapters::Model {
   int lammps_device_radial_capacity_ = 0;
   int lammps_device_angular_capacity_ = 0;
   bool lammps_device_has_per_atom_virial_sink_ = false;
-#endif
 };
 
 class CudaEngine : public nep_adapters::Engine {
@@ -1180,7 +1159,7 @@ class CudaEngine : public nep_adapters::Engine {
   nep_adapters::EngineInfo info() const override {
     return {
         "cuda",
-        "skeleton",
+        "0.1.0",
         nep_adapters::to_mask(nep_adapters::Capability::device_input)};
   }
 
@@ -1194,7 +1173,12 @@ class CudaEngine : public nep_adapters::Engine {
     try {
       out = std::make_unique<CudaModel>(model_path);
       return NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const nep_adapters::cuda_backend::UnsupportedModelProtocol& error) {
+      nep_adapters::set_last_error(error.what());
+      out.reset();
+      return NEPA_STATUS_UNSUPPORTED;
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
       out.reset();
       return NEPA_STATUS_RUNTIME_ERROR;
     }

@@ -1,10 +1,16 @@
 #pragma once
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace nep_adapters::cuda_backend {
+
+class UnsupportedModelProtocol : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
 
 struct BodyChannelConfig {
   int l_max_3body = 0;

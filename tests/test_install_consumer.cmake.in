@@ -1,0 +1,57 @@
+set(_root "@PROJECT_BINARY_DIR@/tests/install-consumer")
+set(_prefix "${_root}/prefix")
+set(_source "${_root}/source")
+set(_build "${_root}/build")
+file(REMOVE_RECURSE "${_root}")
+file(MAKE_DIRECTORY "${_source}")
+
+set(_install_command
+  "@CMAKE_COMMAND@" --install "@PROJECT_BINARY_DIR@" --prefix "${_prefix}")
+if(NOT "@CMAKE_BUILD_TYPE@" STREQUAL "")
+  list(APPEND _install_command --config "@CMAKE_BUILD_TYPE@")
+endif()
+execute_process(
+  COMMAND ${_install_command}
+  RESULT_VARIABLE _install_status
+  OUTPUT_VARIABLE _install_stdout
+  ERROR_VARIABLE _install_stderr)
+if(NOT _install_status EQUAL 0)
+  message(FATAL_ERROR
+    "install failed (${_install_status})\n${_install_stdout}\n${_install_stderr}")
+endif()
+
+file(WRITE "${_source}/CMakeLists.txt"
+  "cmake_minimum_required(VERSION 3.20)\n"
+  "project(NEPAdaptersInstallConsumer LANGUAGES CXX)\n"
+  "find_package(NEPAdapters CONFIG REQUIRED)\n"
+  "add_executable(nep_adapters_install_consumer main.cpp)\n"
+  "target_link_libraries(nep_adapters_install_consumer PRIVATE @NEP_ADAPTERS_INSTALL_CONSUMER_LINK_TARGETS@)\n")
+file(WRITE "${_source}/main.cpp"
+  "#include <nep_adapters/api.h>\n"
+  "int main() { return nepa_backend_count() == 0 ? 0 : 1; }\n")
+
+set(_dependency_args "@NEP_ADAPTERS_INSTALL_CONSUMER_DEPENDENCY_ARGS@")
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" -S "${_source}" -B "${_build}"
+          "-DCMAKE_PREFIX_PATH=${_prefix}" ${_dependency_args}
+  RESULT_VARIABLE _configure_status
+  OUTPUT_VARIABLE _configure_stdout
+  ERROR_VARIABLE _configure_stderr)
+if(NOT _configure_status EQUAL 0)
+  message(FATAL_ERROR
+    "consumer configure failed (${_configure_status})\n${_configure_stdout}\n${_configure_stderr}")
+endif()
+
+set(_build_command "@CMAKE_COMMAND@" --build "${_build}")
+if(NOT "@CMAKE_BUILD_TYPE@" STREQUAL "")
+  list(APPEND _build_command --config "@CMAKE_BUILD_TYPE@")
+endif()
+execute_process(
+  COMMAND ${_build_command}
+  RESULT_VARIABLE _build_status
+  OUTPUT_VARIABLE _build_stdout
+  ERROR_VARIABLE _build_stderr)
+if(NOT _build_status EQUAL 0)
+  message(FATAL_ERROR
+    "consumer build failed (${_build_status})\n${_build_stdout}\n${_build_stderr}")
+endif()

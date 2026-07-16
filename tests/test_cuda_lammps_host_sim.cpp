@@ -36,6 +36,79 @@ std::string write_radial_model() {
   return model_path;
 }
 
+bool run_ghost_output_case(NepaModel* model) {
+  int ilist[] = {0};
+  int numneigh[] = {1, 0};
+  int neigh0[] = {1};
+  int* firstneigh[] = {neigh0, nullptr};
+  int types[] = {1, 1};
+  int type_map[] = {-1, 0};
+  double x0[] = {0.0, 0.0, 0.0};
+  double x1[] = {1.5, 0.0, 0.0};
+  double* positions[] = {x0, x1};
+
+  double total_potential = 0.0;
+  double total_virial6[6] = {};
+  double potential_per_atom[1] = {};
+  double f0[] = {123.0, 123.0, 123.0};
+  double f1[] = {123.0, 123.0, 123.0};
+  double* forces[] = {f0, f1};
+  double v0[9] = {};
+  double v1[9] = {};
+  double* virials[] = {v0, v1};
+
+  NepaLammpsNeighborInput input{};
+  input.nlocal = 1;
+  input.inum = 1;
+  input.ilist = ilist;
+  input.numneigh = numneigh;
+  input.firstneigh = firstneigh;
+  input.types = types;
+  input.type_map = type_map;
+  input.positions = positions;
+
+  NepaLammpsNeighborResult result{};
+  result.total_potential = &total_potential;
+  result.total_virial6 = total_virial6;
+  result.potential_per_atom = potential_per_atom;
+  result.forces = forces;
+  result.virials_per_atom9 = virials;
+
+  const NepaStatus status =
+      nepa_find_force_lammps_neighbors(model, &input, &result);
+  if (status != NEPA_STATUS_OK) {
+    std::cerr << "ghost output status=" << status
+              << " error=" << nepa_last_error_message() << "\n";
+    return false;
+  }
+
+  for (int component = 0; component < 3; ++component) {
+    if (!std::isfinite(f0[component]) || f1[component] != 123.0) {
+      std::cerr << "ghost force ownership mismatch component=" << component
+                << " local=" << f0[component]
+                << " ghost=" << f1[component] << "\n";
+      return false;
+    }
+  }
+
+  double ghost_virial_norm = 0.0;
+  for (double value : v1) {
+    if (!std::isfinite(value)) {
+      std::cerr << "ghost virial is not finite\n";
+      return false;
+    }
+    ghost_virial_norm += std::abs(value);
+  }
+  if (ghost_virial_norm <= 1.0e-12 ||
+      std::abs(v0[0] + v1[0] - total_virial6[0]) > 1.0e-10) {
+    std::cerr << "ghost virial copyback mismatch local_xx=" << v0[0]
+              << " ghost_xx=" << v1[0]
+              << " total_xx=" << total_virial6[0] << "\n";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -120,7 +193,7 @@ int main() {
       0.0, 8.0, 0.0,
       0.0, 0.0, 8.0,
   };
-  int pbc[] = {0, 0, 0};
+  int pbc[] = {1, 1, 1};
   double batch_energy[] = {0.0};
   double batch_forces[6] = {};
   NepaStructureBatch batch{};
@@ -165,6 +238,11 @@ int main() {
       nepa_find_force_lammps_neighbors(model, &input, &result);
   if (invalid_status != NEPA_STATUS_INVALID_ARGUMENT) {
     std::cerr << "invalid argument status=" << invalid_status << "\n";
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+
+  if (!run_ghost_output_case(model)) {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }

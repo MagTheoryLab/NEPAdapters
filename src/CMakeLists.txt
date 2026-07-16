@@ -11,7 +11,9 @@ target_include_directories(
 target_compile_features(nep_adapters PUBLIC cxx_std_17)
 
 target_compile_definitions(nep_adapters PRIVATE NEP_ADAPTERS_BUILDING)
-set_target_properties(nep_adapters PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(nep_adapters PROPERTIES
+  EXPORT_NAME nep_adapters
+  POSITION_INDEPENDENT_CODE ON)
 
 if(BUILD_SHARED_LIBS)
   target_compile_definitions(nep_adapters PUBLIC NEP_ADAPTERS_SHARED)

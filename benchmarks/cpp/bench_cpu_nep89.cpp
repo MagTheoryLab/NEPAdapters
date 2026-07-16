@@ -1,10 +1,7 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_nep3.hpp"
-#if NEP_ADAPTERS_BENCH_HAS_CPU_OPT
-#include "nep_adapters/engines/cpu_opt.hpp"
-#endif
+#include "nep_adapters/engines/cpu.hpp"
 
-#include "cpu_nep3_test_utils.hpp"
+#include "cpu_test_utils.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -102,13 +99,13 @@ const char* mode_name(Mode mode) {
   return mode == Mode::batch ? "batch" : "lammps";
 }
 
-cpu_nep3_test::Frame make_supercell(
-    const cpu_nep3_test::Frame& frame,
+cpu_test::Frame make_supercell(
+    const cpu_test::Frame& frame,
     const Replicate& replicate) {
   const std::size_t atom_count = frame.types.size();
   const std::size_t image_count =
       static_cast<std::size_t>(replicate.nx) * replicate.ny * replicate.nz;
-  cpu_nep3_test::Frame supercell;
+  cpu_test::Frame supercell;
   supercell.types.reserve(atom_count * image_count);
   supercell.positions_aos3.reserve(atom_count * image_count * 3);
   supercell.reference_energy = frame.reference_energy * image_count;
@@ -361,7 +358,7 @@ bool belongs_to_rank(
 }
 
 LammpsInputStorage make_lammps_input(
-    const cpu_nep3_test::Frame& frame,
+    const cpu_test::Frame& frame,
     std::int32_t num_types,
     double cutoff,
     const RankGrid& rank_grid,
@@ -553,7 +550,7 @@ int main(int argc, char** argv) {
   Replicate replicate;
   RankGrid rank_grid;
   int rank_id = 0;
-  std::string engine_name = "cpu_nep3";
+  std::string engine_name = "cpu";
   Mode mode = Mode::batch;
   bool phase_timer = false;
 
@@ -590,32 +587,21 @@ int main(int argc, char** argv) {
   if (iterations <= 0 || warmup < 0) {
     return EXIT_FAILURE;
   }
-  if (engine_name != "cpu_nep3" && engine_name != "cpu_opt") {
+  if (engine_name != "cpu") {
     std::cerr << "Unsupported --engine value: " << engine_name << '\n';
     return EXIT_FAILURE;
   }
-#if !NEP_ADAPTERS_BENCH_HAS_CPU_OPT
-  if (engine_name == "cpu_opt") {
-    std::cerr << "cpu_opt benchmark requested but cpu_opt was not built\n";
-    return EXIT_FAILURE;
-  }
-#endif
 
   const std::string model_path = NEP_ADAPTERS_NEP89_MODEL_PATH;
   const std::string xyz_path = NEP_ADAPTERS_NEP89_XYZ_PATH;
 
-  if (!nep_adapters::register_cpu_nep3_engine()) {
+  if (!nep_adapters::register_cpu_engine()) {
     return EXIT_FAILURE;
   }
-#if NEP_ADAPTERS_BENCH_HAS_CPU_OPT
-  if (!nep_adapters::register_cpu_opt_engine()) {
-    return EXIT_FAILURE;
-  }
-#endif
 
-  const auto type_map = cpu_nep3_test::read_type_map(model_path);
-  cpu_nep3_test::Frame frame =
-      cpu_nep3_test::read_first_frame(xyz_path, type_map);
+  const auto type_map = cpu_test::read_type_map(model_path);
+  cpu_test::Frame frame =
+      cpu_test::read_first_frame(xyz_path, type_map);
   frame = make_supercell(frame, replicate);
 
   const std::int32_t atom_count =
@@ -711,7 +697,7 @@ int main(int argc, char** argv) {
       checked_forces.end(),
       0.0,
       [](double sum, double value) { return sum + std::abs(value); });
-  if (!std::isfinite(checked_energy) || !cpu_nep3_test::all_finite(checked_forces) ||
+  if (!std::isfinite(checked_energy) || !cpu_test::all_finite(checked_forces) ||
       force_l1 <= 0.0) {
     nepa_free_model(model);
     return EXIT_FAILURE;

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ._native import Model, load_model
+from .runtime import Model, load_model
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,22 @@ class Prediction:
         if not mean:
             return list(blocks)
         return [block.mean(axis=0) for block in blocks]
+
+
+@dataclass(frozen=True)
+class SpinPrediction(Prediction):
+    mforces: np.ndarray
+    tau: np.ndarray
+
+    def mforce_blocks(self) -> list[np.ndarray]:
+        if len(self.atom_counts) == 0:
+            return []
+        return list(np.split(self.mforces, np.cumsum(self.atom_counts)[:-1]))
+
+    def tau_blocks(self) -> list[np.ndarray]:
+        if len(self.atom_counts) == 0:
+            return []
+        return list(np.split(self.tau, np.cumsum(self.atom_counts)[:-1]))
 
 
 def _read_type_map(model_path: str | Path) -> dict[str, int]:
@@ -74,6 +90,22 @@ def _structure_symbols(structure) -> list[str]:
     return [str(symbol) for symbol in symbols]
 
 
+def _structure_spins(structure) -> np.ndarray:
+    arrays = getattr(structure, "arrays", None)
+    if arrays is not None and "spins" in arrays:
+        spins = arrays["spins"]
+    else:
+        spins = getattr(structure, "spins", None)
+    if spins is None:
+        raise TypeError(
+            "spin structures must provide a (natoms, 3) 'spins' attribute or arrays['spins']"
+        )
+    result = np.asarray(spins, dtype=np.float64)
+    if result.shape != (len(_structure_symbols(structure)), 3):
+        raise ValueError("structure spins must have shape (natoms, 3)")
+    return result
+
+
 def _empty_prediction() -> Prediction:
     return Prediction(
         energy=np.asarray([], dtype=np.float64),
@@ -85,8 +117,22 @@ def _empty_prediction() -> Prediction:
     )
 
 
+def _empty_spin_prediction() -> SpinPrediction:
+    empty = _empty_prediction()
+    return SpinPrediction(
+        energy=empty.energy,
+        potential=empty.potential,
+        forces=empty.forces,
+        virials=empty.virials,
+        structure_virials=empty.structure_virials,
+        atom_counts=empty.atom_counts,
+        mforces=np.empty((0, 3), dtype=np.float64),
+        tau=np.empty((0, 3), dtype=np.float64),
+    )
+
+
 class NEPCalculator:
-    def __init__(self, model_file: str | Path = "nep.txt", backend: str = "cpu_nep3"):
+    def __init__(self, model_file: str | Path = "nep.txt", backend: str = "cpu"):
         self.model_path = Path(model_file)
         self.backend = backend
         self.type_dict = _read_type_map(self.model_path)
@@ -126,6 +172,39 @@ class NEPCalculator:
             pbc[structure_index] = _structure_pbc(structure)
             cursor += count
         return types, positions, boxes, pbc
+
+    def compose_spin_structures(
+        self,
+        structures,
+        spins=None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        structure_list = _as_structure_list(structures)
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = [len(_structure_symbols(item)) for item in structure_list]
+        if spins is None:
+            spin_blocks = [_structure_spins(item) for item in structure_list]
+            spin_array = np.concatenate(spin_blocks, axis=0)
+        else:
+            try:
+                spin_array = np.asarray(spins, dtype=np.float64)
+            except (TypeError, ValueError):
+                spin_array = np.empty((0, 3), dtype=np.float64)
+            if spin_array.shape != (len(types), 3):
+                try:
+                    spin_blocks = [
+                        np.asarray(block, dtype=np.float64) for block in spins
+                    ]
+                except TypeError as exc:
+                    raise ValueError("spins must have shape (total_atoms, 3)") from exc
+                if len(spin_blocks) != len(atom_counts) or any(
+                    block.shape != (count, 3)
+                    for block, count in zip(spin_blocks, atom_counts)
+                ):
+                    raise ValueError(
+                        "spins must have shape (total_atoms, 3) or one (natoms, 3) block per structure"
+                    )
+                spin_array = np.concatenate(spin_blocks, axis=0)
+        return types, positions, boxes, pbc, np.ascontiguousarray(spin_array)
 
     def predict_arrays(
         self,
@@ -180,6 +259,77 @@ class NEPCalculator:
         atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
         return self.predict_arrays(types, positions, boxes, atom_counts, pbc)
 
+    def predict_spin_arrays(
+        self,
+        types,
+        positions,
+        spins,
+        boxes,
+        atom_counts=None,
+        pbc=None,
+    ) -> SpinPrediction:
+        types_array = np.ascontiguousarray(types, dtype=np.int32)
+        positions_array = np.ascontiguousarray(positions, dtype=np.float64)
+        spins_array = np.ascontiguousarray(spins, dtype=np.float64)
+        if atom_counts is None:
+            atom_counts_array = np.asarray([len(types_array)], dtype=np.int32)
+        else:
+            atom_counts_array = np.ascontiguousarray(atom_counts, dtype=np.int32)
+        if len(atom_counts_array) == 0:
+            return _empty_spin_prediction()
+        boxes_array = np.ascontiguousarray(boxes, dtype=np.float64)
+        if boxes_array.ndim == 1 and len(atom_counts_array) > 1:
+            boxes_array = np.tile(boxes_array.reshape(1, 9), (len(atom_counts_array), 1))
+
+        potentials, forces, virials, mforces, tau = self.model.calculate_spin(
+            types_array,
+            boxes_array,
+            positions_array,
+            spins_array,
+            atom_counts_array,
+            pbc,
+        )
+        offsets = np.r_[0, np.cumsum(atom_counts_array)]
+        energy = np.asarray(
+            [potentials[offsets[i] : offsets[i + 1]].sum() for i in range(len(atom_counts_array))],
+            dtype=np.float64,
+        )
+        structure_virials = np.asarray(
+            [virials[offsets[i] : offsets[i + 1]].mean(axis=0) for i in range(len(atom_counts_array))],
+            dtype=np.float64,
+        )
+        return SpinPrediction(
+            energy=energy,
+            potential=np.asarray(potentials, dtype=np.float64),
+            forces=np.asarray(forces, dtype=np.float64),
+            virials=np.asarray(virials, dtype=np.float64),
+            structure_virials=structure_virials,
+            atom_counts=atom_counts_array,
+            mforces=np.asarray(mforces, dtype=np.float64),
+            tau=np.asarray(tau, dtype=np.float64),
+        )
+
+    def predict_spin_structures(self, structures, spins=None) -> SpinPrediction:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return _empty_spin_prediction()
+        types, positions, boxes, pbc, spin_array = self.compose_spin_structures(
+            structure_list,
+            spins,
+        )
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        return self.predict_spin_arrays(
+            types,
+            positions,
+            spin_array,
+            boxes,
+            atom_counts,
+            pbc,
+        )
+
     def predict_descriptors_arrays(
         self,
         types,
@@ -218,12 +368,76 @@ class NEPCalculator:
         atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
         return self.predict_descriptors_arrays(types, positions, boxes, atom_counts, pbc)
 
+    def predict_spin_descriptors_arrays(
+        self,
+        types,
+        positions,
+        spins,
+        boxes,
+        atom_counts=None,
+        pbc=None,
+    ) -> np.ndarray:
+        types_array = np.ascontiguousarray(types, dtype=np.int32)
+        positions_array = np.ascontiguousarray(positions, dtype=np.float64)
+        spins_array = np.ascontiguousarray(spins, dtype=np.float64)
+        if atom_counts is None:
+            atom_counts_array = np.asarray([len(types_array)], dtype=np.int32)
+        else:
+            atom_counts_array = np.ascontiguousarray(atom_counts, dtype=np.int32)
+        if len(atom_counts_array) == 0:
+            return np.empty((0, self.descriptor_dim), dtype=np.float64)
+        boxes_array = np.ascontiguousarray(boxes, dtype=np.float64)
+        if boxes_array.ndim == 1 and len(atom_counts_array) > 1:
+            boxes_array = np.tile(boxes_array.reshape(1, 9), (len(atom_counts_array), 1))
+        return np.asarray(
+            self.model.descriptors_spin(
+                types_array,
+                boxes_array,
+                positions_array,
+                spins_array,
+                atom_counts_array,
+                pbc,
+            ),
+            dtype=np.float64,
+        )
+
+    def predict_spin_descriptors(self, structures, spins=None) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, self.descriptor_dim), dtype=np.float64)
+        types, positions, boxes, pbc, spin_array = self.compose_spin_structures(
+            structure_list,
+            spins,
+        )
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        return self.predict_spin_descriptors_arrays(
+            types,
+            positions,
+            spin_array,
+            boxes,
+            atom_counts,
+            pbc,
+        )
+
     def calculate(self, structures, mean_virial: bool = True):
         prediction = self.predict_structures(structures)
         return (
             prediction.energy,
             prediction.force_blocks(),
             prediction.virial_blocks(mean=mean_virial),
+        )
+
+    def calculate_spin(self, structures, spins=None, mean_virial: bool = True):
+        prediction = self.predict_spin_structures(structures, spins)
+        return (
+            prediction.energy,
+            prediction.force_blocks(),
+            prediction.virial_blocks(mean=mean_virial),
+            prediction.mforce_blocks(),
+            prediction.tau_blocks(),
         )
 
     def get_descriptor(self, structure) -> np.ndarray:
@@ -244,6 +458,35 @@ class NEPCalculator:
             dtype=np.float32,
         )
 
+    def get_spin_descriptor(self, structure, spins=None) -> np.ndarray:
+        return self.get_spin_structures_descriptor(
+            [structure],
+            spins=spins,
+            mean_descriptor=False,
+        )
 
-NepCalculator = NEPCalculator
-Nep3Calculator = NEPCalculator
+    def get_spin_structures_descriptor(
+        self,
+        structures,
+        spins=None,
+        mean_descriptor: bool = True,
+    ) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, self.descriptor_dim), dtype=np.float32)
+        descriptors = self.predict_spin_descriptors(
+            structure_list,
+            spins,
+        ).astype(np.float32, copy=False)
+        if not mean_descriptor:
+            return descriptors
+
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        offsets = np.r_[0, np.cumsum(atom_counts)]
+        return np.asarray(
+            [descriptors[offsets[i] : offsets[i + 1]].mean(axis=0) for i in range(len(atom_counts))],
+            dtype=np.float32,
+        )

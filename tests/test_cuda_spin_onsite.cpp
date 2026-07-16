@@ -1,5 +1,5 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_opt.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include <algorithm>
@@ -89,7 +89,7 @@ BatchResult run_batch(NepaModel* model) {
       0.0, 16.0, 0.0,
       0.0, 0.0, 16.0,
   };
-  const int pbc[] = {0, 0, 0};
+  const int pbc[] = {1, 1, 1};
 
   NepaStructureBatch batch{};
   batch.num_structures = 1;
@@ -195,14 +195,14 @@ bool check_lammps(NepaModel* model, const BatchResult& ref) {
 }  // namespace
 
 int main() {
-  if (!nep_adapters::register_cpu_opt_engine() ||
+  if (!nep_adapters::register_cpu_engine() ||
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
   const std::string model_path = write_model();
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu_opt", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+  if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
       nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
     return EXIT_FAILURE;
   }

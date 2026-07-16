@@ -20,21 +20,33 @@ Current label meanings:
 - `ase`: optional ASE adapter smoke tests. These skip cleanly when ASE is not
   installed.
 
-The default `cpu_nep3` tests use `tests/fixtures/cpu_nep3_baseline/`. That
+The default `cpu` tests use `tests/fixtures/cpu_baseline/`. That
 fixture contains the model, fixed structure, and golden `energy`, `force`, and
 `virial` labels plus a per-atom `descriptor.txt` matrix. The labels are
 repository test data only; they are not part of the Python wheel.
 
-For `cpu_nep3`, parity compares the public adapter path against direct calls to
-the underlying NEP CPU class. That keeps the test focused on adapter-owned
-boundaries: type mapping, AoS/SoA conversion, batch offsets, energy reduction,
-virial reduction, and descriptor layout conversion.
+CPU correctness combines committed golden labels with an independently compiled
+strict-FP64 oracle. This covers type mapping, AoS/SoA conversion, batch offsets,
+energy and virial reduction, descriptor layout, spin derivatives, and LAMMPS
+neighbor-view conversion without retaining a second CPU backend.
 
-`nep_adapters_cpu_nep3_lammps_neighbors_test` covers the LAMMPS-shaped path:
+`tests/fixtures/nep_cpu_reference/` vendors the minimal 250-atom ordinary NEP3
+and qNEP cases from the NEP_CPU test suite. The CPU engine is checked against
+their force, per-atom raw9 virial, and descriptor references without requiring
+another repository at configure or test time. CUDA checks qNEP calculation and
+descriptor parity; the NEP3 case instead locks the explicit unsupported status,
+with no CPU fallback.
+
+Python has separate ordinary and spin gates. The spin calculator test checks
+native and high-level calculation/descriptor parity, magnetic force, torque,
+single- and multi-structure batching, structure-owned and explicit spin arrays,
+empty results, wrong-model rejection, and the fully periodic input contract.
+
+`nep_adapters_cpu_lammps_neighbors_test` covers the LAMMPS-shaped path:
 `ilist`, `numneigh`, `firstneigh`, `type_map`, `double** x`, `double** f`, and
-raw 9-component per-atom virials are passed through the adapter and compared
-against direct `NEP::compute_for_lammps`. Python/batch tests continue to use
-the regular `compute`-backed API.
+raw 9-component per-atom virials are passed through the adapter and checked
+against committed golden labels. Python/batch tests continue to use the regular
+`compute`-backed API.
 
 `nep_adapters_lammps_plugin_baseline_test` is a real LAMMPS runtime test. It is
 registered when `NEP_ADAPTERS_LAMMPS_EXECUTABLE` points to an `lmp` binary. It
@@ -59,12 +71,17 @@ python3 tools/run_cuda_tests.py
 
 Use `--cuda-arch 70` on V100 nodes and `--cuda-arch 89` on RTX 4090/Ada nodes
 when `native` architecture detection is not wanted. The script configures
-`NEP_ADAPTERS_ENABLE_CUDA=ON` and
-`NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME=ON`, builds the tests, then runs
+`NEP_ADAPTERS_ENABLE_CUDA=ON`, builds the tests, then runs
 `ctest -L cuda`. This is a correctness gate only; MD throughput, `ncu`, and
 `nsys` runs stay under `benchmarks/` or external job scripts.
-Pass `--cpu-nep3-source-dir /path/to/nep_cpu` when the CPU oracle source is not
-in one of the auto-detected sibling paths.
+
+The LAMMPS `nep/gpu` frontend is supported only with a CUDA-enabled Kokkos
+build. Missing Kokkos device state is a hard error; tests must not rely on a
+host-neighbor fallback from the GPU pair style.
+
+When a CUDA Kokkos LAMMPS executable is supplied, CTest also loads the built
+plugin into real LAMMPS and checks `nep/gpu` energy, per-atom energy, force, and
+virial against the committed baseline fixture.
 
 The CUDA gate covers these surfaces:
 
@@ -75,6 +92,10 @@ The CUDA gate covers these surfaces:
 - CPU/CUDA triclinic parity;
 - LAMMPS/Kokkos-style strided device-neighbor input, output layout, type map,
   virial ordering, and neighbor-capacity failure behavior.
+- qNEP direct reciprocal-space force, virial, and descriptor reference parity,
+  plus either fail-closed PPPM
+  behavior in the default build or PPPM reference parity in a PPPM-enabled
+  build.
 
 `tools/run_lammps_mpi_smoke.py` runs the local LAMMPS plugin under
 `mpirun -np 1/2/4` and compares multi-rank output against the 1-rank reference

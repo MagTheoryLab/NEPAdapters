@@ -5,6 +5,18 @@ This directory contains the CUDA engine implementation.
 CUDA dependencies must stay scoped to this engine and CUDA-enabled packages.
 The core runtime and CPU-only Python package must remain buildable without CUDA.
 
+The CUDA model protocol supports ordinary/spin NEP4 and ordinary NEP5, plus
+the implemented NEP4 charge modes. NEP3 is not accepted by this engine and
+returns `NEPA_STATUS_UNSUPPORTED`; callers are never redirected to CPU.
+qNEP exposes both calculation and structural-descriptor output.
+
+qNEP uses the direct reciprocal-space implementation by default. The
+experimental single-node PPPM path is excluded from compilation unless
+`NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON`; only that build links cuFFT. Requesting
+`NEP_ADAPTERS_QNEP_KSPACE=pppm` from a build without PPPM fails explicitly.
+This keeps the default package boundary free of cuFFT while the PPPM design is
+not yet suitable for multi-node production use.
+
 The directory is organized around a small orchestration interface and separate
 CUDA compilation units:
 
@@ -33,10 +45,10 @@ CUDA compilation units:
   element type's W0/B0/W1 block contiguous, descriptor coefficients keep radial
   and angular coefficient regions contiguous, and `q_scaler` is uploaded as its
   own linear array.
-- `device_model.cu` is compiled only when
-  `NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME=ON`; it uploads these packed arrays to
+- `device_model.cu` is part of every `NEP_ADAPTERS_ENABLE_CUDA=ON` build; it
+  uploads these packed arrays to
   CUDA device memory and exposes stable device pointers for later kernels.
-- `device_workspace.cu` follows the same opt-in rule for per-call memory. It
+- `device_workspace.cu` owns per-call device memory. It
   allocates typed device arrays from `WorkspacePlan` and exposes a plain
   `DeviceWorkspaceView` so kernels can receive model parameters and execution
   buffers without knowing about allocation ownership.

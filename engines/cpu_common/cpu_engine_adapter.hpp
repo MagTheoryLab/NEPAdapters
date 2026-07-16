@@ -443,10 +443,20 @@ class CpuModel final : public Model {
 
  private:
   static bool valid_batch(const NepaStructureBatch& batch) {
-    return batch.num_structures > 0 && batch.total_atoms > 0 &&
-           batch.atom_counts != nullptr && batch.atom_offsets != nullptr &&
-           batch.types != nullptr && batch.positions_aos3 != nullptr &&
-           batch.boxes_row_major9 != nullptr;
+    if (batch.num_structures <= 0 || batch.total_atoms <= 0 ||
+        batch.atom_counts == nullptr || batch.atom_offsets == nullptr ||
+        batch.types == nullptr || batch.positions_aos3 == nullptr ||
+        batch.boxes_row_major9 == nullptr || batch.pbc_flags3 == nullptr) {
+      return false;
+    }
+    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+      for (std::int32_t axis = 0; axis < 3; ++axis) {
+        if (batch.pbc_flags3[3 * structure + axis] != 1) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   NativeNep nep_;

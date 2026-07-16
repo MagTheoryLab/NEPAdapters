@@ -174,7 +174,7 @@ class SpinLmpProfileTest(unittest.TestCase):
         "cmake",
         "include",
         "engines/cpu_common",
-        "engines/cpu_opt",
+        "engines/cpu",
         "engines/cuda",
         "frontends/lammps",
         "src",

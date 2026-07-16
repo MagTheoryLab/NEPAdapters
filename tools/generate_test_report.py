@@ -320,7 +320,7 @@ def write_conditions(path, bench_results, fixed_scale, saturated, args):
             selected = result
             break
     payload = {
-        "benchmark": "cpu_nep3_nep89_find_force_batch",
+        "benchmark": "cpu_nep89_find_force_batch",
         "fixed_scale": fixed_scale,
         "saturated": saturated,
         "openmp_threads": args.openmp_threads,
@@ -368,7 +368,7 @@ def main():
     report_dir.mkdir(parents=True, exist_ok=True)
 
     commands = [
-        f"cmake -S . -B {build_dir} -DBUILD_SHARED_LIBS=ON -DNEP_ADAPTERS_BUILD_TESTS=ON -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON -DNEP_ADAPTERS_ENABLE_PYTHON=ON -DNEP_ADAPTERS_ENABLE_LAMMPS=ON -DPython3_EXECUTABLE={args.python_executable} -DNEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_nep3_baseline'}",
+        f"cmake -S . -B {build_dir} -DBUILD_SHARED_LIBS=ON -DNEP_ADAPTERS_BUILD_TESTS=ON -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON -DNEP_ADAPTERS_ENABLE_PYTHON=ON -DNEP_ADAPTERS_ENABLE_LAMMPS=ON -DPython3_EXECUTABLE={args.python_executable} -DNEP_ADAPTERS_CPU_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_baseline'}",
         f"cmake --build {build_dir} -j{args.jobs}",
         f"ctest --test-dir {build_dir} -LE bench --output-on-failure",
         f"ctest --test-dir {build_dir} -L bench --output-on-failure",
@@ -386,14 +386,14 @@ def main():
         "-DNEP_ADAPTERS_ENABLE_PYTHON=ON",
         "-DNEP_ADAPTERS_ENABLE_LAMMPS=ON",
         f"-DPython3_EXECUTABLE={args.python_executable}",
-        f"-DNEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_nep3_baseline'}",
+        f"-DNEP_ADAPTERS_CPU_TEST_DATA_DIR={repo / 'tests' / 'fixtures' / 'cpu_baseline'}",
     ]
     if args.lmp_executable:
         lmp_path = Path(args.lmp_executable).resolve()
         configure_args.append(f"-DNEP_ADAPTERS_LAMMPS_EXECUTABLE={lmp_path}")
         commands[0] += f" -DNEP_ADAPTERS_LAMMPS_EXECUTABLE={lmp_path}"
-    configure_args.append("-DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON")
-    commands[0] += " -DNEP_ADAPTERS_CPU_NEP3_ENABLE_OPENMP=ON"
+    configure_args.append("-DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON")
+    commands[0] += " -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON"
 
     libomp_env = os.environ.get("LIBOMP_PREFIX", "")
     libomp_prefix = Path(libomp_env) if libomp_env else Path()
@@ -507,8 +507,8 @@ def main():
         model_env = os.environ.get("NEP_ADAPTERS_NEP89_MODEL_PATH", "")
         model_path = Path(model_env) if model_env else Path()
         if not model_env or not model_path.exists():
-            model_path = (repo / "tests/fixtures/cpu_nep3_baseline/nep.txt").resolve()
-        fixture_path = (repo / "tests/fixtures/cpu_nep3_baseline/train.xyz").resolve()
+            model_path = (repo / "tests/fixtures/cpu_baseline/nep.txt").resolve()
+        fixture_path = (repo / "tests/fixtures/cpu_baseline/train.xyz").resolve()
         baseline_json = report_dir / "lammps_baseline_smoke.json"
         baseline_md = report_dir / "lammps_baseline_smoke.md"
         baseline_command = [

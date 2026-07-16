@@ -1,12 +1,12 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_opt.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
 #include "nep_adapters/engines/cuda.hpp"
 #include <cuda_runtime_api.h>
 #endif
 
 #include "cpu_engine_adapter.hpp"
-#include "cpu_nep3_test_utils.hpp"
+#include "cpu_test_utils.hpp"
 #include "nep.h"
 
 #include <algorithm>
@@ -29,7 +29,7 @@
 #include <vector>
 
 #if defined(_OPENMP) || defined(USE_TABLE_FOR_RADIAL_FUNCTIONS) || \
-    defined(NEP_ADAPTERS_CPU_OPT_USE_CBLAS)
+    defined(NEP_ADAPTERS_CPU_USE_CBLAS)
 #error "The FP64 oracle must use the scalar, untabulated CPU path"
 #endif
 
@@ -413,9 +413,9 @@ Prediction evaluate_batch(
 
 CaseData make_nonmag_fixture() {
   const std::string model_path = NEP_ADAPTERS_FP64_MODEL_PATH;
-  const auto type_map = cpu_nep3_test::read_type_map(model_path);
-  const cpu_nep3_test::Frame frame =
-      cpu_nep3_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
+  const auto type_map = cpu_test::read_type_map(model_path);
+  const cpu_test::Frame frame =
+      cpu_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
   CaseData out;
   out.name = "nonmag_fixture";
   out.model_path = model_path;
@@ -477,9 +477,9 @@ CaseData make_spin_reference_case() {
 
 CaseData make_spin_finite_difference_case() {
   CaseData out = make_spin_reference_case();
-  out.name = "spin_chiral_nonperiodic";
+  out.name = "spin_chiral_isolated_periodic";
   out.box = {16.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0, 16.0};
-  out.pbc = {0, 0, 0};
+  out.pbc = {1, 1, 1};
   return out;
 }
 
@@ -521,11 +521,11 @@ CaseData make_dense_spin_case() {
 bool validate_nonmag_frozen_reference(
     const Prediction& oracle,
     const CaseData& test_case) {
-  const auto type_map = cpu_nep3_test::read_type_map(test_case.model_path);
-  const cpu_nep3_test::Frame frame =
-      cpu_nep3_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
-  const cpu_nep3_test::Matrix descriptors =
-      cpu_nep3_test::read_matrix(NEP_ADAPTERS_FP64_DESCRIPTOR_PATH);
+  const auto type_map = cpu_test::read_type_map(test_case.model_path);
+  const cpu_test::Frame frame =
+      cpu_test::read_first_frame(NEP_ADAPTERS_FP64_XYZ_PATH, type_map);
+  const cpu_test::Matrix descriptors =
+      cpu_test::read_matrix(NEP_ADAPTERS_FP64_DESCRIPTOR_PATH);
   const std::vector<double> energy = {oracle.energy};
   const std::vector<double> reference_energy = {frame.reference_energy};
   const std::vector<double> reference_virial(
@@ -778,14 +778,9 @@ double model_cutoff_max(Runner& runner) {
   return info.cutoff_max;
 }
 
-std::vector<std::vector<int>> make_nonperiodic_neighbor_rows(
+std::vector<std::vector<int>> make_isolated_neighbor_rows(
     const CaseData& test_case,
     double cutoff) {
-  if (test_case.pbc[0] != 0 || test_case.pbc[1] != 0 ||
-      test_case.pbc[2] != 0) {
-    throw std::runtime_error(
-        "LAMMPS FP64 oracle neighbor builder requires a nonperiodic case");
-  }
   const int atom_count = test_case.atom_count();
   const double cutoff_squared = cutoff * cutoff;
   std::vector<std::vector<int>> rows(atom_count);
@@ -816,7 +811,7 @@ struct LammpsStorage {
     const int atom_count = test_case.atom_count();
     ilist.resize(atom_count);
     std::iota(ilist.begin(), ilist.end(), 0);
-    neighbor_rows = make_nonperiodic_neighbor_rows(test_case, cutoff);
+    neighbor_rows = make_isolated_neighbor_rows(test_case, cutoff);
     numneigh.resize(atom_count);
     firstneigh.resize(atom_count, nullptr);
     for (int atom = 0; atom < atom_count; ++atom) {
@@ -950,7 +945,7 @@ LammpsPrediction evaluate_lammps_device(
     const CaseData& test_case) {
   const int atom_count = test_case.atom_count();
   const std::vector<std::vector<int>> neighbor_rows =
-      make_nonperiodic_neighbor_rows(test_case, model_cutoff_max(runner));
+      make_isolated_neighbor_rows(test_case, model_cutoff_max(runner));
   int max_neighbors = 0;
   for (const auto& row : neighbor_rows) {
     max_neighbors = std::max(max_neighbors, static_cast<int>(row.size()));
@@ -1165,11 +1160,6 @@ DirectHeatCurrentReference finite_difference_heat_current_reference(
     Runner& runner,
     const CaseData& test_case,
     const std::vector<double>& velocities) {
-  if (test_case.pbc[0] != 0 || test_case.pbc[1] != 0 ||
-      test_case.pbc[2] != 0) {
-    throw std::runtime_error(
-        "n2 heat-current finite differences require a nonperiodic case");
-  }
   if (velocities.size() != test_case.positions.size()) {
     throw std::runtime_error("invalid random-velocity shape");
   }
@@ -1330,10 +1320,6 @@ CaseData symmetrically_strained_case(
     const CaseData& base,
     int lammps_component,
     double strain) {
-  if (base.pbc[0] != 0 || base.pbc[1] != 0 || base.pbc[2] != 0) {
-    throw std::runtime_error(
-        "dense virial finite differences require a nonperiodic case");
-  }
   static constexpr int first_axis[6] = {0, 1, 2, 0, 0, 1};
   static constexpr int second_axis[6] = {0, 1, 2, 1, 2, 2};
   if (lammps_component < 0 || lammps_component >= 6) {
@@ -1675,9 +1661,13 @@ bool run_device_spin_lammps_case(
            candidate_virial_per_atom,
            oracle_virial_per_atom,
            budgets.virial) && ok;
-  // The legacy CPU spin oracle owns all spin-only per-atom virial at atom 0.
-  // The device LAMMPS contract intentionally uses the MPI-stable n2 neighbor
-  // ownership, so only the total and the n2 sum invariant are comparable here.
+  ok = report_field(
+           "cuda_device",
+           test_case.name + "_lammps",
+           "atom_virial9",
+           candidate.atom_virial9,
+           oracle_lammps.atom_virial9,
+           budgets.atom_virial) && ok;
   ok = report_field(
            "cuda_device", test_case.name + "_lammps", "mforce",
            candidate.mforce, oracle_lammps.mforce, budgets.mforce) && ok;
@@ -1698,8 +1688,8 @@ int main() {
   try {
     std::cout << "FP64_ORACLE_CONFIG scalar=double openmp=off cblas=off "
                  "radial_table=off fast_math=off fp_contract=off\n";
-    if (!nep_adapters::register_cpu_opt_engine()) {
-      std::cerr << "failed to register cpu_opt\n";
+    if (!nep_adapters::register_cpu_engine()) {
+      std::cerr << "failed to register cpu\n";
       return EXIT_FAILURE;
     }
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
@@ -1732,40 +1722,40 @@ int main() {
         evaluate_batch(spin_oracle, spin_reference);
     ok = validate_spin_frozen_reference(spin_reference_oracle, spin_reference) && ok;
 
-    const CaseData spin_nonperiodic = make_spin_finite_difference_case();
-    const Prediction spin_nonperiodic_oracle =
-        evaluate_batch(spin_oracle, spin_nonperiodic);
-    ok = validate_oracle_derivatives(spin_oracle, spin_nonperiodic) && ok;
+    const CaseData spin_isolated_periodic = make_spin_finite_difference_case();
+    const Prediction spin_isolated_periodic_oracle =
+        evaluate_batch(spin_oracle, spin_isolated_periodic);
+    ok = validate_oracle_derivatives(spin_oracle, spin_isolated_periodic) && ok;
     const CaseData dense_spin = make_dense_spin_case();
     const Prediction dense_spin_oracle = evaluate_batch(spin_oracle, dense_spin);
     const std::vector<std::pair<CaseData, Prediction>> spin_cases = {
-        {spin_nonperiodic, spin_nonperiodic_oracle},
+        {spin_isolated_periodic, spin_isolated_periodic_oracle},
         {dense_spin, dense_spin_oracle},
     };
 
     ok = run_backend_batch_cases(
-             "cpu_opt",
+             "cpu",
              cpu_budgets(),
              nonmag_cases,
              spin_cases) && ok;
 
     CaseData nonmag_lammps = nonmag_fixture;
-    nonmag_lammps.name = "nonmag_nonperiodic";
-    nonmag_lammps.pbc = {0, 0, 0};
-    ApiRunner cpu_nonmag("cpu_opt", nonmag_lammps.model_path);
+    nonmag_lammps.name = "nonmag_isolated_periodic";
+    nonmag_lammps.pbc = {1, 1, 1};
+    ApiRunner cpu_nonmag("cpu", nonmag_lammps.model_path);
     ok = run_lammps_case(
-             "cpu_opt",
+             "cpu",
              cpu_budgets(),
              cpu_nonmag,
              nonmag_oracle,
              nonmag_lammps) && ok;
-    ApiRunner cpu_spin("cpu_opt", spin_nonperiodic.model_path);
+    ApiRunner cpu_spin("cpu", spin_isolated_periodic.model_path);
     ok = run_lammps_case(
-             "cpu_opt",
+             "cpu",
              cpu_budgets(),
              cpu_spin,
              spin_oracle,
-             spin_nonperiodic) && ok;
+             spin_isolated_periodic) && ok;
 
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
     ok = run_backend_batch_cases(
@@ -1781,40 +1771,39 @@ int main() {
              nonmag_oracle,
              nonmag_lammps) && ok;
     CaseData dense_nonmag_lammps = dense_nonmag;
-    dense_nonmag_lammps.name = "nonmag_dense_nonperiodic_device";
-    // The native CPU oracle encodes nonperiodic structures with a box large
-    // enough that no periodic image enters the cutoff.
+    dense_nonmag_lammps.name = "nonmag_dense_isolated_periodic_device";
+    // Keep the periodic cell large enough that no image enters the cutoff.
     dense_nonmag_lammps.box = {
         64.0, 0.0, 0.0,
         0.0, 64.0, 0.0,
         0.0, 0.0, 64.0};
-    dense_nonmag_lammps.pbc = {0, 0, 0};
+    dense_nonmag_lammps.pbc = {1, 1, 1};
     ok = run_device_lammps_case(
              cuda_budgets(),
              cuda_nonmag,
              nonmag_oracle,
              dense_nonmag_lammps) && ok;
-    ApiRunner cuda_spin("cuda", spin_nonperiodic.model_path);
+    ApiRunner cuda_spin("cuda", spin_isolated_periodic.model_path);
     ok = validate_cuda_n2_heat_current(
-             cuda_spin, spin_oracle, spin_nonperiodic) && ok;
+             cuda_spin, spin_oracle, spin_isolated_periodic) && ok;
     ok = run_lammps_case(
              "cuda",
              cuda_budgets(),
              cuda_spin,
              spin_oracle,
-             spin_nonperiodic) && ok;
+             spin_isolated_periodic) && ok;
     ok = run_device_spin_lammps_case(
              cuda_budgets(),
              cuda_spin,
              spin_oracle,
-             spin_nonperiodic) && ok;
+             spin_isolated_periodic) && ok;
     CaseData dense_spin_lammps = dense_spin;
-    dense_spin_lammps.name = "spin_chiral_dense_nonperiodic_device";
+    dense_spin_lammps.name = "spin_chiral_dense_isolated_periodic_device";
     dense_spin_lammps.box = {
         64.0, 0.0, 0.0,
         0.0, 64.0, 0.0,
         0.0, 0.0, 64.0};
-    dense_spin_lammps.pbc = {0, 0, 0};
+    dense_spin_lammps.pbc = {1, 1, 1};
     ok = run_device_spin_lammps_case(
              cuda_budgets(),
              cuda_spin,

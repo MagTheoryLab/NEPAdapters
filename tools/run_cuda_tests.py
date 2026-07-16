@@ -15,7 +15,7 @@ def run(args, cwd):
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build-dir", default="build-cuda-tests")
+    parser.add_argument("--build-dir", default=".build/cuda-tests")
     parser.add_argument(
         "--cuda-arch",
         default=os.environ.get("CMAKE_CUDA_ARCHITECTURES", "native"),
@@ -23,8 +23,9 @@ def main():
     )
     parser.add_argument("--label", default="cuda")
     parser.add_argument(
-        "--cpu-nep3-source-dir",
-        default=os.environ.get("NEP_ADAPTERS_CPU_NEP3_SOURCE_DIR", ""),
+        "--qnep-pppm",
+        action="store_true",
+        help="compile the optional qNEP PPPM path and link cuFFT",
     )
     parser.add_argument("-j", "--jobs", default=str(os.cpu_count() or 2))
     parser.add_argument("--no-configure", action="store_true")
@@ -41,14 +42,11 @@ def main():
             build_dir,
             "-DNEP_ADAPTERS_BUILD_TESTS=ON",
             "-DNEP_ADAPTERS_ENABLE_CUDA=ON",
-            "-DNEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME=ON",
-            "-DNEP_ADAPTERS_ENABLE_CPU_NEP3=ON",
+            "-DNEP_ADAPTERS_ENABLE_CPU=ON",
+            "-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM="
+            + ("ON" if args.qnep_pppm else "OFF"),
             f"-DCMAKE_CUDA_ARCHITECTURES={args.cuda_arch}",
         ]
-        if args.cpu_nep3_source_dir:
-            configure_args.append(
-                f"-DNEP_ADAPTERS_CPU_NEP3_SOURCE_DIR={args.cpu_nep3_source_dir}"
-            )
         run(configure_args, root)
 
     if not args.no_build:

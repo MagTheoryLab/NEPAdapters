@@ -99,18 +99,21 @@ def write_data(path, fixture, elements):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_input(path, plugin, model, elements):
+def write_input(path, plugin, model, elements, pair_style="nep/cpu"):
     stress_cols = " ".join(f"c_satom[{index}]" for index in range(1, 7))
+    atom_style = "atomic/kk" if pair_style == "nep/gpu" else "atomic"
+    run_style = "verlet/kk" if pair_style == "nep/gpu" else "verlet"
     path.write_text(
         "\n".join(
             [
                 "clear",
                 "units metal",
-                "atom_style atomic",
+                f"atom_style {atom_style}",
                 "boundary p p p",
                 f"plugin load {plugin}",
                 "read_data data.baseline",
-                "pair_style nep/cpu",
+                f"run_style {run_style}",
+                f"pair_style {pair_style}",
                 f"pair_coeff * * {model} {' '.join(elements)}",
                 "neighbor 1.0 bin",
                 "neigh_modify every 1 delay 0 check yes",
@@ -140,6 +143,14 @@ def run_command(args, cwd):
     if completed.returncode != 0:
         raise RuntimeError(completed.stdout)
     return completed.stdout
+
+
+def lammps_command(lmp, pair_style):
+    command = [lmp]
+    if pair_style == "nep/gpu":
+        command.extend(["-k", "on", "g", "1"])
+    command.extend(["-in", "in.baseline", "-log", "log.lammps"])
+    return command
 
 
 def parse_dump(path):
@@ -240,6 +251,9 @@ def main():
     parser.add_argument("--plugin", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--fixture", required=True)
+    parser.add_argument(
+        "--pair-style", choices=("nep/cpu", "nep/gpu"), default="nep/cpu"
+    )
     parser.add_argument("--work-dir", default="build-lammps-baseline-smoke")
     parser.add_argument("--energy-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--force-tolerance", type=float, default=1.0e-8)
@@ -258,10 +272,16 @@ def main():
     work_dir = Path(args.work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     write_data(work_dir / "data.baseline", fixture, elements)
-    write_input(work_dir / "in.baseline", args.plugin, args.model, elements)
+    write_input(
+        work_dir / "in.baseline",
+        args.plugin,
+        args.model,
+        elements,
+        args.pair_style,
+    )
 
     screen = run_command(
-        [args.lmp, "-in", "in.baseline", "-log", "log.lammps"],
+        lammps_command(args.lmp, args.pair_style),
         work_dir,
     )
     (work_dir / "screen.out").write_text(screen, encoding="utf-8")
@@ -270,6 +290,7 @@ def main():
         "plugin": args.plugin,
         "model": args.model,
         "fixture": args.fixture,
+        "pair_style": args.pair_style,
         "result": compare(
             fixture,
             parse_dump(work_dir / "dump.out"),

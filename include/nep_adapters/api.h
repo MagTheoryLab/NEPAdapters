@@ -61,11 +61,13 @@ typedef struct NepaStructureBatch {
   int32_t total_atoms;
   const int32_t* atom_counts;
   const int32_t* atom_offsets;
+  /* Zero-based model type indices in [0, num_types). */
   const int32_t* types;
   const double* positions_aos3;
   const double* spins_aos3;
   /* 3x3 cell in NEP order: ax, bx, cx, ay, by, cy, az, bz, cz. */
   const double* boxes_row_major9;
+  /* Required; every structure must use {1, 1, 1}. Non-periodic inputs are unsupported. */
   const int32_t* pbc_flags3;
 } NepaStructureBatch;
 

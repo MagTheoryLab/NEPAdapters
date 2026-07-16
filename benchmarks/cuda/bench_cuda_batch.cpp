@@ -434,11 +434,6 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
   }
-#else
-  if (options.device_pipeline) {
-    std::cerr << "--device-pipeline requires NEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME\n";
-    return EXIT_FAILURE;
-  }
 #endif
 
   NepaModel* model = nullptr;

@@ -1,5 +1,5 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_opt.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include <algorithm>
@@ -68,7 +68,7 @@ Prediction run(NepaModel* model) {
       16.0, 0.0, 0.0,
       0.0, 16.0, 0.0,
       0.0, 0.0, 16.0};
-  const std::int32_t pbc[] = {0, 0, 0};
+  const std::int32_t pbc[] = {1, 1, 1};
 
   NepaModelInfo info{};
   if (nepa_model_info(model, &info) != NEPA_STATUS_OK ||
@@ -204,13 +204,13 @@ bool check_lammps(NepaModel* model, const Prediction& ref) {
 }  // namespace
 
 int main() {
-  if (!nep_adapters::register_cpu_opt_engine() ||
+  if (!nep_adapters::register_cpu_engine() ||
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
   NepaModel* cpu = nullptr;
   NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu_opt", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &cpu) !=
+  if (nepa_load_model("cpu", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &cpu) !=
           NEPA_STATUS_OK ||
       nepa_load_model("cuda", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &gpu) !=
           NEPA_STATUS_OK) {

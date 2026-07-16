@@ -27,7 +27,7 @@ def main():
     types = np.asarray([type_map[symbol] for symbol in structure.get_chemical_symbols()], dtype=np.int32)
     box = np.asarray(structure.cell, dtype=np.float64).reshape(9)
     atom_counts = np.asarray([len(types)], dtype=np.int32)
-    with nep_adapters.load_model("cpu_nep3", model_path) as model:
+    with nep_adapters.load_model("cpu", model_path) as model:
         direct_energy, direct_forces, direct_virial = model.find_force(
             types,
             structure.positions,

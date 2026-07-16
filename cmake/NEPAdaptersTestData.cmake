@@ -1,13 +1,13 @@
-set(NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR "" CACHE PATH
-  "Path to NEP test data containing nep.txt and train.xyz for cpu_nep3 tests")
+set(NEP_ADAPTERS_CPU_TEST_DATA_DIR "" CACHE PATH
+  "Path to committed NEP baseline data containing nep.txt and train.xyz")
 
-if(NOT NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR)
+if(NOT NEP_ADAPTERS_CPU_TEST_DATA_DIR)
   foreach(_candidate IN ITEMS
-      "${PROJECT_SOURCE_DIR}/tests/fixtures/cpu_nep3_baseline"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/cpu_baseline"
       "${PROJECT_SOURCE_DIR}/../NepTrainKit/tests/data/nep")
     if(EXISTS "${_candidate}/nep.txt" AND EXISTS "${_candidate}/train.xyz")
-      set(NEP_ADAPTERS_CPU_NEP3_TEST_DATA_DIR "${_candidate}" CACHE PATH
-        "Path to NEP test data containing nep.txt and train.xyz for cpu_nep3 tests" FORCE)
+      set(NEP_ADAPTERS_CPU_TEST_DATA_DIR "${_candidate}" CACHE PATH
+        "Path to committed NEP baseline data containing nep.txt and train.xyz" FORCE)
       break()
     endif()
   endforeach()
@@ -19,6 +19,8 @@ set(NEP_ADAPTERS_NEP89_XYZ_PATH "" CACHE FILEPATH
   "Path to an extxyz file compatible with the nep89 model")
 set(NEP_ADAPTERS_QNEP_TEST_DATA_DIR "" CACHE PATH
   "Path to qNEP test data containing nep.txt and xyz.in")
+set(NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR
+  "${PROJECT_SOURCE_DIR}/tests/fixtures/nep_cpu_reference/nep")
 
 if(NOT NEP_ADAPTERS_NEP89_MODEL_PATH)
   foreach(_candidate IN ITEMS
@@ -33,7 +35,7 @@ endif()
 
 if(NOT NEP_ADAPTERS_QNEP_TEST_DATA_DIR)
   foreach(_candidate IN ITEMS
-      "${PROJECT_SOURCE_DIR}/../NEP_CPU/test_qnep")
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep_cpu_reference/qnep")
     if(EXISTS "${_candidate}/nep.txt" AND EXISTS "${_candidate}/xyz.in")
       set(NEP_ADAPTERS_QNEP_TEST_DATA_DIR "${_candidate}" CACHE PATH
         "Path to qNEP test data containing nep.txt and xyz.in" FORCE)

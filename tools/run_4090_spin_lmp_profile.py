@@ -29,7 +29,7 @@ SOURCE_INPUTS = (
     "cmake",
     "include",
     "engines/cpu_common",
-    "engines/cpu_opt",
+    "engines/cpu",
     "benchmarks",
     "engines/cuda",
     "frontends/lammps",
@@ -157,10 +157,8 @@ def build_remote(profile, plan, gpu):
       cd {q(source_dir)}
       cmake -S {q(source_dir)} -B {q(build_dir)} \
         -DCMAKE_BUILD_TYPE=Release \
-        -DNEP_ADAPTERS_ENABLE_CPU_NEP3=OFF \
+        -DNEP_ADAPTERS_ENABLE_CPU=ON \
         -DNEP_ADAPTERS_ENABLE_CUDA=ON \
-        -DNEP_ADAPTERS_CUDA_ENABLE_DEVICE_RUNTIME=ON \
-        -DNEP_ADAPTERS_ENABLE_CPU_OPT=ON \
         -DNEP_ADAPTERS_BUILD_TESTS=ON \
         -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON \
         -DCMAKE_CUDA_ARCHITECTURES=89 \

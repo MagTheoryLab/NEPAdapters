@@ -1,7 +1,7 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_nep3.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 
-#include "cpu_nep3_test_utils.hpp"
+#include "cpu_test_utils.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -14,16 +14,16 @@ int main() {
   const std::string model_path = NEP_ADAPTERS_NEP89_MODEL_PATH;
   const std::string xyz_path = NEP_ADAPTERS_NEP89_XYZ_PATH;
 
-  if (!nep_adapters::register_cpu_nep3_engine()) {
+  if (!nep_adapters::register_cpu_engine()) {
     return EXIT_FAILURE;
   }
 
-  const auto type_map = cpu_nep3_test::read_type_map(model_path);
-  cpu_nep3_test::Frame frame =
-      cpu_nep3_test::read_first_frame(xyz_path, type_map);
+  const auto type_map = cpu_test::read_type_map(model_path);
+  cpu_test::Frame frame =
+      cpu_test::read_first_frame(xyz_path, type_map);
 
   NepaModel* model = nullptr;
-  if (nepa_load_model("cpu_nep3", model_path.c_str(), &model) != NEPA_STATUS_OK ||
+  if (nepa_load_model("cpu", model_path.c_str(), &model) != NEPA_STATUS_OK ||
       model == nullptr) {
     return EXIT_FAILURE;
   }
@@ -64,7 +64,7 @@ int main() {
       0.0,
       [](double sum, double value) { return sum + std::abs(value); });
 
-  if (!std::isfinite(energy[0]) || !cpu_nep3_test::all_finite(forces) ||
+  if (!std::isfinite(energy[0]) || !cpu_test::all_finite(forces) ||
       force_l1 <= 0.0) {
     return EXIT_FAILURE;
   }

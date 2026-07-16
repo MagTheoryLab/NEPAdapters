@@ -10,7 +10,7 @@ The design has three layers:
 
 - `core`: model/runtime semantics, data views, capability reporting, error
   handling, and dispatch.
-- `engines`: compute implementations such as `cpu_nep3` and `cpu_opt`.
+- `engines`: the supported `cpu` and `cuda` compute implementations.
 - `frontends`: Python bindings, LAMMPS pair/plugin code, and future software
   integrations.
 
@@ -26,19 +26,10 @@ The design has three layers:
 
 ## Engine Strategy
 
-The first CPU engine should not be a new reference implementation written from
-scratch. The official or existing NEP CPU class should be adapted as
-`cpu_nep3` and used as the reference engine and parity oracle.
-
-Planned engines:
-
-- `cpu_nep3`: thin SPI shim around the official/existing NEP CPU implementation.
-  The name is historical; it represents the current NEP CPU code path exposed by
-  that class. It is the correctness baseline, not the performance target.
-- `cpu_opt`: optimized CPU implementation for OpenMP/SIMD/layout/algorithm work.
-  It must pass parity against `cpu_nep3`.
-This avoids repeating the official CPU implementation while still allowing
-independent CPU engineering.
+`cpu` is the only supported CPU engine. Correctness is gated by committed
+golden fixtures, the strict FP64 oracle target, finite-difference checks, and
+CPU/CUDA parity. The removed legacy CPU shim is not retained as a runtime or
+test fallback.
 
 The CUDA engine should be built normal-NEP first. Its protocol source of truth is
 the current `torchnep/src/force` NEP implementation, while performance choices
@@ -67,10 +58,11 @@ The CUDA force path has two first-class input modes:
   flags, and per-structure ranges. The CUDA engine owns neighbor construction
   and therefore keeps structure, box, and PBC metadata in its internal-neighbor
   workspace.
-- external neighbors: the caller provides an already-built neighbor topology,
-  such as LAMMPS host neighbors or later Kokkos/device neighbors. The CUDA engine
-  stages active atoms and converts or aliases the topology into its slot-major
-  execution layout without making this path depend on batch boxes.
+- external neighbors: the caller provides an already-built neighbor topology.
+  Host callers use the host-neighbor API; the LAMMPS GPU frontend uses the
+  explicit Kokkos device-input API. The CUDA engine converts or aliases either
+  topology into its slot-major execution layout without making this path depend
+  on batch boxes.
 
 Both modes should converge before descriptor and ANN kernels on the same
 slot-major neighbor arrays and SoA atom/output buffers. That shared execution
@@ -84,13 +76,12 @@ storage, then traverse neighboring cells to fill radial and angular slot-major
 neighbor arrays. That layout leaves room for later sorted-cell ordering and
 Kokkos device-view input without changing descriptor kernels.
 
-LAMMPS Kokkos should be treated as a third frontend shape, not as the same thing
-as the host-neighbor API. In the local LAMMPS checkout, Kokkos coordinates are
+LAMMPS Kokkos is a third frontend shape, not the same thing as the host-neighbor
+API. In the local LAMMPS checkout, Kokkos coordinates are
 `X_FLOAT*[3]` views accessed as `x(i,0..2)`, while neighbor data is held in
-Kokkos `int**` views and sometimes a transpose view. That can support a later
-device-view path with less copying, but the CUDA engine should still own the
-final execution layout for NEP kernels instead of inheriting LAMMPS view layout
-as the core ABI.
+Kokkos `int**` views and sometimes a transpose view. The device-input path keeps
+these views on device, while the CUDA engine still owns the final execution
+layout for NEP kernels instead of inheriting the LAMMPS view layout as core ABI.
 
 ## Frontend Strategy
 
@@ -98,7 +89,7 @@ Python and LAMMPS have different shapes and should not force each other into the
 same call pattern.
 
 - Python primarily wants model loading, batch prediction, optional descriptors,
-  optional descriptors, automatic or explicit engine selection, and direct
+  automatic or explicit engine selection, and direct
   NumPy arrays.
 - LAMMPS primarily wants a pair/plugin frontend that translates LAMMPS atom,
   box, type-map, neighbor-list, energy, force, and virial conventions into core
@@ -107,7 +98,7 @@ same call pattern.
 LAMMPS pair styles should live under `frontends/lammps/`. They may support a
 runtime plugin and/or a source package, but both are frontends over the same core
 runtime and engines. The CPU LAMMPS pair enters through the LAMMPS-shaped
-external-neighbor contract and the `cpu_nep3` engine forwards that path to the
+external-neighbor contract and the `cpu` engine forwards that path to the
 underlying NEP CPU `compute_for_lammps` implementation. The Python frontend must
 continue to use the regular batch `compute` path and should not inherit LAMMPS
 neighbor-list or ghost-atom conventions.
@@ -138,19 +129,19 @@ owned-neighbor construction, and device input have clear data-view contracts.
 
 The default Python package should be CPU-only:
 
-- build core + `cpu_nep3` + possibly `cpu_opt`;
+- build core + `cpu`;
 - not include LAMMPS.
 
 LAMMPS integration should be buildable by users who download this repository:
 
 - runtime plugin is preferred where practical;
-- source package can remain as a fallback for older or constrained LAMMPS builds;
+- source integration is a separate build form for LAMMPS builds that cannot load plugins;
 - it should link the runtime/engine libraries but never depend on Python.
 
 ## CPU Baseline Plan
 
 1. Keep core buildable without CUDA, Python, and LAMMPS.
-2. Keep `cpu_nep3` as the oracle-engine boundary.
+2. Keep `cpu` as the sole CPU production boundary.
 3. Expose Python through pybind11 with NumPy arrays and no Python-side shape
    conversions after native return.
 4. Expose a CPU LAMMPS pair/plugin through `compute_for_lammps` and external
@@ -164,10 +155,10 @@ LAMMPS integration should be buildable by users who download this repository:
 
 Testing has two separate jobs:
 
-- correctness: API/SPI contracts, smoke tests, parity against `cpu_nep3`, and
+- correctness: API/SPI contracts, golden-label tests, strict FP64 checks, and
   frontend integration tests. The default CPU/Python/LAMMPS correctness tests
   must also compare against committed golden labels in
-  `tests/fixtures/cpu_nep3_baseline/`;
+  `tests/fixtures/cpu_baseline/`;
 - performance: throughput, scaling, and profiler-backed bottleneck evidence.
 
 CTest is the top-level dispatcher for native tests and benchmarks. Tests must
@@ -197,7 +188,8 @@ reduction. Engines can each provide runners for that same contract.
 - Do not mix Python or LAMMPS headers into core.
 - Do not rewrite the CPU reference engine if the official/existing NEP CPU class
   can serve as the oracle.
-- Do not make `cpu_opt` depend on `cpu_nep3` outside tests.
+- Do not add a second CPU backend or compatibility fallback without a concrete
+  supported use case.
 - Do not expose engine SPI types through the public API.
 - Do not mix correctness pass/fail thresholds with machine-specific benchmark
   baselines. Record throughput first; add regression gates only with explicit

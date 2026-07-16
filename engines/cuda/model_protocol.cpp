@@ -89,7 +89,8 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
   if (tag.find("_dipole") != std::string::npos ||
       tag.find("_polarizability") != std::string::npos ||
       tag.find("_temperature") != std::string::npos) {
-    throw std::runtime_error("CUDA engine skeleton only accepts ordinary potential models");
+    throw UnsupportedModelProtocol(
+        "CUDA engine only accepts supported NEP potential models");
   }
 
   if (tag == "nep4" || tag == "nep4_zbl" ||
@@ -107,7 +108,8 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
   } else if (tag == "nep5" || tag == "nep5_zbl") {
     protocol.version = 5;
   } else {
-    throw std::runtime_error("CUDA engine skeleton only accepts ordinary NEP4/NEP5 models");
+    throw UnsupportedModelProtocol(
+        "CUDA engine only accepts supported NEP4/NEP5 models");
   }
   protocol.has_zbl = tag.find("_zbl") != std::string::npos;
   protocol.spin_mode = tag.find("_spin") != std::string::npos ? 1 : 0;

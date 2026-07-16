@@ -67,10 +67,4 @@ bool register_engine(Engine* engine);
 void clear_last_error();
 void set_last_error(const std::string& message);
 
-// Transitional names kept while the public C ABI still says "backend".
-using BackendInfo = EngineInfo;
-using Backend = Engine;
-
-bool register_backend(Backend* backend);
-
 }  // namespace nep_adapters

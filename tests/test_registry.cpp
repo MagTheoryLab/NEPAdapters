@@ -132,6 +132,14 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  pbc[2] = 0;
+  if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_UNSUPPORTED ||
+      std::strstr(nepa_last_error_message(), "fully periodic") == nullptr) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+  pbc[2] = 1;
+
   double descriptor[] = {0.0};
   NepaFindDescriptorResult descriptor_result{};
   descriptor_result.descriptors = descriptor;

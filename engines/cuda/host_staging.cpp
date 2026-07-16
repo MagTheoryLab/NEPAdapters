@@ -70,6 +70,14 @@ HostBatchStaging stage_batch_for_internal_neighbors(
   require(batch.types != nullptr, "missing atom types");
   require(batch.positions_aos3 != nullptr, "missing atom positions");
   require(batch.boxes_row_major9 != nullptr, "missing boxes");
+  require(batch.pbc_flags3 != nullptr, "missing periodic boundary flags");
+  for (int structure = 0; structure < batch.num_structures; ++structure) {
+    for (int axis = 0; axis < 3; ++axis) {
+      require(
+          batch.pbc_flags3[3 * structure + axis] == 1,
+          "NEPAdapters supports fully periodic structures only");
+    }
+  }
 
   HostBatchStaging staging;
   staging.types.assign(batch.types, batch.types + batch.total_atoms);
@@ -85,13 +93,8 @@ HostBatchStaging stage_batch_for_internal_neighbors(
       batch.boxes_row_major9,
       batch.boxes_row_major9 + static_cast<std::size_t>(batch.num_structures) * 9);
   staging.pbc_flags3.assign(
-      static_cast<std::size_t>(batch.num_structures) * 3,
-      0);
-  if (batch.pbc_flags3 != nullptr) {
-    staging.pbc_flags3.assign(
-        batch.pbc_flags3,
-        batch.pbc_flags3 + static_cast<std::size_t>(batch.num_structures) * 3);
-  }
+      batch.pbc_flags3,
+      batch.pbc_flags3 + static_cast<std::size_t>(batch.num_structures) * 3);
 
   for (int atom = 0; atom < batch.total_atoms; ++atom) {
     staging.positions_soa3[static_cast<std::size_t>(atom)] =

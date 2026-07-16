@@ -1,5 +1,5 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_nep3.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include <cmath>
@@ -447,7 +447,7 @@ std::vector<Case> make_cases() {
 }  // namespace
 
 int main() {
-  if (!nep_adapters::register_cpu_nep3_engine() ||
+  if (!nep_adapters::register_cpu_engine() ||
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
@@ -455,7 +455,7 @@ int main() {
   for (const Case& test_case : make_cases()) {
     const std::string model_path = write_model(test_case);
     const Prediction cpu = evaluate_single(
-        "cpu_nep3",
+        "cpu",
         model_path,
         test_case.positions,
         test_case.type_cycle);
@@ -482,7 +482,7 @@ int main() {
     const std::vector<double> second_box = orthorhombic_box();
     batch_boxes.insert(batch_boxes.end(), second_box.begin(), second_box.end());
     const Prediction cpu_batch = evaluate_structures_independently(
-        "cpu_nep3",
+        "cpu",
         model_path,
         {3, 3},
         {0, 3},

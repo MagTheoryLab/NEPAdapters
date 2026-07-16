@@ -26,7 +26,7 @@ def _stress_from_nep_compute_virial(virial9, atoms):
 class NepAseCalculator(Calculator):
     implemented_properties = ["energy", "energies", "forces", "stress", "descriptor"]
 
-    def __init__(self, model_file="nep.txt", backend="cpu_nep3", **kwargs):
+    def __init__(self, model_file="nep.txt", backend="cpu", **kwargs):
         super().__init__(**kwargs)
         self._calc = NEPCalculator(model_file, backend=backend)
 

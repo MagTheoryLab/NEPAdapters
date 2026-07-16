@@ -1,24 +1,25 @@
-"""Minimal pybind11 frontend for NEPAdapters."""
+"""NumPy-first Python frontend for NEPAdapters."""
 
-from ._native import (
+from .runtime import (
     BackendInfo,
     Model,
     backend_count,
     backend_info,
     load_model,
-    register_cpu_nep3,
+    register_cpu,
+    register_cuda,
 )
-from .calculator import NEPCalculator, Nep3Calculator, NepCalculator, Prediction
+from .calculator import NEPCalculator, Prediction, SpinPrediction
 
 __all__ = [
     "BackendInfo",
     "Model",
     "NEPCalculator",
-    "Nep3Calculator",
-    "NepCalculator",
     "Prediction",
+    "SpinPrediction",
     "backend_count",
     "backend_info",
     "load_model",
-    "register_cpu_nep3",
+    "register_cpu",
+    "register_cuda",
 ]

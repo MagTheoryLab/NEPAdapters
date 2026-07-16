@@ -4,9 +4,12 @@ Keep fixtures small and intentional.
 
 Current committed fixtures:
 
-- `cpu_nep3_baseline/`: small Te/Pb model plus one fixed labelled structure.
-  The labels are generated from the current trusted `cpu_nep3` path and are
-  treated as golden DFT labels for repository correctness tests.
+- `cpu_baseline/`: small Te/Pb model plus one fixed labelled structure.
+  The labels are generated from the trusted NEP CPU implementation and are
+  treated as golden model-output labels for repository correctness tests.
+- `nep_cpu_reference/`: self-contained 250-atom ordinary NEP and qNEP cases
+  copied from the NEP_CPU test suite, including force, raw9 virial, and
+  descriptor references.
 
 Useful future fixtures:
 

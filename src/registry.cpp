@@ -37,6 +37,19 @@ std::string& last_error() {
   return message;
 }
 
+bool is_fully_periodic(const NepaStructureBatch& batch) {
+  if (batch.num_structures <= 0 || batch.pbc_flags3 == nullptr) {
+    return false;
+  }
+  const std::size_t count = static_cast<std::size_t>(batch.num_structures) * 3;
+  for (std::size_t component = 0; component < count; ++component) {
+    if (batch.pbc_flags3[component] != 1) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void clear_last_error() {
@@ -65,10 +78,6 @@ bool register_engine(Engine* engine) {
 
   registry().push_back(engine);
   return true;
-}
-
-bool register_backend(Backend* backend) {
-  return register_engine(backend);
 }
 
 }  // namespace nep_adapters
@@ -158,6 +167,11 @@ NepaStatus nepa_find_force_batch(
   if (model == nullptr || batch == nullptr || result == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
   }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
 
   try {
     return model->impl->find_force_batch(*batch, *result);
@@ -174,6 +188,11 @@ NepaStatus nepa_find_descriptors(
   nep_adapters::clear_last_error();
   if (model == nullptr || batch == nullptr || result == nullptr) {
     return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
   }
 
   try {

@@ -1,5 +1,5 @@
 #include "nep_adapters/api.h"
-#include "nep_adapters/engines/cpu_opt.hpp"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include <array>
@@ -52,13 +52,13 @@ Options parse_options(int argc, char** argv) {
       options.iterations = parse_positive(argv[++i], "--iterations");
     } else {
       std::cerr << "Usage: " << argv[0]
-                << " [--engine cpu_opt|cuda] [--mode batch|lammps]"
+                << " [--engine cpu|cuda] [--mode batch|lammps]"
                 << " [--model spin|struct]"
                 << " [--replicate N] [--warmup N] [--iterations N]\n";
       std::exit(EXIT_FAILURE);
     }
   }
-  if ((options.engine != "cpu_opt" && options.engine != "cuda") ||
+  if ((options.engine != "cpu" && options.engine != "cuda") ||
       (options.mode != "batch" && options.mode != "lammps") ||
       (options.model != "spin" && options.model != "struct")) {
     std::cerr << "Invalid --engine, --mode, or --model\n";
@@ -431,7 +431,7 @@ void run_lammps(NepaModel* model, const System& system) {
 
 int main(int argc, char** argv) {
   const Options options = parse_options(argc, argv);
-  nep_adapters::register_cpu_opt_engine();
+  nep_adapters::register_cpu_engine();
   nep_adapters::register_cuda_engine();
   const std::string model_path =
       options.model == "spin" ? NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE

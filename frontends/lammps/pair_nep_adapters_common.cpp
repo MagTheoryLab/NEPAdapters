@@ -4,6 +4,7 @@
 #include "nep_adapters/virial_order.hpp"
 
 #include "atom.h"
+#include "domain.h"
 #include "error.h"
 #include "force.h"
 #include "lmptype.h"
@@ -183,6 +184,11 @@ void PairNEPAdaptersCommon::load_model(const std::string& model_path) {
 }
 
 void PairNEPAdaptersCommon::init_style() {
+  if (!domain->xperiodic || !domain->yperiodic || !domain->zperiodic) {
+    const std::string message =
+        label_ + ": NEP requires periodic boundaries in x, y, and z";
+    error->all(FLERR, message.c_str());
+  }
   neighbor->add_request(this, NeighConst::REQ_FULL);
 }
 
