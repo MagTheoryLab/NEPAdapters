@@ -98,6 +98,8 @@ typedef struct NepaLammpsNeighborInput {
   int* types;
   int* type_map;
   double** positions;
+  /* LAMMPS atom_style spin layout: sp[0..2] is the unit spin direction,
+     sp[3] is the magnetic moment magnitude. */
   double** spins;
 } NepaLammpsNeighborInput;
 

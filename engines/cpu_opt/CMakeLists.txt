@@ -12,14 +12,13 @@ if(NOT EXISTS "${NEP_ADAPTERS_CPU_OPT_SOURCE_DIR}/nep.h" OR
 endif()
 
 option(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP "Build cpu_opt with OpenMP when available" ON)
+option(NEP_ADAPTERS_CPU_OPT_ENABLE_NATIVE_ARCH
+  "Build cpu_opt for the host CPU architecture when supported"
+  ON)
 option(NEP_ADAPTERS_CPU_OPT_ENABLE_BATCH_ANN
   "Enable type-grouped CBLAS batch ANN kernels in cpu_opt when a CBLAS provider is available"
   ON)
-if(APPLE)
-  set(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT ON)
-else()
-  set(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT OFF)
-endif()
+set(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT ON)
 option(NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE
   "Enable tabulated radial functions in cpu_opt"
   ${NEP_ADAPTERS_CPU_OPT_USE_RADIAL_TABLE_DEFAULT})
@@ -45,6 +44,23 @@ set_target_properties(nep_adapters_cpu_opt PROPERTIES POSITION_INDEPENDENT_CODE 
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
   target_compile_options(nep_adapters_cpu_opt PRIVATE -Mnovect)
+endif()
+
+include(CheckCXXCompilerFlag)
+if(NEP_ADAPTERS_CPU_OPT_ENABLE_NATIVE_ARCH)
+  check_cxx_compiler_flag("-march=native" NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
+  if(NEP_ADAPTERS_CPU_OPT_HAS_MARCH_NATIVE)
+    target_compile_options(nep_adapters_cpu_opt PRIVATE -march=native)
+  endif()
+endif()
+
+check_cxx_compiler_flag("-fno-math-errno" NEP_ADAPTERS_CPU_OPT_HAS_NO_MATH_ERRNO)
+if(NEP_ADAPTERS_CPU_OPT_HAS_NO_MATH_ERRNO)
+  target_compile_options(nep_adapters_cpu_opt PRIVATE -fno-math-errno)
+endif()
+check_cxx_compiler_flag("-ffast-math" NEP_ADAPTERS_CPU_OPT_HAS_FAST_MATH)
+if(NEP_ADAPTERS_CPU_OPT_HAS_FAST_MATH)
+  target_compile_options(nep_adapters_cpu_opt PRIVATE -ffast-math)
 endif()
 
 target_compile_definitions(

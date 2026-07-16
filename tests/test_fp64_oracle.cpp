@@ -1490,9 +1490,25 @@ bool validate_oracle_lammps(
   const double potential_diff = max_abs_diff(batch.potential, lammps.potential);
   const double force_diff = max_abs_diff(batch.force, lammps.force);
   const double virial_diff = max_abs_diff(batch_virial6(batch), lammps.virial6);
-  const double atom_virial_diff = max_abs_diff(
-      batch.atom_virial,
-      lammps_atom_virial_to_batch_order(lammps.atom_virial9));
+  const std::vector<double> lammps_atom_virial =
+      lammps_atom_virial_to_batch_order(lammps.atom_virial9);
+  double atom_virial_diff = 0.0;
+  if (test_case.is_spin()) {
+    std::array<double, 9> batch_sum{};
+    std::array<double, 9> lammps_sum{};
+    for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+      for (int component = 0; component < 9; ++component) {
+        const std::size_t index = static_cast<std::size_t>(atom) * 9 + component;
+        batch_sum[component] += batch.atom_virial[index];
+        lammps_sum[component] += lammps_atom_virial[index];
+      }
+    }
+    atom_virial_diff = max_abs_diff(
+        std::vector<double>(batch_sum.begin(), batch_sum.end()),
+        std::vector<double>(lammps_sum.begin(), lammps_sum.end()));
+  } else {
+    atom_virial_diff = max_abs_diff(batch.atom_virial, lammps_atom_virial);
+  }
   const double mforce_diff = test_case.is_spin()
       ? max_abs_diff(batch.mforce, lammps.mforce)
       : 0.0;

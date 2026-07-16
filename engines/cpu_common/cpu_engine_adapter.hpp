@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 namespace nep_adapters {
 
 template <typename T, typename = void>
@@ -59,14 +63,25 @@ class CpuModel final : public Model {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
 
-    try {
-      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+    if constexpr (HasSpin<NativeNep>::value) {
+      if (nep_.paramb.spin_mode > 0 && batch.spins_aos3 == nullptr) {
+        return NEPA_STATUS_INVALID_ARGUMENT;
+      }
+    }
+    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+      const std::int32_t atom_count = batch.atom_counts[structure];
+      const std::int32_t atom_offset = batch.atom_offsets[structure];
+      if (atom_count <= 0 || atom_offset < 0 ||
+          atom_offset + atom_count > batch.total_atoms) {
+        return NEPA_STATUS_INVALID_ARGUMENT;
+      }
+    }
+
+    auto process_structure = [&](
+        NativeNep& native,
+        const std::int32_t structure) -> NepaStatus {
         const std::int32_t atom_count = batch.atom_counts[structure];
         const std::int32_t atom_offset = batch.atom_offsets[structure];
-        if (atom_count <= 0 || atom_offset < 0 ||
-            atom_offset + atom_count > batch.total_atoms) {
-          return NEPA_STATUS_INVALID_ARGUMENT;
-        }
 
         std::vector<int> types(static_cast<std::size_t>(atom_count));
         std::vector<double> positions_soa(static_cast<std::size_t>(atom_count) * 3);
@@ -93,10 +108,7 @@ class CpuModel final : public Model {
         std::vector<double> charge;
         std::vector<double> bec_soa;
         if constexpr (HasSpin<NativeNep>::value) {
-          if (nep_.paramb.spin_mode > 0) {
-            if (batch.spins_aos3 == nullptr) {
-              return NEPA_STATUS_INVALID_ARGUMENT;
-            }
+          if (native.paramb.spin_mode > 0) {
             std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
               const std::int32_t global_atom = atom_offset + atom;
@@ -107,9 +119,9 @@ class CpuModel final : public Model {
                   batch.spins_aos3[3 * global_atom + 2];
             }
             std::vector<double> descriptor_soa(
-                static_cast<std::size_t>(atom_count) * nep_.annmb.dim, 0.0);
+                static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
             std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
-            nep_.compute(
+            native.compute(
                 types,
                 box,
                 positions_soa,
@@ -140,10 +152,10 @@ class CpuModel final : public Model {
                 result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
               }
             }
-          } else if (nep_.paramb.charge_mode > 0) {
+          } else if (native.paramb.charge_mode > 0) {
             charge.assign(static_cast<std::size_t>(atom_count), 0.0);
             bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
-            nep_.compute(
+            native.compute(
                 types,
                 box,
                 positions_soa,
@@ -153,12 +165,12 @@ class CpuModel final : public Model {
                 charge,
                 bec_soa);
           } else {
-            nep_.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+            native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
           }
-        } else if (nep_.paramb.charge_mode > 0) {
+        } else if (native.paramb.charge_mode > 0) {
           charge.assign(static_cast<std::size_t>(atom_count), 0.0);
           bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
-          nep_.compute(
+          native.compute(
               types,
               box,
               positions_soa,
@@ -168,7 +180,7 @@ class CpuModel final : public Model {
               charge,
               bec_soa);
         } else {
-          nep_.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+          native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
         }
 
         result.energy_per_structure[structure] =
@@ -214,8 +226,56 @@ class CpuModel final : public Model {
             }
           }
         }
-      }
+        return NEPA_STATUS_OK;
+    };
 
+#if defined(_OPENMP)
+    bool use_structure_parallel = false;
+    if constexpr (HasSpin<NativeNep>::value) {
+      use_structure_parallel =
+          nep_.paramb.spin_mode > 0 && batch.num_structures > 1 &&
+          omp_get_max_threads() > 1;
+    }
+#else
+    const bool use_structure_parallel = false;
+#endif
+
+    try {
+      if (use_structure_parallel) {
+#if defined(_OPENMP)
+        const int num_threads =
+            std::min<int>(batch.num_structures, omp_get_max_threads());
+        std::vector<NativeNep> workers(
+            static_cast<std::size_t>(num_threads),
+            nep_);
+        std::vector<NepaStatus> statuses(
+            static_cast<std::size_t>(batch.num_structures),
+            NEPA_STATUS_OK);
+#pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
+        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+          try {
+            statuses[static_cast<std::size_t>(structure)] =
+                process_structure(
+                    workers[static_cast<std::size_t>(omp_get_thread_num())],
+                    structure);
+          } catch (const std::exception&) {
+            statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+          }
+        }
+        for (const NepaStatus status : statuses) {
+          if (status != NEPA_STATUS_OK) {
+            return status;
+          }
+        }
+#endif
+      } else {
+        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+          const NepaStatus status = process_structure(nep_, structure);
+          if (status != NEPA_STATUS_OK) {
+            return status;
+          }
+        }
+      }
       return NEPA_STATUS_OK;
     } catch (const std::exception&) {
       return NEPA_STATUS_RUNTIME_ERROR;

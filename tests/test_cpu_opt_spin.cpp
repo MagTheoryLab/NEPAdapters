@@ -155,6 +155,24 @@ std::vector<double> expected_mforce(const std::vector<double>& spins_aos3) {
   return out;
 }
 
+std::vector<double> make_lammps_spins4(const std::vector<double>& spins_aos3) {
+  const int atom_count = static_cast<int>(spins_aos3.size() / 3);
+  std::vector<double> out(static_cast<std::size_t>(atom_count) * 4, 0.0);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    const double sx = spins_aos3[3 * atom + 0];
+    const double sy = spins_aos3[3 * atom + 1];
+    const double sz = spins_aos3[3 * atom + 2];
+    const double mu = std::sqrt(sx * sx + sy * sy + sz * sz);
+    if (mu > 0.0) {
+      out[4 * atom + 0] = sx / mu;
+      out[4 * atom + 1] = sy / mu;
+      out[4 * atom + 2] = sz / mu;
+    }
+    out[4 * atom + 3] = mu;
+  }
+  return out;
+}
+
 struct BatchPrediction {
   double energy = 0.0;
   std::vector<double> forces;
@@ -313,7 +331,8 @@ bool check_chiral_derivatives(
 bool run_lammps_matches_batch_n(
     NepaModel* model,
     const std::vector<double>& positions,
-    const std::vector<double>& spins) {
+    const std::vector<double>& spins,
+    bool permute_ilist = false) {
   const int atom_count = static_cast<int>(spins.size() / 3);
   std::vector<double> batch_virial;
   const BatchPrediction batch =
@@ -331,15 +350,18 @@ bool run_lammps_matches_batch_n(
     }
     firstneigh[static_cast<std::size_t>(i)] = neigh_storage[static_cast<std::size_t>(i)].data();
   }
+  if (permute_ilist && atom_count == 4) {
+    ilist = {2, 0, 3, 1};
+  }
   std::vector<int> types(static_cast<std::size_t>(atom_count), 1);
   int type_map[2] = {-1, 0};
   std::vector<double> position_storage = positions;
-  std::vector<double> spin_storage = spins;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
   std::vector<double*> position_rows(static_cast<std::size_t>(atom_count));
   std::vector<double*> spin_rows(static_cast<std::size_t>(atom_count));
   for (int atom = 0; atom < atom_count; ++atom) {
     position_rows[static_cast<std::size_t>(atom)] = position_storage.data() + 3 * atom;
-    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 3 * atom;
+    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 4 * atom;
   }
 
   double total_potential = 0.0;
@@ -560,26 +582,106 @@ bool run_batch(
   return true;
 }
 
+bool run_multi_structure_batch_matches_single(NepaModel* model) {
+  constexpr int structure_count = 3;
+  std::vector<std::int32_t> atom_counts(structure_count, kAtomCount);
+  std::vector<std::int32_t> atom_offsets(structure_count, 0);
+  std::vector<std::int32_t> types(static_cast<std::size_t>(structure_count) * kAtomCount, 0);
+  std::vector<double> boxes(static_cast<std::size_t>(structure_count) * 9, 0.0);
+  std::vector<std::int32_t> pbc(static_cast<std::size_t>(structure_count) * 3, 0);
+  std::vector<double> positions(static_cast<std::size_t>(structure_count) * kAtomCount * 3);
+  std::vector<double> spins(positions.size());
+  for (int structure = 0; structure < structure_count; ++structure) {
+    atom_offsets[structure] = structure * kAtomCount;
+    boxes[static_cast<std::size_t>(structure) * 9 + 0] = 8.0;
+    boxes[static_cast<std::size_t>(structure) * 9 + 4] = 8.0;
+    boxes[static_cast<std::size_t>(structure) * 9 + 8] = 8.0;
+    const std::vector<double> one_positions = {
+        0.1 * structure, 0.0, 0.0,
+        1.2, 0.4 + 0.1 * structure, 0.3};
+    const std::vector<double> one_spins = {
+        0.2 + 0.1 * structure, -0.4, 0.5,
+        -0.3, 0.1, 0.6 - 0.05 * structure};
+    std::copy(
+        one_positions.begin(),
+        one_positions.end(),
+        positions.begin() + static_cast<std::ptrdiff_t>(structure * kAtomCount * 3));
+    std::copy(
+        one_spins.begin(),
+        one_spins.end(),
+        spins.begin() + static_cast<std::ptrdiff_t>(structure * kAtomCount * 3));
+  }
+
+  NepaStructureBatch batch{};
+  batch.num_structures = structure_count;
+  batch.total_atoms = structure_count * kAtomCount;
+  batch.atom_counts = atom_counts.data();
+  batch.atom_offsets = atom_offsets.data();
+  batch.types = types.data();
+  batch.positions_aos3 = positions.data();
+  batch.spins_aos3 = spins.data();
+  batch.boxes_row_major9 = boxes.data();
+  batch.pbc_flags3 = pbc.data();
+
+  std::vector<double> energy(structure_count, 0.0);
+  std::vector<double> forces(positions.size(), 0.0);
+  std::vector<double> mforces(spins.size(), 0.0);
+  NepaFindForceResult result{};
+  result.energy_per_structure = energy.data();
+  result.forces_aos3 = forces.data();
+  result.mforces_aos3 = mforces.data();
+  if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  for (int structure = 0; structure < structure_count; ++structure) {
+    const auto begin =
+        static_cast<std::size_t>(structure) * kAtomCount * 3;
+    const std::vector<double> one_positions(
+        positions.begin() + static_cast<std::ptrdiff_t>(begin),
+        positions.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const std::vector<double> one_spins(
+        spins.begin() + static_cast<std::ptrdiff_t>(begin),
+        spins.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const BatchPrediction single = predict_batch(model, one_positions, one_spins);
+    const std::vector<double> batch_forces(
+        forces.begin() + static_cast<std::ptrdiff_t>(begin),
+        forces.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    const std::vector<double> batch_mforces(
+        mforces.begin() + static_cast<std::ptrdiff_t>(begin),
+        mforces.begin() + static_cast<std::ptrdiff_t>(begin + kAtomCount * 3));
+    if (std::abs(energy[structure] - single.energy) > 1.0e-12 ||
+        max_abs_diff(batch_forces, single.forces) > 1.0e-12 ||
+        max_abs_diff(batch_mforces, single.mforces) > 1.0e-12) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool run_lammps(
     NepaModel* model,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    double spin_baseline = 0.0) {
+    double spin_baseline = 0.0,
+    bool zero_neighbors = false) {
   int ilist[kAtomCount] = {0, 1};
-  int numneigh[kAtomCount] = {1, 1};
+  int numneigh[kAtomCount] = {
+      zero_neighbors ? 0 : 1,
+      zero_neighbors ? 0 : 1};
   int neigh0[1] = {1};
   int neigh1[1] = {0};
   int* firstneigh[kAtomCount] = {neigh0, neigh1};
   int types[kAtomCount] = {1, 1};
   int type_map[2] = {-1, 0};
   std::vector<double> position_storage = positions;
-  std::vector<double> spin_storage = spins;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
   double* position_rows[kAtomCount] = {
       position_storage.data(),
       position_storage.data() + 3};
   double* spin_rows[kAtomCount] = {
       spin_storage.data(),
-      spin_storage.data() + 3};
+      spin_storage.data() + 4};
 
   double total_potential = 0.0;
   double total_virial[6] = {};
@@ -617,6 +719,101 @@ bool run_lammps(
     std::cerr << "LAMMPS spin mismatch: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " mforce_diff=" << mforce_diff << '\n';
+    return false;
+  }
+  return true;
+}
+
+bool check_lammps_neighbor_virial_ownership(
+    NepaModel* model,
+    const std::vector<double>& positions,
+    const std::vector<double>& spins) {
+  const int atom_count = static_cast<int>(spins.size() / 3);
+  int ilist[1] = {0};
+  std::vector<int> numneigh(static_cast<std::size_t>(atom_count), 0);
+  numneigh[0] = atom_count - 1;
+  std::vector<int> neighbors(static_cast<std::size_t>(atom_count - 1));
+  for (int atom = 1; atom < atom_count; ++atom) {
+    neighbors[static_cast<std::size_t>(atom - 1)] = atom;
+  }
+  std::vector<int*> firstneigh(static_cast<std::size_t>(atom_count), nullptr);
+  firstneigh[0] = neighbors.data();
+  std::vector<int> types(static_cast<std::size_t>(atom_count), 1);
+  int type_map[2] = {-1, 0};
+  std::vector<double> position_storage = positions;
+  std::vector<double> spin_storage = make_lammps_spins4(spins);
+  std::vector<double*> position_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> spin_rows(static_cast<std::size_t>(atom_count));
+  for (int atom = 0; atom < atom_count; ++atom) {
+    position_rows[static_cast<std::size_t>(atom)] = position_storage.data() + 3 * atom;
+    spin_rows[static_cast<std::size_t>(atom)] = spin_storage.data() + 4 * atom;
+  }
+
+  double total_potential = 0.0;
+  double total_virial[6] = {};
+  std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> mforces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> atom_virial(static_cast<std::size_t>(atom_count) * 9, 0.0);
+  std::vector<double*> force_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> mforce_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> virial_rows(static_cast<std::size_t>(atom_count));
+  for (int atom = 0; atom < atom_count; ++atom) {
+    force_rows[static_cast<std::size_t>(atom)] = forces.data() + 3 * atom;
+    mforce_rows[static_cast<std::size_t>(atom)] = mforces.data() + 3 * atom;
+    virial_rows[static_cast<std::size_t>(atom)] = atom_virial.data() + 9 * atom;
+  }
+
+  NepaLammpsNeighborInput input{};
+  input.nlocal = 1;
+  input.inum = 1;
+  input.ilist = ilist;
+  input.numneigh = numneigh.data();
+  input.firstneigh = firstneigh.data();
+  input.types = types.data();
+  input.type_map = type_map;
+  input.positions = position_rows.data();
+  input.spins = spin_rows.data();
+
+  NepaLammpsNeighborResult result{};
+  result.total_potential = &total_potential;
+  result.total_virial6 = total_virial;
+  result.forces = force_rows.data();
+  result.mforces = mforce_rows.data();
+  result.virials_per_atom9 = virial_rows.data();
+  if (nepa_find_force_lammps_neighbors(model, &input, &result) != NEPA_STATUS_OK) {
+    return false;
+  }
+
+  double center_max = 0.0;
+  double neighbor_max = 0.0;
+  for (int component = 0; component < 9; ++component) {
+    center_max = std::max(center_max, std::abs(atom_virial[component]));
+    for (int atom = 1; atom < atom_count; ++atom) {
+      neighbor_max = std::max(
+          neighbor_max,
+          std::abs(atom_virial[static_cast<std::size_t>(atom) * 9 + component]));
+    }
+  }
+  double total_diff = 0.0;
+  for (int component = 0; component < 6; ++component) {
+    double atom_sum = 0.0;
+    for (int atom = 1; atom < atom_count; ++atom) {
+      const std::size_t base = static_cast<std::size_t>(atom) * 9;
+      if (component < 3) {
+        atom_sum += atom_virial[base + component];
+      } else {
+        atom_sum += 0.5 * (
+            atom_virial[base + component] + atom_virial[base + component + 3]);
+      }
+    }
+    total_diff = std::max(
+        total_diff,
+        std::abs(total_virial[component] - atom_sum));
+  }
+  if (center_max > 1.0e-12 || neighbor_max < 1.0e-12 || total_diff > 1.0e-10) {
+    std::cerr << "LAMMPS spin virial ownership mismatch: center_max=" << center_max
+              << " neighbor_max=" << neighbor_max
+              << " total_diff=" << total_diff << '\n';
     return false;
   }
   return true;
@@ -719,13 +916,16 @@ int main() {
 
   const bool ok = flip_diff < 1.0e-10 && rotate_diff < 1.0e-10 &&
                   run_batch(model, positions, spins) &&
-                  run_lammps(model, positions, spins);
+                  run_multi_structure_batch_matches_single(model) &&
+                  run_lammps(model, positions, spins) &&
+                  run_lammps(model, positions, spins, 0.0, true);
   nepa_free_model(model);
 
   NepaModel* edge_model = nullptr;
   const bool edge_ok =
       nepa_load_model("cpu_opt", edge_path.c_str(), &edge_model) == NEPA_STATUS_OK &&
-      edge_model != nullptr && check_edge_derivatives(edge_model, positions, spins);
+      edge_model != nullptr && check_edge_derivatives(edge_model, positions, spins) &&
+      check_lammps_neighbor_virial_ownership(edge_model, positions, spins);
   nepa_free_model(edge_model);
 
   NepaModel* baseline_model = nullptr;
@@ -754,7 +954,10 @@ int main() {
         nepa_load_model("cpu_opt", path.c_str(), &chiral_numeric_model) == NEPA_STATUS_OK &&
         chiral_numeric_model != nullptr &&
         check_chiral_derivatives(chiral_numeric_model, chiral_positions, chiral_spins) &&
-        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins);
+        check_lammps_neighbor_virial_ownership(
+            chiral_numeric_model, chiral_positions, chiral_spins) &&
+        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins) &&
+        run_lammps_matches_batch_n(chiral_numeric_model, chiral_positions, chiral_spins, true);
     nepa_free_model(chiral_numeric_model);
   }
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
@@ -763,7 +966,8 @@ int main() {
       nepa_load_model("cpu_opt", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &fixture_numeric_model) ==
           NEPA_STATUS_OK &&
       fixture_numeric_model != nullptr &&
-      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins)
+      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins) &&
+      run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins, true)
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE
       && check_spin_fixture_reference(fixture_numeric_model, NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE)
 #endif

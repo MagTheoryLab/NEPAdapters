@@ -14,6 +14,7 @@
 */
 
 #pragma once
+#include <array>
 #include <string>
 #include <vector>
 #include "ewald_nep.h"
@@ -93,6 +94,65 @@ public:
     const double* b1_pol;
     std::vector<double> c_radial_pair;
     std::vector<double> c_angular_pair;
+  };
+
+  struct SpinGradientScratch {
+    std::vector<double> grad_weight;
+    std::vector<double> grad_rhat;
+    std::vector<double> grad_si;
+    std::vector<double> grad_sj;
+    std::vector<double> grad_Q;
+    std::vector<double> grad_O;
+    std::vector<double> grad_H;
+    std::vector<double> grad_chi;
+    std::vector<double> grad_polar;
+    std::vector<double> grad_pseudodev;
+    std::vector<double> grad_chi_private;
+    std::vector<double> grad_polar_private;
+    std::vector<double> grad_pseudodev_private;
+    std::vector<double> grad_Q_private;
+    std::vector<double> grad_Q_terms;
+    std::vector<double> grad_O_terms;
+    std::vector<double> grad_O_derivatives;
+    std::vector<double> grad_H_terms;
+    std::vector<double> grad_H_derivatives;
+  };
+
+  struct SpinEdge {
+    int i;
+    int j;
+    int center;
+    int t12;
+    double dist;
+    std::array<double, 3> rhat;
+    std::array<double, 4> weights;
+    std::array<double, 4> weight_derivatives;
+    double dot;
+    double sj2;
+    double ri_dot_si;
+    double ri_dot_sj;
+    double bond_axis;
+  };
+
+  struct SpinCache {
+    std::vector<SpinEdge> edges;
+    std::vector<int> edge_offsets;
+    std::vector<double> rho0;
+    std::vector<double> raw1;
+    std::vector<double> l1_rdot;
+    std::vector<double> l1_cross;
+    std::vector<double> l1_stf;
+    std::vector<double> angular2;
+    std::vector<double> angular3;
+    std::vector<double> angular4;
+    std::vector<double> geom;
+    std::vector<double> polars;
+    std::vector<double> octupoles;
+    std::vector<double> hexadecapoles;
+    std::vector<double> chirals;
+    std::vector<double> pseudodevs;
+    std::vector<double> rho0_dot;
+    std::vector<double> raw1_dot;
   };
 
   struct ZBL {
@@ -288,6 +348,7 @@ public:
   std::vector<double> spin_baseline;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
+  std::vector<double> lammps_mforce_private;
   std::vector<double> lammps_total_virial_private;
   std::vector<double> lammps_virial_private;
   std::vector<int> lammps_angular_edge_offsets;
@@ -305,6 +366,12 @@ public:
   std::vector<double> lammps_radial_edge_z12;
   std::vector<double> lammps_radial_edge_d12;
   std::vector<double> lammps_radial_edge_gnp;
+  std::vector<int> lammps_spin_types;
+  std::vector<double> lammps_spin_spins_aos;
+  std::vector<double> lammps_spin_spins_soa;
+  std::vector<double> lammps_spin_descriptor;
+  SpinCache lammps_spin_cache;
+  SpinGradientScratch lammps_spin_gradient_scratch;
   std::vector<int> lammps_touched_rows;
   std::vector<int> lammps_touched_marks;
   int lammps_touched_stamp = 0;

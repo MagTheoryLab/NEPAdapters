@@ -70,6 +70,35 @@ if(TARGET NEPAdapters::cpu_nep3 AND
   endif()
 endif()
 
+if(TARGET NEPAdapters::cpu_opt)
+  add_executable(nep_adapters_bench_cpu_opt_spin_lammps
+    cpp/bench_cpu_opt_spin_lammps.cpp)
+  target_link_libraries(nep_adapters_bench_cpu_opt_spin_lammps PRIVATE NEPAdapters::cpu_opt)
+  if(NEP_ADAPTERS_CPU_OPT_ENABLE_OPENMP)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+    if(TARGET OpenMP::OpenMP_CXX)
+      target_link_libraries(nep_adapters_bench_cpu_opt_spin_lammps PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    target_compile_definitions(nep_adapters_bench_cpu_opt_spin_lammps PRIVATE
+      NEP_ADAPTERS_BENCH_OPENMP_ENABLED=1)
+  else()
+    target_compile_definitions(nep_adapters_bench_cpu_opt_spin_lammps PRIVATE
+      NEP_ADAPTERS_BENCH_OPENMP_ENABLED=0)
+  endif()
+  target_compile_definitions(
+    nep_adapters_bench_cpu_opt_spin_lammps
+    PRIVATE
+      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+      NEP_ADAPTERS_NONMAG_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/cpu_nep3_baseline/nep.txt"
+  )
+  add_test(
+    NAME nep_adapters_bench_cpu_opt_spin_lammps
+    COMMAND nep_adapters_bench_cpu_opt_spin_lammps --warmup 1 --iterations 3)
+  set_tests_properties(nep_adapters_bench_cpu_opt_spin_lammps PROPERTIES
+    LABELS "bench;performance;engine;cpu_opt;spin;lammps"
+    TIMEOUT 120)
+endif()
+
 if(TARGET NEPAdapters::cuda)
   add_executable(nep_adapters_bench_cuda_batch cuda/bench_cuda_batch.cpp)
   target_link_libraries(nep_adapters_bench_cuda_batch PRIVATE NEPAdapters::cuda)
