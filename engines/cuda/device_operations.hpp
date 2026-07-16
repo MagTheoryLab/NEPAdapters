@@ -80,6 +80,35 @@ __device__ __forceinline__ void atomic_add_per_atom_virial_float(
   atomicAdd(&virial_soa9[8 * atom_stride + atom], -z12 * fy);
 }
 
+__device__ __forceinline__ void atomic_add_per_atom_virial_double(
+    int atom_stride,
+    int atom,
+    float x12,
+    float y12,
+    float z12,
+    float fx,
+    float fy,
+    float fz,
+    double* virial_soa9) {
+  atomicAdd(&virial_soa9[atom], -static_cast<double>(x12 * fx));
+  atomicAdd(
+      &virial_soa9[atom_stride + atom], -static_cast<double>(y12 * fy));
+  atomicAdd(
+      &virial_soa9[2 * atom_stride + atom], -static_cast<double>(z12 * fz));
+  atomicAdd(
+      &virial_soa9[3 * atom_stride + atom], -static_cast<double>(x12 * fy));
+  atomicAdd(
+      &virial_soa9[4 * atom_stride + atom], -static_cast<double>(x12 * fz));
+  atomicAdd(
+      &virial_soa9[5 * atom_stride + atom], -static_cast<double>(y12 * fz));
+  atomicAdd(
+      &virial_soa9[6 * atom_stride + atom], -static_cast<double>(y12 * fx));
+  atomicAdd(
+      &virial_soa9[7 * atom_stride + atom], -static_cast<double>(z12 * fx));
+  atomicAdd(
+      &virial_soa9[8 * atom_stride + atom], -static_cast<double>(z12 * fy));
+}
+
 __device__ __forceinline__ void
 atomic_add_force_and_per_atom_virial_float_warp_aggregated(
     unsigned active_mask,

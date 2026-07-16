@@ -24,7 +24,7 @@ constexpr int kSpinChiralHReducedCount = 9;
 enum class SpinVirialMode : int {
   disabled,
   center_owned,
-  cpu_atom_decomposition,
+  neighbor_owned,
   center_and_neighbor_float_sink,
 };
 
@@ -39,10 +39,10 @@ void dispatch_spin_virial_mode(
     case SpinVirialMode::center_owned:
       launch(std::integral_constant<SpinVirialMode, SpinVirialMode::center_owned>{});
       break;
-    case SpinVirialMode::cpu_atom_decomposition:
+    case SpinVirialMode::neighbor_owned:
       launch(std::integral_constant<
              SpinVirialMode,
-             SpinVirialMode::cpu_atom_decomposition>{});
+             SpinVirialMode::neighbor_owned>{});
       break;
     case SpinVirialMode::center_and_neighbor_float_sink:
       launch(std::integral_constant<
@@ -611,7 +611,7 @@ void accumulate_spin_forces_on_device(
       virial_mode = SpinVirialMode::center_owned;
       break;
     case VirialTarget::neighbor_atom:
-      virial_mode = SpinVirialMode::cpu_atom_decomposition;
+      virial_mode = SpinVirialMode::neighbor_owned;
       break;
     case VirialTarget::center_and_neighbor_float_sink:
       virial_mode = SpinVirialMode::center_and_neighbor_float_sink;

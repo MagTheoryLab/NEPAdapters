@@ -584,8 +584,7 @@ __device__ void apply_edge_gradients_f32(
     const float* grad_sj,
     double* force_soa3,
     double* mforce_soa3,
-    double* virial_soa9,
-    double* cpu_virial) {
+    double* virial_soa9) {
   const float grad_dist = grad_weight * weight_derivative;
   float dot_r = 0.0f;
   for (int d = 0; d < 3; ++d) {
@@ -610,8 +609,9 @@ __device__ void apply_edge_gradients_f32(
       for (int b = 0; b < 3; ++b) {
         const int component = virial_internal_component(a * 3 + b);
         const double value = -rij_a * static_cast<double>(grad_rij[b]);
-        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
-          cpu_virial[component] += value;
+        if constexpr (VirialMode == SpinVirialMode::neighbor_owned) {
+          atomicAdd(
+              virial_soa9 + component * atom_stride + neighbor, value);
         } else {
           atomicAdd(virial_soa9 + component * atom_stride + atom, value);
         }
@@ -832,7 +832,6 @@ accumulate_spin_density_forces_tile_f32(
   using Layout = SpinStaticLayout<C, LMax>;
   constexpr bool AccumulateCenterVirial =
       VirialMode == SpinVirialMode::center_owned ||
-      VirialMode == SpinVirialMode::cpu_atom_decomposition ||
       VirialMode == SpinVirialMode::center_and_neighbor_float_sink;
   static_assert(
       AtomsPerWarp * EdgesPerAtomBatch == 32,
@@ -1249,7 +1248,18 @@ accumulate_spin_density_forces_tile_f32(
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
                 -static_cast<double>(grad_sj[d]));
     }
-    if constexpr (
+    if constexpr (VirialMode == SpinVirialMode::neighbor_owned) {
+      atomic_add_per_atom_virial_double(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_rij[0],
+          grad_rij[1],
+          grad_rij[2],
+          virial_soa9);
+    } else if constexpr (
         VirialMode == SpinVirialMode::center_and_neighbor_float_sink) {
       atomic_add_per_atom_virial_float(
           atom_stride,
@@ -1310,11 +1320,7 @@ accumulate_spin_density_forces_tile_f32(
     if constexpr (AccumulateCenterVirial) {
       for (int component = 0; component < 9; ++component) {
         const double value = static_cast<double>(center_virial[component]);
-        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
-          atomicAdd(virial_soa9 + component * atom_stride, value);
-        } else {
-          virial_soa9[component * atom_stride + atom] += value;
-        }
+        virial_soa9[component * atom_stride + atom] += value;
       }
     }
   }
@@ -1508,7 +1514,6 @@ accumulate_spin_chiral_forces_tile_f32(
   constexpr int ChiC = C < 2 ? C : 2;
   constexpr bool AccumulateCenterVirial =
       VirialMode == SpinVirialMode::center_owned ||
-      VirialMode == SpinVirialMode::cpu_atom_decomposition ||
       VirialMode == SpinVirialMode::center_and_neighbor_float_sink;
   static_assert(
       AtomsPerWarp * EdgesPerAtomBatch == 32,
@@ -1895,7 +1900,18 @@ accumulate_spin_chiral_forces_tile_f32(
           mforce_soa3 + d * atom_stride + neighbor,
           -static_cast<double>(grad_sj[d]));
     }
-    if constexpr (
+    if constexpr (VirialMode == SpinVirialMode::neighbor_owned) {
+      atomic_add_per_atom_virial_double(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_rij[0],
+          grad_rij[1],
+          grad_rij[2],
+          virial_soa9);
+    } else if constexpr (
         VirialMode == SpinVirialMode::center_and_neighbor_float_sink) {
       atomic_add_per_atom_virial_float(
           atom_stride,
@@ -1956,11 +1972,7 @@ accumulate_spin_chiral_forces_tile_f32(
 #pragma unroll
       for (int component = 0; component < 9; ++component) {
         const double value = static_cast<double>(center_virial[component]);
-        if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
-          atomicAdd(virial_soa9 + component * atom_stride, value);
-        } else {
-          virial_soa9[component * atom_stride + atom] += value;
-        }
+        virial_soa9[component * atom_stride + atom] += value;
       }
     }
   }

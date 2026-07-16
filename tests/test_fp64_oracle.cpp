@@ -21,6 +21,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -718,7 +719,8 @@ bool compare_prediction(
     const CaseData& test_case,
     const Prediction& candidate,
     const Prediction& oracle,
-    const Budgets& budgets) {
+    const Budgets& budgets,
+    bool compare_atom_virial = true) {
   const double atoms = static_cast<double>(test_case.atom_count());
   bool ok = true;
   ok = report_field(
@@ -737,9 +739,11 @@ bool compare_prediction(
   ok = report_field(
            backend, test_case.name, "virial", candidate.virial,
            oracle.virial, budgets.virial) && ok;
-  ok = report_field(
-           backend, test_case.name, "atom_virial", candidate.atom_virial,
-           oracle.atom_virial, budgets.atom_virial) && ok;
+  if (compare_atom_virial) {
+    ok = report_field(
+             backend, test_case.name, "atom_virial", candidate.atom_virial,
+             oracle.atom_virial, budgets.atom_virial) && ok;
+  }
   ok = report_field(
            backend, test_case.name, "descriptor", candidate.descriptor,
            oracle.descriptor, budgets.descriptor) && ok;
@@ -1130,6 +1134,183 @@ std::vector<double> lammps_atom_virial_to_batch_order(
   return out;
 }
 
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+std::array<double, 3> heat_current_from_n2_virial(
+    const std::vector<double>& atom_virial,
+    const std::vector<double>& velocities) {
+  if (atom_virial.size() % 9 != 0 ||
+      velocities.size() != atom_virial.size() / 3) {
+    throw std::runtime_error("invalid n2 heat-current input shape");
+  }
+  std::array<double, 3> heat_current{};
+  for (std::size_t atom = 0; atom < velocities.size() / 3; ++atom) {
+    for (int row = 0; row < 3; ++row) {
+      for (int column = 0; column < 3; ++column) {
+        heat_current[row] +=
+            atom_virial[9 * atom + 3 * row + column] *
+            velocities[3 * atom + column];
+      }
+    }
+  }
+  return heat_current;
+}
+
+struct DirectHeatCurrentReference {
+  std::array<double, 3> neighbor_owned{};
+  std::array<double, 3> center_owned{};
+};
+
+template <typename Runner>
+DirectHeatCurrentReference finite_difference_heat_current_reference(
+    Runner& runner,
+    const CaseData& test_case,
+    const std::vector<double>& velocities) {
+  if (test_case.pbc[0] != 0 || test_case.pbc[1] != 0 ||
+      test_case.pbc[2] != 0) {
+    throw std::runtime_error(
+        "n2 heat-current finite differences require a nonperiodic case");
+  }
+  if (velocities.size() != test_case.positions.size()) {
+    throw std::runtime_error("invalid random-velocity shape");
+  }
+
+  constexpr double h = 1.0e-3;
+  DirectHeatCurrentReference out;
+  for (int center = 0; center < test_case.atom_count(); ++center) {
+    for (int neighbor = 0; neighbor < test_case.atom_count(); ++neighbor) {
+      if (neighbor == center) {
+        continue;
+      }
+      for (int derivative_component = 0; derivative_component < 3;
+           ++derivative_component) {
+        CaseData em2_case = test_case;
+        CaseData em1_case = test_case;
+        CaseData ep1_case = test_case;
+        CaseData ep2_case = test_case;
+        const std::size_t coordinate =
+            3 * static_cast<std::size_t>(neighbor) + derivative_component;
+        em2_case.positions[coordinate] -= 2.0 * h;
+        em1_case.positions[coordinate] -= h;
+        ep1_case.positions[coordinate] += h;
+        ep2_case.positions[coordinate] += 2.0 * h;
+        const double em2 =
+            evaluate_batch(runner, em2_case, false).potential[center];
+        const double em1 =
+            evaluate_batch(runner, em1_case, false).potential[center];
+        const double ep1 =
+            evaluate_batch(runner, ep1_case, false).potential[center];
+        const double ep2 =
+            evaluate_batch(runner, ep2_case, false).potential[center];
+        const double edge_gradient =
+            (em2 - 8.0 * em1 + 8.0 * ep1 - ep2) / (12.0 * h);
+        for (int current_component = 0; current_component < 3;
+             ++current_component) {
+          const double rij =
+              test_case.positions[3 * static_cast<std::size_t>(neighbor) +
+                                  current_component] -
+              test_case.positions[3 * static_cast<std::size_t>(center) +
+                                  current_component];
+          out.neighbor_owned[current_component] -=
+              rij * edge_gradient *
+              velocities[3 * static_cast<std::size_t>(neighbor) +
+                         derivative_component];
+          out.center_owned[current_component] -=
+              rij * edge_gradient *
+              velocities[3 * static_cast<std::size_t>(center) +
+                         derivative_component];
+        }
+      }
+    }
+  }
+  return out;
+}
+
+double max_abs_diff(
+    const std::array<double, 3>& lhs,
+    const std::array<double, 3>& rhs) {
+  double out = 0.0;
+  for (int component = 0; component < 3; ++component) {
+    out = std::max(out, std::abs(lhs[component] - rhs[component]));
+  }
+  return out;
+}
+
+bool report_n2_heat_current(
+    const std::string& path,
+    const std::array<double, 3>& candidate,
+    const DirectHeatCurrentReference& reference) {
+  constexpr double tolerance = 1.0e-4;
+  const double error = max_abs_diff(candidate, reference.neighbor_owned);
+  const double center_gap =
+      max_abs_diff(reference.center_owned, reference.neighbor_owned);
+  const bool ok = error <= tolerance && center_gap > tolerance;
+  std::cout << std::scientific << std::setprecision(9)
+            << "CUDA_N2_HEAT_CURRENT path=" << path
+            << " random_seed=0x6e325f68656174"
+            << " direct_x=" << reference.neighbor_owned[0]
+            << " direct_y=" << reference.neighbor_owned[1]
+            << " direct_z=" << reference.neighbor_owned[2]
+            << " virial_x=" << candidate[0]
+            << " virial_y=" << candidate[1]
+            << " virial_z=" << candidate[2]
+            << " max_abs=" << error
+            << " wrong_center_gap=" << center_gap
+            << " tolerance=" << tolerance
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+bool validate_cuda_n2_heat_current(
+    ApiRunner& cuda_runner,
+    OracleRunner& direct_runner,
+    const CaseData& test_case) {
+  std::mt19937_64 generator(0x6e325f68656174ULL);
+  std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+  std::vector<double> velocities(test_case.positions.size(), 0.0);
+  for (double& velocity : velocities) {
+    velocity = distribution(generator);
+  }
+  for (int component = 0; component < 3; ++component) {
+    double mean = 0.0;
+    for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+      mean += velocities[3 * static_cast<std::size_t>(atom) + component];
+    }
+    mean /= static_cast<double>(test_case.atom_count());
+    for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+      velocities[3 * static_cast<std::size_t>(atom) + component] -= mean;
+    }
+  }
+
+  const DirectHeatCurrentReference reference =
+      finite_difference_heat_current_reference(
+          direct_runner, test_case, velocities);
+  const Prediction batch = evaluate_batch(cuda_runner, test_case, false);
+  LammpsStorage host_storage(test_case, model_cutoff_max(cuda_runner));
+  const LammpsPrediction host =
+      evaluate_lammps(cuda_runner, test_case, host_storage);
+  const LammpsPrediction device =
+      evaluate_lammps_device(cuda_runner, test_case);
+
+  bool ok = report_n2_heat_current(
+      "batch",
+      heat_current_from_n2_virial(batch.atom_virial, velocities),
+      reference);
+  ok = report_n2_heat_current(
+           "host_neighbors",
+           heat_current_from_n2_virial(
+               lammps_atom_virial_to_batch_order(host.atom_virial9),
+               velocities),
+           reference) && ok;
+  ok = report_n2_heat_current(
+           "device_neighbors",
+           heat_current_from_n2_virial(
+               lammps_atom_virial_to_batch_order(device.atom_virial9),
+               velocities),
+           reference) && ok;
+  return ok;
+}
+#endif
+
 std::vector<double> sum_lammps_atom_virial6(
     const std::vector<double>& values) {
   std::vector<double> out(6, 0.0);
@@ -1335,7 +1516,8 @@ bool compare_lammps_prediction(
     const CaseData& test_case,
     const LammpsPrediction& candidate,
     const LammpsPrediction& oracle,
-    const Budgets& budgets) {
+    const Budgets& budgets,
+    bool compare_atom_virial = true) {
   const double atoms = static_cast<double>(test_case.atom_count());
   bool ok = true;
   ok = report_field(
@@ -1351,10 +1533,12 @@ bool compare_lammps_prediction(
   ok = report_field(
            backend, test_case.name + "_lammps", "virial6",
            candidate.virial6, oracle.virial6, budgets.virial) && ok;
-  ok = report_field(
-           backend, test_case.name + "_lammps", "atom_virial9",
-           candidate.atom_virial9, oracle.atom_virial9,
-           budgets.atom_virial) && ok;
+  if (compare_atom_virial) {
+    ok = report_field(
+             backend, test_case.name + "_lammps", "atom_virial9",
+             candidate.atom_virial9, oracle.atom_virial9,
+             budgets.atom_virial) && ok;
+  }
   if (test_case.is_spin()) {
     ok = report_field(
              backend, test_case.name + "_lammps", "mforce",
@@ -1380,7 +1564,12 @@ bool run_backend_batch_cases(
   for (const auto& item : spin_cases) {
     const Prediction candidate = evaluate_batch(spin_backend, item.first);
     ok = compare_prediction(
-             backend, item.first, candidate, item.second, budgets) && ok;
+             backend,
+             item.first,
+             candidate,
+             item.second,
+             budgets,
+             backend != "cuda") && ok;
   }
   return ok;
 }
@@ -1402,7 +1591,12 @@ bool run_lammps_case(
   const LammpsPrediction candidate =
       evaluate_lammps(backend, test_case, backend_storage);
   ok = compare_lammps_prediction(
-           backend_name, test_case, candidate, oracle_lammps, budgets) && ok;
+           backend_name,
+           test_case,
+           candidate,
+           oracle_lammps,
+           budgets,
+           backend_name != "cuda" || !test_case.is_spin()) && ok;
   return ok;
 }
 
@@ -1585,6 +1779,8 @@ int main() {
              nonmag_oracle,
              dense_nonmag_lammps) && ok;
     ApiRunner cuda_spin("cuda", spin_nonperiodic.model_path);
+    ok = validate_cuda_n2_heat_current(
+             cuda_spin, spin_oracle, spin_nonperiodic) && ok;
     ok = run_lammps_case(
              "cuda",
              cuda_budgets(),
