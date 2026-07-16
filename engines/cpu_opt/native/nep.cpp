@@ -7363,9 +7363,13 @@ void NEP::compute_for_lammps(
     total_virial[0] += raw(0, atom);
     total_virial[1] += raw(4, atom);
     total_virial[2] += raw(8, atom);
-    total_virial[3] += raw(1, atom);
-    total_virial[4] += raw(2, atom);
-    total_virial[5] += raw(5, atom);
+    // LAMMPS exposes a symmetric six-component virial.  Spin-lattice
+    // forces can make the raw Cartesian off-diagonal pairs differ, so using
+    // only xy/xz/yz is not equivalent to the energy derivative under a
+    // symmetric strain.
+    total_virial[3] += 0.5 * (raw(1, atom) + raw(3, atom));
+    total_virial[4] += 0.5 * (raw(2, atom) + raw(6, atom));
+    total_virial[5] += 0.5 * (raw(5, atom) + raw(7, atom));
     if (virial) {
       virial[atom][0] += raw(0, atom);
       virial[atom][1] += raw(4, atom);

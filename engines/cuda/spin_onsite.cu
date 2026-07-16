@@ -25,6 +25,7 @@ enum class SpinVirialMode : int {
   disabled,
   center_owned,
   cpu_atom_decomposition,
+  center_and_neighbor_float_sink,
 };
 
 template <typename Launch>
@@ -42,6 +43,11 @@ void dispatch_spin_virial_mode(
       launch(std::integral_constant<
              SpinVirialMode,
              SpinVirialMode::cpu_atom_decomposition>{});
+      break;
+    case SpinVirialMode::center_and_neighbor_float_sink:
+      launch(std::integral_constant<
+             SpinVirialMode,
+             SpinVirialMode::center_and_neighbor_float_sink>{});
       break;
   }
 }
@@ -248,7 +254,8 @@ void launch_spin_density_forces(
                 view.spin_density_raw1_dot,
                 view.force_soa3,
                 view.mforce_soa3,
-                view.virial_soa9);
+                view.virial_soa9,
+                view.per_atom_virial_float_soa9);
       };
       dispatch_spin_virial_mode(virial_mode, launch_virial);
     };
@@ -302,7 +309,8 @@ void launch_spin_chiral_forces(
               view.spin_chiral_chirals,
               view.force_soa3,
               view.mforce_soa3,
-              view.virial_soa9);
+              view.virial_soa9,
+              view.per_atom_virial_float_soa9);
     };
     dispatch_spin_virial_mode(virial_mode, launch_virial);
   };
@@ -499,6 +507,10 @@ static void accumulate_spin_density_forces_impl(
   require(view.force_soa3 != nullptr, "workspace missing forces");
   require(view.mforce_soa3 != nullptr, "workspace missing mforces");
   require(view.virial_soa9 != nullptr, "workspace missing virials");
+  require(
+      virial_mode != SpinVirialMode::center_and_neighbor_float_sink ||
+          view.per_atom_virial_float_soa9 != nullptr,
+      "workspace missing spin per-atom virial sink");
   require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
   require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
   require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
@@ -551,6 +563,10 @@ static void accumulate_spin_chiral_forces_impl(
   require(view.force_soa3 != nullptr, "workspace missing forces");
   require(view.mforce_soa3 != nullptr, "workspace missing mforces");
   require(view.virial_soa9 != nullptr, "workspace missing virials");
+  require(
+      virial_mode != SpinVirialMode::center_and_neighbor_float_sink ||
+          view.per_atom_virial_float_soa9 != nullptr,
+      "workspace missing spin per-atom virial sink");
   require(view.spin_density_geom != nullptr, "workspace missing spin density geom");
   require(view.spin_density_raw1 != nullptr,
           "workspace missing spin density raw1");
@@ -577,8 +593,7 @@ void accumulate_spin_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial,
-    bool cpu_atom_virial,
+    VirialTarget virial_target,
     SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
   require(
@@ -588,11 +603,20 @@ void accumulate_spin_forces_on_device(
   SpinForceTimings ignored_timings;
   SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
-  const SpinVirialMode virial_mode =
-      !accumulate_virial
-          ? SpinVirialMode::disabled
-          : (cpu_atom_virial ? SpinVirialMode::cpu_atom_decomposition
-                             : SpinVirialMode::center_owned);
+  SpinVirialMode virial_mode = SpinVirialMode::disabled;
+  switch (virial_target) {
+    case VirialTarget::none:
+      break;
+    case VirialTarget::center_atom:
+      virial_mode = SpinVirialMode::center_owned;
+      break;
+    case VirialTarget::neighbor_atom:
+      virial_mode = SpinVirialMode::cpu_atom_decomposition;
+      break;
+    case VirialTarget::center_and_neighbor_float_sink:
+      virial_mode = SpinVirialMode::center_and_neighbor_float_sink;
+      break;
+  }
 
   accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
   timer.split(measured.onsite_ms);

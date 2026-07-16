@@ -531,6 +531,7 @@ bool run_zbl_force_only_case() {
       batch_forces,
       batch_potential,
       batch_virials_per_atom,
+      1.0e-6,
       1.0e-6);
   nepa_free_model(model);
   return ok;
@@ -637,6 +638,130 @@ bool run_compact_device_neighbor_capacity_case() {
   return true;
 }
 
+bool run_ghost_per_atom_virial_case(NepaModel* model) {
+  constexpr int nlocal = 1;
+  constexpr int nall = 2;
+  std::vector<int> ilist = {0};
+  std::vector<int> numneigh = {1, 0};
+  std::vector<int> neighbors = {1, -1};
+  std::vector<int> types = {0, 0};
+  std::vector<double> positions = {
+      0.0, 0.0, 0.0,
+      1.5, 0.0, 0.0,
+  };
+  std::vector<double> virial_sentinel(nall * 9, 123.0);
+
+  int* d_ilist = copy_to_device(ilist, "copy ghost ilist");
+  int* d_numneigh = copy_to_device(numneigh, "copy ghost numneigh");
+  int* d_neighbors = copy_to_device(neighbors, "copy ghost neighbors");
+  int* d_types = copy_to_device(types, "copy ghost types");
+  double* d_positions = copy_to_device(positions, "copy ghost positions");
+  double* d_virials =
+      copy_to_device(virial_sentinel, "copy ghost virial sentinel");
+  double* d_forces = nullptr;
+  double* d_total_potential = nullptr;
+  double* d_total_virial6 = nullptr;
+  check_cuda(
+      cudaMalloc(reinterpret_cast<void**>(&d_forces), nall * 3 * sizeof(double)),
+      "allocate ghost forces");
+  check_cuda(
+      cudaMalloc(reinterpret_cast<void**>(&d_total_potential), sizeof(double)),
+      "allocate ghost total potential");
+  check_cuda(
+      cudaMalloc(reinterpret_cast<void**>(&d_total_virial6), 6 * sizeof(double)),
+      "allocate ghost total virial");
+
+  NepaLammpsDeviceNeighborInput input{};
+  input.nlocal = nlocal;
+  input.nall = nall;
+  input.inum = nlocal;
+  input.max_neighbors = 1;
+  input.neighbor_rows = nall;
+  input.numneigh_length = nall;
+  input.ilist = d_ilist;
+  input.numneigh = d_numneigh;
+  input.neighbors = d_neighbors;
+  input.neighbor_atom_stride = 1;
+  input.neighbor_slot_stride = 1;
+  input.types = d_types;
+  input.positions = d_positions;
+  input.position_atom_stride = 3;
+  input.position_component_stride = 1;
+
+  NepaLammpsDeviceNeighborResult result{};
+  result.total_potential = d_total_potential;
+  result.total_virial6 = d_total_virial6;
+  result.forces = d_forces;
+  result.force_atom_stride = 3;
+  result.force_component_stride = 1;
+  result.virials_per_atom9 = d_virials;
+  result.virial_atom_stride = 9;
+  result.virial_component_stride = 1;
+
+  const NepaStatus status =
+      nepa_find_force_lammps_device_neighbors(model, &input, &result);
+  bool ok = status == NEPA_STATUS_OK;
+  if (!ok) {
+    std::cerr << "ghost per-atom virial status=" << status
+              << " error=" << nepa_last_error_message() << "\n";
+  }
+
+  std::vector<double> virials(nall * 9, 0.0);
+  std::vector<double> total_virial6(6, 0.0);
+  if (ok) {
+    check_cuda(
+        cudaMemcpy(
+            virials.data(),
+            d_virials,
+            virials.size() * sizeof(double),
+            cudaMemcpyDeviceToHost),
+        "copy ghost per-atom virial");
+    check_cuda(
+        cudaMemcpy(
+            total_virial6.data(),
+            d_total_virial6,
+            total_virial6.size() * sizeof(double),
+            cudaMemcpyDeviceToHost),
+        "copy ghost total virial");
+    bool ghost_nonzero = false;
+    for (int component = 0; component < 9; ++component) {
+      ghost_nonzero =
+          ghost_nonzero || std::abs(virials[9 + component]) > 1.0e-12;
+    }
+    if (!ghost_nonzero) {
+      std::cerr << "ghost per-atom virial was not written\n";
+      ok = false;
+    }
+    const double sum6[6] = {
+        virials[0] + virials[9],
+        virials[1] + virials[10],
+        virials[2] + virials[11],
+        0.5 * (virials[3] + virials[6] + virials[12] + virials[15]),
+        0.5 * (virials[4] + virials[7] + virials[13] + virials[16]),
+        0.5 * (virials[5] + virials[8] + virials[14] + virials[17]),
+    };
+    for (int component = 0; component < 6; ++component) {
+      if (std::abs(sum6[component] - total_virial6[component]) > 1.0e-6) {
+        std::cerr << "ghost virial sum mismatch component=" << component
+                  << " atom_sum=" << sum6[component]
+                  << " total=" << total_virial6[component] << "\n";
+        ok = false;
+      }
+    }
+  }
+
+  cudaFree(d_ilist);
+  cudaFree(d_numneigh);
+  cudaFree(d_neighbors);
+  cudaFree(d_types);
+  cudaFree(d_positions);
+  cudaFree(d_virials);
+  cudaFree(d_forces);
+  cudaFree(d_total_potential);
+  cudaFree(d_total_virial6);
+  return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -725,12 +850,13 @@ int main() {
       batch_forces,
       batch_potential,
       batch_virials_per_atom);
+  const bool ghost_virial_ok = run_ghost_per_atom_virial_case(model);
 
   nepa_free_model(model);
   const bool zbl_ok = run_zbl_force_only_case();
   const bool compact_ok = run_compact_device_neighbor_capacity_case();
-  return legacy_ok && nolegacy_ok && legacy_after_nolegacy_ok && zbl_ok &&
-          compact_ok ?
+  return legacy_ok && nolegacy_ok && legacy_after_nolegacy_ok &&
+          ghost_virial_ok && zbl_ok && compact_ok ?
       EXIT_SUCCESS :
       EXIT_FAILURE;
 }

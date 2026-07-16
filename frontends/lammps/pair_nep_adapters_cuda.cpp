@@ -6,6 +6,7 @@
 #include "atom.h"
 #include "comm.h"
 #include "error.h"
+#include "force.h"
 #include "lammps.h"
 #include "neigh_request.h"
 #include "neighbor.h"
@@ -34,6 +35,33 @@ using namespace LAMMPS_NS;
 namespace {
 
 #ifdef LMP_KOKKOS
+template <class RawView, class VatomView, class CvatomView>
+struct PackLammpsPerAtomVirial {
+  RawView raw9;
+  VatomView vatom;
+  CvatomView cvatom;
+  int write_vatom;
+  int write_cvatom;
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(const int atom_index) const {
+    const std::size_t offset = 9 * static_cast<std::size_t>(atom_index);
+    if (write_vatom) {
+      vatom(atom_index, 0) = raw9(offset + 0);
+      vatom(atom_index, 1) = raw9(offset + 1);
+      vatom(atom_index, 2) = raw9(offset + 2);
+      vatom(atom_index, 3) = 0.5 * (raw9(offset + 3) + raw9(offset + 6));
+      vatom(atom_index, 4) = 0.5 * (raw9(offset + 4) + raw9(offset + 7));
+      vatom(atom_index, 5) = 0.5 * (raw9(offset + 5) + raw9(offset + 8));
+    }
+    if (write_cvatom) {
+      for (int component = 0; component < 9; ++component) {
+        cvatom(atom_index, component) = raw9(offset + component);
+      }
+    }
+  }
+};
+
 struct ReplayHeader {
   char magic[8];
   std::int32_t version;
@@ -489,26 +517,41 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
     error->all(FLERR, message.c_str());
   }
 
-  pack_kokkos_per_atom_tallies();
-  profiler.split(pack_ms);
-
   atom_kk->modified(execution_space, datamask_modify);
   profiler.split(mark_ms);
+  // The n2 virial decomposition assigns some terms to ghost atoms.  In the
+  // normal Kokkos newton-off configuration LAMMPS does not reverse vatom, so
+  // carry raw9 with the existing device force/mforce reverse communication.
+  reverse_per_atom_virial_ =
+      !force->newton && (vflag_atom || cvflag_atom);
   if (nall > nlocal) {
     const bool reverse_force_comm_on_device =
         lmp->kokkos != nullptr && lmp->kokkos->reverse_comm_classic == 0 &&
         lmp->kokkos->reverse_comm_on_host == 0 &&
         lmp->kokkos->reverse_pair_comm_classic == 0;
     if (reverse_force_comm_on_device) {
-      comm->reverse_comm(this, comm_reverse_off);
+      const int reverse_width =
+          comm_reverse_off + (reverse_per_atom_virial_ ? 9 : 0);
+      comm->reverse_comm(this, reverse_width);
     } else {
+      if (reverse_per_atom_virial_) {
+        error->all(
+            FLERR,
+            (label_ +
+             ": per-atom virial with Kokkos newton off requires comm device")
+                .c_str());
+      }
       comm->reverse_comm();
       atom_kk->sync(execution_space, datamask_modify);
       Kokkos::fence();
     }
     atom_kk->modified(execution_space, datamask_modify);
   }
+  reverse_per_atom_virial_ = false;
   profiler.split(reverse_ms);
+
+  pack_kokkos_per_atom_tallies();
+  profiler.split(pack_ms);
 
   if (eflag_in) {
     const auto total_potential =
@@ -534,9 +577,12 @@ int PairNEPAdaptersCUDA::pack_reverse_comm_kokkos(
     DAT::tdual_xfloat_1d& buf) {
   auto f = lmp->atomKK->k_f.template view<LMPDeviceType>();
   auto fm = lmp->atomKK->k_fm.template view<LMPDeviceType>();
+  const auto raw9 = d_lammps_raw9_;
   auto out = buf.template view<LMPDeviceType>();
   const int communicate_mforce = spin_model_ ? 1 : 0;
-  const int width = communicate_mforce ? 6 : 3;
+  const int force_width = communicate_mforce ? 6 : 3;
+  const int communicate_virial = reverse_per_atom_virial_ ? 1 : 0;
+  const int width = force_width + (communicate_virial ? 9 : 0);
   Kokkos::parallel_for(
       Kokkos::RangePolicy<LMPDeviceType>(0, n),
       KOKKOS_LAMBDA(const int i) {
@@ -550,6 +596,13 @@ int PairNEPAdaptersCUDA::pack_reverse_comm_kokkos(
           out(offset + 4) = fm(atom, 1);
           out(offset + 5) = fm(atom, 2);
         }
+        if (communicate_virial) {
+          const int virial_offset = 9 * atom;
+          for (int component = 0; component < 9; ++component) {
+            out(offset + force_width + component) =
+                raw9(virial_offset + component);
+          }
+        }
       });
   return width * n;
 }
@@ -560,10 +613,13 @@ void PairNEPAdaptersCUDA::unpack_reverse_comm_kokkos(
     DAT::tdual_xfloat_1d& buf) {
   auto f = lmp->atomKK->k_f.template view<LMPDeviceType>();
   auto fm = lmp->atomKK->k_fm.template view<LMPDeviceType>();
+  const auto raw9 = d_lammps_raw9_;
   auto in = buf.template view<LMPDeviceType>();
   auto sendlist = list.template view<LMPDeviceType>();
   const int communicate_mforce = spin_model_ ? 1 : 0;
-  const int width = communicate_mforce ? 6 : 3;
+  const int force_width = communicate_mforce ? 6 : 3;
+  const int communicate_virial = reverse_per_atom_virial_ ? 1 : 0;
+  const int width = force_width + (communicate_virial ? 9 : 0);
   Kokkos::parallel_for(
       Kokkos::RangePolicy<LMPDeviceType>(0, n),
       KOKKOS_LAMBDA(const int i) {
@@ -576,6 +632,14 @@ void PairNEPAdaptersCUDA::unpack_reverse_comm_kokkos(
           Kokkos::atomic_add(&fm(atom, 0), in(offset + 3));
           Kokkos::atomic_add(&fm(atom, 1), in(offset + 4));
           Kokkos::atomic_add(&fm(atom, 2), in(offset + 5));
+        }
+        if (communicate_virial) {
+          const int virial_offset = 9 * atom;
+          for (int component = 0; component < 9; ++component) {
+            Kokkos::atomic_add(
+                &raw9(virial_offset + component),
+                in(offset + force_width + component));
+          }
         }
       });
 }
@@ -624,7 +688,7 @@ void PairNEPAdaptersCUDA::ensure_kokkos_tally_buffers() {
     d_cvatom_ = k_cvatom_.template view<LMPDeviceType>();
   }
   if ((vflag_atom || cvflag_atom) &&
-      d_lammps_raw9_.extent(0) < 9 * static_cast<std::size_t>(atom->nlocal)) {
+      d_lammps_raw9_.extent(0) < 9 * static_cast<std::size_t>(atom->nmax)) {
     d_lammps_raw9_ =
         Kokkos::View<double*, LMPDeviceType>("nepa:lammps_raw9", 9 * atom->nmax);
   }
@@ -633,13 +697,33 @@ void PairNEPAdaptersCUDA::ensure_kokkos_tally_buffers() {
 void PairNEPAdaptersCUDA::pack_kokkos_per_atom_tallies() {
   if (eflag_atom) {
     k_eatom_.template modify<LMPDeviceType>();
+    k_eatom_.template sync<LMPHostType>();
   }
   if (!vflag_atom && !cvflag_atom) {
     return;
   }
-  // ponytail: add a CUDA-safe packing helper when Kokkos per-atom virials matter.
-  error->all(
-      FLERR,
-      "NEPAdapters GPU Kokkos path does not yet support per-atom virial tallies");
+
+  const int nvirial = force->newton ? atom->nlocal + atom->nghost : atom->nlocal;
+  const int write_vatom = vflag_atom ? 1 : 0;
+  const int write_cvatom = cvflag_atom ? 1 : 0;
+  const auto raw9 = d_lammps_raw9_;
+  const auto vatom_view = d_vatom_;
+  const auto cvatom_view = d_cvatom_;
+  Kokkos::parallel_for(
+      "nepa:pack_per_atom_virial",
+      Kokkos::RangePolicy<LMPDeviceType>(0, nvirial),
+      PackLammpsPerAtomVirial<
+          decltype(raw9),
+          decltype(vatom_view),
+          decltype(cvatom_view)>{
+          raw9, vatom_view, cvatom_view, write_vatom, write_cvatom});
+  if (vflag_atom) {
+    k_vatom_.template modify<LMPDeviceType>();
+    k_vatom_.template sync<LMPHostType>();
+  }
+  if (cvflag_atom) {
+    k_cvatom_.template modify<LMPDeviceType>();
+    k_cvatom_.template sync<LMPHostType>();
+  }
 }
 #endif

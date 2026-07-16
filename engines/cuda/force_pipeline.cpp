@@ -65,18 +65,15 @@ class PhaseTimer {
 };
 #endif
 
-VirialTarget select_virial_target(
-    const ForceEvaluationRequest& request,
-    bool allow_float_sink) {
+VirialTarget select_virial_target(const ForceEvaluationRequest& request) {
   switch (request.virial) {
     case VirialOutputMode::none:
       return VirialTarget::none;
     case VirialOutputMode::total_only:
       return VirialTarget::center_atom;
     case VirialOutputMode::per_atom_n2:
-      if (allow_float_sink &&
-          request.topology == ForceNeighborTopology::external_full) {
-        return VirialTarget::neighbor_float_sink;
+      if (request.topology == ForceNeighborTopology::external_full) {
+        return VirialTarget::center_and_neighbor_float_sink;
       }
       return VirialTarget::neighbor_atom;
   }
@@ -127,10 +124,9 @@ void execute_force_pipeline(
   evaluate_ann_energy_on_device(protocol, atom_count, model, workspace);
   timer.split(measured.descriptor_ann_ms);
 
-  const VirialTarget virial_target =
-      select_virial_target(request, !spin_model);
+  const VirialTarget virial_target = select_virial_target(request);
   const bool use_per_atom_sink =
-      virial_target == VirialTarget::neighbor_float_sink;
+      virial_target == VirialTarget::center_and_neighbor_float_sink;
   const bool zbl_outputs =
       request.store_potential || accumulates_virial(virial_target);
   const bool fuse_external_zbl =
@@ -196,9 +192,6 @@ void execute_force_pipeline(
           virial_target);
     }
   }
-  if (use_per_atom_sink) {
-    finalize_lammps_per_atom_virial_sink(atom_count, workspace);
-  }
   timer.split(measured.angular_force_ms);
 
   if (protocol.has_zbl && !fuse_radial_zbl && !fuse_external_zbl) {
@@ -230,8 +223,7 @@ void execute_force_pipeline(
         box,
         model,
         workspace,
-        accumulates_virial(virial_target),
-        virial_targets_neighbor(virial_target),
+        virial_target,
         timings == nullptr ? nullptr : &spin_timings);
     measured.spin_onsite_ms = spin_timings.onsite_ms;
     measured.spin_density_ms = spin_timings.density_ms;

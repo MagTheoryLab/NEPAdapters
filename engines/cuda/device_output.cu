@@ -51,28 +51,30 @@ __device__ __forceinline__ double lammps_voigt_component(
 }
 
 __global__ void write_lammps_atom_outputs(
-    int nlocal,
+    int potential_atom_count,
+    int virial_atom_count,
     int atom_stride,
     const double* potential,
-    const double* virial_soa9,
+    const float* per_atom_virial_float_soa9,
     double* potential_per_atom,
     double* virials_per_atom9,
     int virial_atom_stride,
     int virial_component_stride) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= nlocal) {
+  if (atom >= potential_atom_count && atom >= virial_atom_count) {
     return;
   }
 
-  if (potential_per_atom != nullptr) {
+  if (potential_per_atom != nullptr && atom < potential_atom_count) {
     potential_per_atom[atom] = potential[atom];
   }
 
-  if (virials_per_atom9 != nullptr) {
+  if (virials_per_atom9 != nullptr && atom < virial_atom_count) {
     for (int component = 0; component < 9; ++component) {
       virials_per_atom9[
           atom * virial_atom_stride + component * virial_component_stride] =
-          virial_soa9[component * atom_stride + atom];
+          static_cast<double>(
+              per_atom_virial_float_soa9[component * atom_stride + atom]);
     }
   }
 }
@@ -170,22 +172,6 @@ __global__ void finalize_lammps_totals(
     return;
   }
   total_virial6[component - 1] = partial[0];
-}
-
-__global__ void accumulate_float_per_atom_virial(
-    int atom_count,
-    int atom_stride,
-    const float* virial_float_soa9,
-    double* virial_soa9) {
-  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= atom_count) {
-    return;
-  }
-#pragma unroll
-  for (int component = 0; component < 9; ++component) {
-    const int offset = component * atom_stride + atom;
-    virial_soa9[offset] += static_cast<double>(virial_float_soa9[offset]);
-  }
 }
 
 __device__ __forceinline__ int public_virial_to_internal(int component) {
@@ -345,26 +331,6 @@ void prepare_lammps_per_atom_virial_sink(
       "clear per-atom virial sink");
 }
 
-void finalize_lammps_per_atom_virial_sink(
-    int atom_count,
-    DeviceWorkspace& workspace) {
-  require(atom_count >= 0, "atom_count must be non-negative");
-  const DeviceWorkspaceView view = workspace.view();
-  require(view.per_atom_virial_float_soa9 != nullptr &&
-              view.virial_soa9 != nullptr,
-          "workspace missing per-atom virial sink or output");
-  const int output_count = static_cast<int>(view.atom_capacity);
-  const int blocks = (output_count + kThreads - 1) / kThreads;
-  if (blocks > 0) {
-    accumulate_float_per_atom_virial<<<blocks, kThreads>>>(
-        output_count,
-        output_count,
-        view.per_atom_virial_float_soa9,
-        view.virial_soa9);
-    check_cuda(cudaGetLastError(), "finalize per-atom virial sink");
-  }
-}
-
 void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborInput& input,
     const NepaLammpsDeviceNeighborResult& result,
@@ -398,6 +364,10 @@ void write_lammps_device_outputs(
     require(view.mforce_soa3 != nullptr, "workspace missing mforce output");
   }
   require(view.virial_soa9 != nullptr, "workspace missing virial output");
+  if (result.virials_per_atom9 != nullptr) {
+    require(view.per_atom_virial_float_soa9 != nullptr,
+            "workspace missing per-atom virial sink");
+  }
   if (write_totals) {
     require(view.lammps_partial_sums != nullptr,
             "workspace missing LAMMPS reduction partials");
@@ -425,15 +395,20 @@ void write_lammps_device_outputs(
     }
   }
 
-  const int atom_blocks = (input.nlocal + kThreads - 1) / kThreads;
+  const int virial_output_atom_count =
+      result.virials_per_atom9 != nullptr ? input.nall : 0;
+  const int atom_output_count =
+      std::max(input.nlocal, virial_output_atom_count);
+  const int atom_blocks = (atom_output_count + kThreads - 1) / kThreads;
   if (atom_blocks > 0 &&
       (result.potential_per_atom != nullptr ||
        result.virials_per_atom9 != nullptr)) {
     write_lammps_atom_outputs<<<atom_blocks, kThreads>>>(
         input.nlocal,
+        virial_output_atom_count,
         static_cast<int>(view.atom_capacity),
         view.potential,
-        view.virial_soa9,
+        view.per_atom_virial_float_soa9,
         result.potential_per_atom,
         result.virials_per_atom9,
         result.virial_atom_stride,
@@ -455,9 +430,8 @@ void write_lammps_device_outputs(
     return;
   }
 
-  const int virial_atom_count =
-      result.virials_per_atom9 != nullptr ? input.nall : input.nlocal;
-  const int reduction_atom_count = std::max(input.nlocal, virial_atom_count);
+  const int virial_atom_count = input.nlocal;
+  const int reduction_atom_count = input.nlocal;
   const int partial_blocks = (reduction_atom_count + kThreads - 1) / kThreads;
   const dim3 reduction_grid(partial_blocks, 7);
   reduce_lammps_partial_sums<<<

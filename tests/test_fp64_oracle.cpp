@@ -944,10 +944,6 @@ class DeviceBuffer {
 LammpsPrediction evaluate_lammps_device(
     ApiRunner& runner,
     const CaseData& test_case) {
-  if (test_case.is_spin()) {
-    throw std::runtime_error(
-        "dense device LAMMPS oracle currently covers nonmagnetic models");
-  }
   const int atom_count = test_case.atom_count();
   const std::vector<std::vector<int>> neighbor_rows =
       make_nonperiodic_neighbor_rows(test_case, model_cutoff_max(runner));
@@ -968,16 +964,30 @@ LammpsPrediction evaluate_lammps_device(
     }
   }
   std::vector<int> types(test_case.types.begin(), test_case.types.end());
+  std::vector<double> lammps_spins;
+  if (test_case.is_spin()) {
+    lammps_spins.resize(static_cast<std::size_t>(atom_count) * 4);
+    for (int atom = 0; atom < atom_count; ++atom) {
+      for (int component = 0; component < 3; ++component) {
+        lammps_spins[4 * static_cast<std::size_t>(atom) + component] =
+            test_case.spins[3 * static_cast<std::size_t>(atom) + component];
+      }
+      lammps_spins[4 * static_cast<std::size_t>(atom) + 3] = 1.0;
+    }
+  }
 
   DeviceBuffer<int> d_ilist(ilist);
   DeviceBuffer<int> d_counts(counts);
   DeviceBuffer<int> d_neighbors(neighbors);
   DeviceBuffer<int> d_types(types);
   DeviceBuffer<double> d_positions(test_case.positions);
+  DeviceBuffer<double> d_spins(lammps_spins);
   DeviceBuffer<double> d_energy(1);
   DeviceBuffer<double> d_virial6(6);
   DeviceBuffer<double> d_potential(atom_count);
   DeviceBuffer<double> d_force(static_cast<std::size_t>(atom_count) * 3);
+  DeviceBuffer<double> d_mforce(
+      test_case.is_spin() ? static_cast<std::size_t>(atom_count) * 3 : 0);
   DeviceBuffer<double> d_atom_virial(
       static_cast<std::size_t>(atom_count) * 9);
 
@@ -997,6 +1007,9 @@ LammpsPrediction evaluate_lammps_device(
   input.positions = d_positions.data();
   input.position_atom_stride = 3;
   input.position_component_stride = 1;
+  input.spins = test_case.is_spin() ? d_spins.data() : nullptr;
+  input.spin_atom_stride = test_case.is_spin() ? 4 : 0;
+  input.spin_component_stride = test_case.is_spin() ? 1 : 0;
 
   NepaLammpsDeviceNeighborResult result{};
   result.total_potential = d_energy.data();
@@ -1005,6 +1018,9 @@ LammpsPrediction evaluate_lammps_device(
   result.forces = d_force.data();
   result.force_atom_stride = 3;
   result.force_component_stride = 1;
+  result.mforces = test_case.is_spin() ? d_mforce.data() : nullptr;
+  result.mforce_atom_stride = test_case.is_spin() ? 3 : 0;
+  result.mforce_component_stride = test_case.is_spin() ? 1 : 0;
   result.virials_per_atom9 = d_atom_virial.data();
   result.virial_atom_stride = 9;
   result.virial_component_stride = 1;
@@ -1017,11 +1033,17 @@ LammpsPrediction evaluate_lammps_device(
   out.virial6.assign(6, 0.0);
   out.potential.assign(atom_count, 0.0);
   out.force.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  if (test_case.is_spin()) {
+    out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  }
   out.atom_virial9.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   d_energy.copy_to(energy);
   d_virial6.copy_to(out.virial6);
   d_potential.copy_to(out.potential);
   d_force.copy_to(out.force);
+  if (test_case.is_spin()) {
+    d_mforce.copy_to(out.mforce);
+  }
   d_atom_virial.copy_to(out.atom_virial9);
   out.energy = energy[0];
   return out;
@@ -1090,7 +1112,9 @@ LammpsPrediction evaluate_lammps(
 std::vector<double> batch_virial6(const Prediction& batch) {
   return {
       batch.virial[0], batch.virial[4], batch.virial[8],
-      batch.virial[1], batch.virial[2], batch.virial[5]};
+      0.5 * (batch.virial[1] + batch.virial[3]),
+      0.5 * (batch.virial[2] + batch.virial[6]),
+      0.5 * (batch.virial[5] + batch.virial[7])};
 }
 
 std::vector<double> lammps_atom_virial_to_batch_order(
@@ -1104,6 +1128,177 @@ std::vector<double> lammps_atom_virial_to_batch_order(
     }
   }
   return out;
+}
+
+std::vector<double> sum_lammps_atom_virial6(
+    const std::vector<double>& values) {
+  std::vector<double> out(6, 0.0);
+  for (std::size_t atom = 0; atom < values.size() / 9; ++atom) {
+    const double* raw9 = values.data() + 9 * atom;
+    out[0] += raw9[0];
+    out[1] += raw9[1];
+    out[2] += raw9[2];
+    out[3] += 0.5 * (raw9[3] + raw9[6]);
+    out[4] += 0.5 * (raw9[4] + raw9[7]);
+    out[5] += 0.5 * (raw9[5] + raw9[8]);
+  }
+  return out;
+}
+
+CaseData symmetrically_strained_case(
+    const CaseData& base,
+    int lammps_component,
+    double strain) {
+  if (base.pbc[0] != 0 || base.pbc[1] != 0 || base.pbc[2] != 0) {
+    throw std::runtime_error(
+        "dense virial finite differences require a nonperiodic case");
+  }
+  static constexpr int first_axis[6] = {0, 1, 2, 0, 0, 1};
+  static constexpr int second_axis[6] = {0, 1, 2, 1, 2, 2};
+  if (lammps_component < 0 || lammps_component >= 6) {
+    throw std::runtime_error("invalid LAMMPS virial component");
+  }
+
+  CaseData out = base;
+  const int a = first_axis[lammps_component];
+  const int b = second_axis[lammps_component];
+  for (int atom = 0; atom < out.atom_count(); ++atom) {
+    const std::size_t offset = 3 * static_cast<std::size_t>(atom);
+    if (a == b) {
+      out.positions[offset + a] =
+          base.positions[offset + a] * (1.0 + strain);
+    } else {
+      // Engineering shear gamma: x_a += gamma*x_b/2 and
+      // x_b += gamma*x_a/2.  Its negative energy derivative is the
+      // symmetric LAMMPS off-diagonal virial.
+      out.positions[offset + a] =
+          base.positions[offset + a] +
+          0.5 * strain * base.positions[offset + b];
+      out.positions[offset + b] =
+          base.positions[offset + b] +
+          0.5 * strain * base.positions[offset + a];
+    }
+  }
+  return out;
+}
+
+std::vector<double> force_moment_virial6(
+    const CaseData& test_case,
+    const std::vector<double>& force) {
+  if (force.size() != test_case.positions.size()) {
+    throw std::runtime_error("force-moment input shape mismatch");
+  }
+  std::array<long double, 3> origin{};
+  for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+    for (int component = 0; component < 3; ++component) {
+      origin[component] += test_case.positions[
+          3 * static_cast<std::size_t>(atom) + component];
+    }
+  }
+  for (long double& value : origin) {
+    value /= static_cast<long double>(test_case.atom_count());
+  }
+
+  std::array<long double, 9> raw{};
+  for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+    const std::size_t offset = 3 * static_cast<std::size_t>(atom);
+    for (int position_component = 0; position_component < 3;
+         ++position_component) {
+      const long double centered_position =
+          static_cast<long double>(test_case.positions[
+              offset + position_component]) - origin[position_component];
+      for (int force_component = 0; force_component < 3; ++force_component) {
+        raw[3 * position_component + force_component] +=
+            centered_position *
+            static_cast<long double>(force[offset + force_component]);
+      }
+    }
+  }
+  return {
+      static_cast<double>(raw[0]),
+      static_cast<double>(raw[4]),
+      static_cast<double>(raw[8]),
+      static_cast<double>(0.5L * (raw[1] + raw[3])),
+      static_cast<double>(0.5L * (raw[2] + raw[6])),
+      static_cast<double>(0.5L * (raw[5] + raw[7])),
+  };
+}
+
+template <typename EnergyEvaluator>
+double five_point_negative_strain_derivative(
+    EnergyEvaluator&& energy,
+    const CaseData& test_case,
+    int component,
+    double h) {
+  const double em2 =
+      energy(symmetrically_strained_case(test_case, component, -2.0 * h));
+  const double em1 =
+      energy(symmetrically_strained_case(test_case, component, -h));
+  const double ep1 =
+      energy(symmetrically_strained_case(test_case, component, h));
+  const double ep2 =
+      energy(symmetrically_strained_case(test_case, component, 2.0 * h));
+  return (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
+}
+
+struct DenseVirialFdReference {
+  std::vector<double> virial6;
+  bool passed = false;
+};
+
+template <typename EnergyEvaluator>
+DenseVirialFdReference run_dense_virial_fd_scan(
+    const std::string& backend,
+    const CaseData& test_case,
+    const LammpsPrediction& analytic,
+    EnergyEvaluator&& energy,
+    bool enforce_fp64_gate) {
+  static constexpr const char* component_names[6] = {
+      "xx", "yy", "zz", "xy", "xz", "yz"};
+  static constexpr double steps[] = {3.0e-2, 1.0e-2, 3.0e-3, 1.0e-3};
+  std::vector<double> selected(6, 0.0);
+  double selected_max_abs = 0.0;
+  for (int component = 0; component < 6; ++component) {
+    for (double h : steps) {
+      const double finite_difference = five_point_negative_strain_derivative(
+          energy, test_case, component, h);
+      const double abs_error =
+          std::abs(analytic.virial6[component] - finite_difference);
+      std::cout << std::scientific << std::setprecision(9)
+                << "FP64_VIRIAL_FD backend=" << backend
+                << " case=" << test_case.name
+                << " component=" << component_names[component]
+                << " h=" << h
+                << " analytic=" << analytic.virial6[component]
+                << " finite_difference=" << finite_difference
+                << " abs_error=" << abs_error
+                << " per_atom_abs="
+                << abs_error / static_cast<double>(test_case.atom_count())
+                << '\n';
+      if (h == steps[3]) {
+        selected[component] = finite_difference;
+        selected_max_abs = std::max(selected_max_abs, abs_error);
+      }
+    }
+  }
+
+  const std::vector<double> force_moment =
+      force_moment_virial6(test_case, analytic.force);
+  const ErrorStats moment_stats = error_stats(analytic.virial6, force_moment);
+  const double atom_count = static_cast<double>(test_case.atom_count());
+  const bool fd_ok = !enforce_fp64_gate || selected_max_abs <= 2.0e-5;
+  const bool moment_ok = !enforce_fp64_gate || moment_stats.max_abs <= 2.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_VIRIAL_INDEPENDENT backend=" << backend
+            << " case=" << test_case.name
+            << " fd_max_abs=" << selected_max_abs
+            << " fd_max_per_atom=" << selected_max_abs / atom_count
+            << " force_moment_max_abs=" << moment_stats.max_abs
+            << " force_moment_max_per_atom=" << moment_stats.max_abs / atom_count
+            << " gate=" << (enforce_fp64_gate ? "fp64" : "observe")
+            << " status=" << (fd_ok && moment_ok ? "pass" : "fail")
+            << '\n';
+  return {std::move(selected), fd_ok && moment_ok};
 }
 
 bool validate_oracle_lammps(
@@ -1228,6 +1423,63 @@ bool run_device_lammps_case(
            "cuda_device", test_case, candidate, oracle_lammps, budgets) && ok;
   return ok;
 }
+
+bool run_device_spin_lammps_case(
+    const Budgets& budgets,
+    ApiRunner& backend,
+    OracleRunner& oracle,
+    const CaseData& test_case) {
+  LammpsStorage oracle_storage(test_case, model_cutoff_max(oracle));
+  const Prediction oracle_batch = evaluate_batch(oracle, test_case);
+  const LammpsPrediction oracle_lammps =
+      evaluate_lammps(oracle, test_case, oracle_storage);
+  bool ok = validate_oracle_lammps(test_case, oracle_batch, oracle_lammps);
+  const LammpsPrediction candidate =
+      evaluate_lammps_device(backend, test_case);
+  const double atoms = static_cast<double>(test_case.atom_count());
+  ok = report_field(
+           "cuda_device",
+           test_case.name + "_lammps",
+           "energy_per_atom",
+           {candidate.energy / atoms},
+           {oracle_lammps.energy / atoms},
+           budgets.energy_per_atom) && ok;
+  ok = report_field(
+           "cuda_device", test_case.name + "_lammps", "potential",
+           candidate.potential, oracle_lammps.potential, budgets.potential) && ok;
+  ok = report_field(
+           "cuda_device", test_case.name + "_lammps", "force",
+           candidate.force, oracle_lammps.force, budgets.force) && ok;
+  std::vector<double> candidate_virial_per_atom = candidate.virial6;
+  std::vector<double> oracle_virial_per_atom = oracle_lammps.virial6;
+  for (double& value : candidate_virial_per_atom) {
+    value /= atoms;
+  }
+  for (double& value : oracle_virial_per_atom) {
+    value /= atoms;
+  }
+  ok = report_field(
+           "cuda_device",
+           test_case.name + "_lammps",
+           "virial6_per_atom",
+           candidate_virial_per_atom,
+           oracle_virial_per_atom,
+           budgets.virial) && ok;
+  // The legacy CPU spin oracle owns all spin-only per-atom virial at atom 0.
+  // The device LAMMPS contract intentionally uses the MPI-stable n2 neighbor
+  // ownership, so only the total and the n2 sum invariant are comparable here.
+  ok = report_field(
+           "cuda_device", test_case.name + "_lammps", "mforce",
+           candidate.mforce, oracle_lammps.mforce, budgets.mforce) && ok;
+  ok = report_field(
+           "cuda_device",
+           test_case.name + "_lammps",
+           "atom_virial9_sum",
+           sum_lammps_atom_virial6(candidate.atom_virial9),
+           candidate.virial6,
+           budgets.virial) && ok;
+  return ok;
+}
 #endif
 
 }  // namespace
@@ -1339,6 +1591,78 @@ int main() {
              cuda_spin,
              spin_oracle,
              spin_nonperiodic) && ok;
+    ok = run_device_spin_lammps_case(
+             cuda_budgets(),
+             cuda_spin,
+             spin_oracle,
+             spin_nonperiodic) && ok;
+    CaseData dense_spin_lammps = dense_spin;
+    dense_spin_lammps.name = "spin_chiral_dense_nonperiodic_device";
+    dense_spin_lammps.box = {
+        64.0, 0.0, 0.0,
+        0.0, 64.0, 0.0,
+        0.0, 0.0, 64.0};
+    dense_spin_lammps.pbc = {0, 0, 0};
+    ok = run_device_spin_lammps_case(
+             cuda_budgets(),
+             cuda_spin,
+             spin_oracle,
+             dense_spin_lammps) && ok;
+
+    LammpsStorage dense_spin_oracle_storage(
+        dense_spin_lammps, model_cutoff_max(spin_oracle));
+    const LammpsPrediction dense_spin_oracle_lammps = evaluate_lammps(
+        spin_oracle, dense_spin_lammps, dense_spin_oracle_storage);
+    auto oracle_energy = [&](const CaseData& strained) {
+      LammpsStorage storage(strained, model_cutoff_max(spin_oracle));
+      return evaluate_lammps(spin_oracle, strained, storage).energy;
+    };
+    const DenseVirialFdReference dense_spin_fd = run_dense_virial_fd_scan(
+        "fp64_cpu",
+        dense_spin_lammps,
+        dense_spin_oracle_lammps,
+        oracle_energy,
+        true);
+    ok = dense_spin_fd.passed && ok;
+
+    const LammpsPrediction dense_spin_cuda_lammps =
+        evaluate_lammps_device(cuda_spin, dense_spin_lammps);
+    auto cuda_energy = [&](const CaseData& strained) {
+      return evaluate_lammps_device(cuda_spin, strained).energy;
+    };
+    run_dense_virial_fd_scan(
+        "cuda_device",
+        dense_spin_lammps,
+        dense_spin_cuda_lammps,
+        cuda_energy,
+        false);
+
+    std::vector<double> cuda_virial_per_atom =
+        dense_spin_cuda_lammps.virial6;
+    std::vector<double> fd_virial_per_atom = dense_spin_fd.virial6;
+    std::vector<double> cuda_force_moment_per_atom = force_moment_virial6(
+        dense_spin_lammps, dense_spin_cuda_lammps.force);
+    const double dense_atoms =
+        static_cast<double>(dense_spin_lammps.atom_count());
+    for (int component = 0; component < 6; ++component) {
+      cuda_virial_per_atom[component] /= dense_atoms;
+      fd_virial_per_atom[component] /= dense_atoms;
+      cuda_force_moment_per_atom[component] /= dense_atoms;
+    }
+    ok = report_field(
+             "cuda_device",
+             dense_spin_lammps.name,
+             "virial6_per_atom_vs_fp64_fd",
+             cuda_virial_per_atom,
+             fd_virial_per_atom,
+             {1.0e-3, 0.0}) && ok;
+    ok = report_field(
+             "cuda_device",
+             dense_spin_lammps.name,
+             "force_moment6_per_atom_vs_fp64_fd",
+             cuda_force_moment_per_atom,
+             fd_virial_per_atom,
+             {1.0e-3, 0.0}) && ok;
 #endif
 
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;

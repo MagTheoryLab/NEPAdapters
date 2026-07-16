@@ -373,11 +373,14 @@ bool run_lammps_matches_batch_n(
   if (nepa_find_force_lammps_neighbors(model, &input, &result) != NEPA_STATUS_OK) {
     return false;
   }
-  double batch_total_virial[6] = {};
-  const int map6[6] = {0, 4, 8, 1, 2, 5};
-  for (int k = 0; k < 6; ++k) {
-    batch_total_virial[k] = batch_virial[static_cast<std::size_t>(map6[k])];
-  }
+  const double batch_total_virial[6] = {
+      batch_virial[0],
+      batch_virial[4],
+      batch_virial[8],
+      0.5 * (batch_virial[1] + batch_virial[3]),
+      0.5 * (batch_virial[2] + batch_virial[6]),
+      0.5 * (batch_virial[5] + batch_virial[7]),
+  };
   std::vector<double> batch_total_virial_vec(batch_total_virial, batch_total_virial + 6);
   std::vector<double> total_virial_vec(total_virial, total_virial + 6);
   const double energy_diff = std::abs(total_potential - batch.energy);

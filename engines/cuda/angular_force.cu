@@ -1222,7 +1222,7 @@ __global__ void accumulate_angular_forces_pull_tile(
   float center_fx = 0.0f;
   float center_fy = 0.0f;
   float center_fz = 0.0f;
-  AngularVirialOutput<AccumulateVirial && !FloatVirialSink> virial_output;
+  AngularVirialOutput<AccumulateVirial> virial_output;
   const int batch_count =
       (max_edge_count + EdgesPerAtomBatch - 1) / EdgesPerAtomBatch;
   for (int batch = 0; batch < batch_count; ++batch) {
@@ -1329,6 +1329,15 @@ __global__ void accumulate_angular_forces_pull_tile(
             f12[2],
             force_soa3,
             virial_float_soa9);
+        virial_output.add_edge(
+            x12,
+            y12,
+            z12,
+            f12,
+            neighbor,
+            atom_stride,
+            virial_soa9,
+            false);
       } else {
         atomicAdd(&force_soa3[neighbor], -static_cast<double>(f12[0]));
         atomicAdd(
@@ -1602,7 +1611,7 @@ void accumulate_l2_angular_forces_on_device(
         dispatch_angular_pull_tile<true, false>(
             protocol, atom_count, model_view, view, true);
         break;
-      case VirialTarget::neighbor_float_sink:
+      case VirialTarget::center_and_neighbor_float_sink:
         require(view.per_atom_virial_float_soa9 != nullptr,
                 "workspace missing per-atom virial sink");
         dispatch_angular_pull_tile<true, true>(

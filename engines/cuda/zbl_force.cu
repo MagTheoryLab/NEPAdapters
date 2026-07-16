@@ -393,7 +393,7 @@ void accumulate_zbl_forces_on_device(
     bool accumulate_energy_virial,
     VirialTarget virial_target) {
   require(
-      virial_target != VirialTarget::neighbor_float_sink,
+      virial_target != VirialTarget::center_and_neighbor_float_sink,
       "ZBL forces do not support the float virial sink");
   const bool virial_to_neighbor =
       virial_target == VirialTarget::neighbor_atom;

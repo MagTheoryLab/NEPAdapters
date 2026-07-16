@@ -61,6 +61,7 @@ class PairNEPAdaptersCUDA : public PairNEPAdaptersCommon
   typename KokkosCvatom::t_dev d_cvatom_;
   Kokkos::View<double*, LMPDeviceType> d_lammps_raw9_;
   int d_type_map_length_ = 0;
+  bool reverse_per_atom_virial_ = false;
 #else
  private:
 #endif

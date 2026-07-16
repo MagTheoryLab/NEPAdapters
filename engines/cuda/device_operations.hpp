@@ -18,7 +18,7 @@ enum class VirialTarget {
   none,
   center_atom,
   neighbor_atom,
-  neighbor_float_sink,
+  center_and_neighbor_float_sink,
 };
 
 constexpr bool accumulates_virial(VirialTarget target) {
@@ -27,7 +27,7 @@ constexpr bool accumulates_virial(VirialTarget target) {
 
 constexpr bool virial_targets_neighbor(VirialTarget target) {
   return target == VirialTarget::neighbor_atom ||
-         target == VirialTarget::neighbor_float_sink;
+         target == VirialTarget::center_and_neighbor_float_sink;
 }
 
 #if defined(__CUDACC__)
@@ -294,10 +294,6 @@ void prepare_lammps_per_atom_virial_sink(
     int atom_count,
     DeviceWorkspace& workspace);
 
-void finalize_lammps_per_atom_virial_sink(
-    int atom_count,
-    DeviceWorkspace& workspace);
-
 void apply_qnep_charge_terms_on_device(
     const ModelProtocol& protocol,
     int atom_count,
@@ -325,8 +321,7 @@ void accumulate_spin_forces_on_device(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    bool accumulate_virial,
-    bool cpu_atom_virial,
+    VirialTarget virial_target,
     SpinForceTimings* timings = nullptr);
 
 }  // namespace nep_adapters::cuda_backend

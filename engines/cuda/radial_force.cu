@@ -575,6 +575,17 @@ __global__ void accumulate_lammps_radial_forces(
           f12y,
           f12z,
           virial_float_soa9);
+      if (accumulate_virial) {
+        s_sxx -= x12 * f12x;
+        s_syy -= y12 * f12y;
+        s_szz -= z12 * f12z;
+        s_sxy -= x12 * f12y;
+        s_sxz -= x12 * f12z;
+        s_syx -= y12 * f12x;
+        s_syz -= y12 * f12z;
+        s_szx -= z12 * f12x;
+        s_szy -= z12 * f12y;
+      }
     } else {
       if (accumulate_virial) {
         if constexpr (VirialToNeighbor) {
@@ -619,7 +630,27 @@ __global__ void accumulate_lammps_radial_forces(
     }
     if constexpr (IncludeZbl) {
       if (accumulate_virial && r2 < zbl_outer_squared) {
-        if constexpr (VirialToNeighbor || FloatVirialSink) {
+        if constexpr (FloatVirialSink) {
+          atomic_add_per_atom_virial_float(
+              atom_stride,
+              neighbor,
+              x12,
+              y12,
+              z12,
+              zbl_f12x,
+              zbl_f12y,
+              zbl_f12z,
+              virial_float_soa9);
+          s_sxx -= x12 * zbl_f12x;
+          s_syy -= y12 * zbl_f12y;
+          s_szz -= z12 * zbl_f12z;
+          s_sxy -= x12 * zbl_f12y;
+          s_sxz -= x12 * zbl_f12z;
+          s_syx -= y12 * zbl_f12x;
+          s_syz -= y12 * zbl_f12z;
+          s_szx -= z12 * zbl_f12x;
+          s_szy -= z12 * zbl_f12y;
+        } else if constexpr (VirialToNeighbor) {
           atomicAdd(
               &virial_soa9[neighbor],
               -static_cast<double>(x12 * zbl_f12x));
@@ -671,7 +702,7 @@ __global__ void accumulate_lammps_radial_forces(
   if (!accumulate_virial) {
     return;
   }
-  if constexpr (VirialToNeighbor || FloatVirialSink) {
+  if constexpr (VirialToNeighbor) {
     return;
   }
   virial_soa9[atom] += static_cast<double>(s_sxx);
@@ -860,7 +891,7 @@ void accumulate_radial_forces_on_device(
     VirialTarget virial_target,
     bool clear_outputs) {
   require(
-      virial_target != VirialTarget::neighbor_float_sink,
+      virial_target != VirialTarget::center_and_neighbor_float_sink,
       "internal radial forces do not support the float virial sink");
   const bool accumulate_virial = accumulates_virial(virial_target);
   const bool virial_to_neighbor =
@@ -996,7 +1027,7 @@ void accumulate_lammps_radial_forces_on_device(
   if (accumulate_virial) {
     require(view.virial_soa9 != nullptr, "workspace missing virial output");
   }
-  if (virial_target == VirialTarget::neighbor_float_sink) {
+  if (virial_target == VirialTarget::center_and_neighbor_float_sink) {
     require(view.per_atom_virial_float_soa9 != nullptr,
             "workspace missing per-atom virial sink");
   }
@@ -1122,7 +1153,7 @@ void accumulate_lammps_radial_forces_on_device(
               std::true_type{},
               std::false_type{});
           break;
-        case VirialTarget::neighbor_float_sink:
+        case VirialTarget::center_and_neighbor_float_sink:
           launch(
               include_zbl_tag,
               accumulate_zbl_energy_tag,

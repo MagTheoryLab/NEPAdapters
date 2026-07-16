@@ -827,8 +827,13 @@ accumulate_spin_density_forces_tile_f32(
     const float* __restrict__ density_raw1_dot_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    double* __restrict__ virial_soa9) {
+    double* __restrict__ virial_soa9,
+    float* __restrict__ virial_float_soa9) {
   using Layout = SpinStaticLayout<C, LMax>;
+  constexpr bool AccumulateCenterVirial =
+      VirialMode == SpinVirialMode::center_owned ||
+      VirialMode == SpinVirialMode::cpu_atom_decomposition ||
+      VirialMode == SpinVirialMode::center_and_neighbor_float_sink;
   static_assert(
       AtomsPerWarp * EdgesPerAtomBatch == 32,
       "spin density tile must fill one warp");
@@ -1019,7 +1024,7 @@ accumulate_spin_density_forces_tile_f32(
 
   float center_force[3] = {};
   float center_mforce[3] = {};
-  float center_virial[VirialMode == SpinVirialMode::disabled ? 1 : 9] = {};
+  float center_virial[AccumulateCenterVirial ? 9 : 1] = {};
   const int radial_count = active_atom ? nn_radial[atom] : 0;
   for (int slot = edge_lane;
        slot < radial_count;
@@ -1244,7 +1249,20 @@ accumulate_spin_density_forces_tile_f32(
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
                 -static_cast<double>(grad_sj[d]));
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (
+        VirialMode == SpinVirialMode::center_and_neighbor_float_sink) {
+      atomic_add_per_atom_virial_float(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_rij[0],
+          grad_rij[1],
+          grad_rij[2],
+          virial_float_soa9);
+    }
+    if constexpr (AccumulateCenterVirial) {
       for (int a = 0; a < 3; ++a) {
         const float rij_a = rhat[a] * dist;
         for (int b = 0; b < 3; ++b) {
@@ -1262,7 +1280,7 @@ accumulate_spin_density_forces_tile_f32(
       center_mforce[d] += __shfl_down_sync(
           FullWarpMask, center_mforce[d], offset, EdgesPerAtomBatch);
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (AccumulateCenterVirial) {
       for (int component = 0; component < 9; ++component) {
         center_virial[component] += __shfl_down_sync(
             FullWarpMask,
@@ -1289,7 +1307,7 @@ accumulate_spin_density_forces_tile_f32(
       atomicAdd(mforce_soa3 + d * atom_stride + atom,
                 center_mforce_total);
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (AccumulateCenterVirial) {
       for (int component = 0; component < 9; ++component) {
         const double value = static_cast<double>(center_virial[component]);
         if constexpr (VirialMode == SpinVirialMode::cpu_atom_decomposition) {
@@ -1485,8 +1503,13 @@ accumulate_spin_chiral_forces_tile_f32(
     const float* __restrict__ chiral_chirals_cache,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
-    double* __restrict__ virial_soa9) {
+    double* __restrict__ virial_soa9,
+    float* __restrict__ virial_float_soa9) {
   constexpr int ChiC = C < 2 ? C : 2;
+  constexpr bool AccumulateCenterVirial =
+      VirialMode == SpinVirialMode::center_owned ||
+      VirialMode == SpinVirialMode::cpu_atom_decomposition ||
+      VirialMode == SpinVirialMode::center_and_neighbor_float_sink;
   static_assert(
       AtomsPerWarp * EdgesPerAtomBatch == 32,
       "spin chiral tile must fill one warp");
@@ -1714,7 +1737,7 @@ accumulate_spin_chiral_forces_tile_f32(
 
   float center_force[3] = {};
   float center_mforce[3] = {};
-  float center_virial[VirialMode == SpinVirialMode::disabled ? 1 : 9] = {};
+  float center_virial[AccumulateCenterVirial ? 9 : 1] = {};
   const int radial_count = active_atom ? nn_radial[atom] : 0;
   for (int slot = edge_lane;
        slot < radial_count;
@@ -1872,7 +1895,20 @@ accumulate_spin_chiral_forces_tile_f32(
           mforce_soa3 + d * atom_stride + neighbor,
           -static_cast<double>(grad_sj[d]));
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (
+        VirialMode == SpinVirialMode::center_and_neighbor_float_sink) {
+      atomic_add_per_atom_virial_float(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_rij[0],
+          grad_rij[1],
+          grad_rij[2],
+          virial_float_soa9);
+    }
+    if constexpr (AccumulateCenterVirial) {
 #pragma unroll
       for (int a = 0; a < 3; ++a) {
         const float rij_a = rhat[a] * dist;
@@ -1894,7 +1930,7 @@ accumulate_spin_chiral_forces_tile_f32(
       center_mforce[d] += __shfl_down_sync(
           FullWarpMask, center_mforce[d], offset, EdgesPerAtomBatch);
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (AccumulateCenterVirial) {
 #pragma unroll
       for (int component = 0; component < 9; ++component) {
         center_virial[component] += __shfl_down_sync(
@@ -1916,7 +1952,7 @@ accumulate_spin_chiral_forces_tile_f32(
           static_cast<double>(center_mforce[d]) +
               static_cast<double>(atom_pulls->direct_mforce[d]));
     }
-    if constexpr (VirialMode != SpinVirialMode::disabled) {
+    if constexpr (AccumulateCenterVirial) {
 #pragma unroll
       for (int component = 0; component < 9; ++component) {
         const double value = static_cast<double>(center_virial[component]);

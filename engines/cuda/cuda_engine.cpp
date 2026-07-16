@@ -1000,7 +1000,6 @@ class CudaModel : public nep_adapters::Model {
             input.max_neighbors);
       }
       const bool needs_per_atom_virial_sink =
-          external_protocol.spin_mode == 0 &&
           external_protocol.charge_mode == 0 &&
           result.virials_per_atom9 != nullptr;
       const bool rebuild_workspace =
