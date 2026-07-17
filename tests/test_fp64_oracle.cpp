@@ -508,6 +508,30 @@ CaseData make_qnep_fixture() {
   return out;
 }
 
+CaseData make_qnep_finite_difference_case() {
+  CaseData out;
+  out.name = "qnep_isolated_periodic";
+  out.model_path = NEP_ADAPTERS_FP64_QNEP_MODEL_PATH;
+  out.types = {0, 1, 0, 1, 0, 1};
+  out.positions = {
+      1.2, 1.1, 1.4,
+      4.3, 1.5, 1.2,
+      1.7, 4.6, 1.8,
+      2.0, 1.9, 5.1,
+      5.0, 4.7, 2.3,
+      4.6, 2.8, 5.6};
+  // Keep every pair well away from the 8 A charge cutoff.  The production
+  // charge1 real-space term is hard-truncated, so a dense fixture with pairs
+  // arbitrarily close to the cutoff cannot provide a smooth strain-energy
+  // finite-difference oracle.
+  out.box = {
+      16.7, 0.0, 0.0,
+      0.0, 17.07, 0.0,
+      0.0, 0.0, 17.53};
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
 CaseData make_spin_reference_case() {
   CaseData out;
   out.name = "spin_chiral_reference";
@@ -830,32 +854,6 @@ std::vector<std::size_t> all_coordinates(std::size_t count) {
   return out;
 }
 
-std::vector<std::size_t> qnep_force_coordinates(const CaseData& test_case) {
-  std::vector<std::size_t> atoms = {
-      0,
-      static_cast<std::size_t>(test_case.atom_count() / 2),
-      static_cast<std::size_t>(test_case.atom_count() - 1),
-      100};
-  for (std::size_t atom = 0; atom < test_case.types.size(); ++atom) {
-    if (test_case.types[atom] != test_case.types.front()) {
-      atoms.push_back(atom);
-      break;
-    }
-  }
-  std::sort(atoms.begin(), atoms.end());
-  atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
-  std::vector<std::size_t> coordinates;
-  for (const std::size_t atom : atoms) {
-    if (atom >= test_case.types.size()) {
-      continue;
-    }
-    for (int component = 0; component < 3; ++component) {
-      coordinates.push_back(3 * atom + component);
-    }
-  }
-  return coordinates;
-}
-
 std::vector<double> sum_atom_virial_raw9(const Prediction& prediction) {
   std::vector<double> out(9, 0.0);
   for (std::size_t atom = 0; atom < prediction.atom_virial.size() / 9; ++atom) {
@@ -1114,16 +1112,16 @@ Budgets cuda_budgets() {
 
 Budgets qnep_cuda_budgets() {
   return {
-      {2.0e-6, 2.0e-6},
-      {5.0e-6, 2.0e-6},
-      {2.0e-4, 2.0e-6},
-      {7.0e-3, 2.0e-6},
-      {1.5e-3, 2.0e-6},
+      {1.0e-7, 2.0e-6},
+      {3.0e-6, 2.0e-6},
+      {2.0e-5, 2.0e-6},
+      {1.0e-4, 2.0e-6},
+      {3.0e-5, 2.0e-6},
       {0.0, 0.0},
       {0.0, 0.0},
-      {1.0e-5, 2.0e-6},
       {5.0e-6, 2.0e-6},
-      {2.0e-6, 2.0e-6},
+      {5.0e-6, 2.0e-6},
+      {1.0e-6, 2.0e-6},
   };
 }
 
@@ -1143,12 +1141,12 @@ DerivativeBudgets fp64_derivative_budgets() {
 
 DerivativeBudgets qnep_fp64_derivative_budgets() {
   return {
-      {5.0e-5, 2.0e-8},
+      {2.0e-8, 2.0e-8},
       {0.0, 0.0},
-      {3.8e-3, 2.0e-8},
-      4.0e-5,
+      {2.0e-8, 2.0e-8},
+      2.0e-8,
       0.0,
-      3.0e-3,
+      1.0e-7,
       2.0e-10,
       2.0e-10,
       2.0e-10,
@@ -1168,9 +1166,9 @@ CandidateDerivativeBudgets cuda_spin_derivative_budgets() {
 
 CandidateDerivativeBudgets qnep_cuda_derivative_budgets() {
   return {
-      {1.0e-4, 2.0e-6},
+      {3.0e-5, 2.0e-6},
       {0.0, 0.0},
-      {7.0e-3, 2.0e-6},
+      {5.0e-5, 2.0e-6},
       1.0e-5,
       1.0e-8,
       5.0e-6,
@@ -2415,12 +2413,14 @@ int main() {
         evaluate_batch(qnep_oracle, qnep_fixture);
     ok = validate_qnep_frozen_reference(
              qnep_fixture_oracle, qnep_fixture) && ok;
+    const CaseData qnep_finite_difference =
+        make_qnep_finite_difference_case();
     DerivativeReference qnep_derivative_reference;
     ok = validate_derivative_contract(
              "fp64_cpu",
              qnep_oracle,
-             qnep_fixture,
-             qnep_force_coordinates(qnep_fixture),
+             qnep_finite_difference,
+             all_coordinates(qnep_finite_difference.positions.size()),
              qnep_fp64_derivative_budgets(),
              &qnep_derivative_reference) && ok;
 
@@ -2498,7 +2498,7 @@ int main() {
     ok = validate_candidate_against_derivative_reference(
              "cuda",
              cuda_qnep,
-             qnep_fixture,
+             qnep_finite_difference,
              qnep_derivative_reference,
              qnep_cuda_derivative_budgets()) && ok;
     ApiRunner cuda_nonmag("cuda", nonmag_lammps.model_path);

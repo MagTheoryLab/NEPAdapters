@@ -1970,15 +1970,15 @@ void find_descriptor_small_box(
   }
 }
 
-void zero_total_charge(const int N, double* g_charge)
+void subtract_mean(const int N, double* values)
 {
-  double mean_charge = 0.0;
+  double mean = 0.0;
   for (int n = 0; n < N; ++n) {
-    mean_charge += g_charge[n];
+    mean += values[n];
   }
-  mean_charge /= N;
+  mean /= N;
   for (int n = 0; n < N; ++n) {
-    g_charge[n] -= mean_charge;
+    values[n] -= mean;
   }
 }
 
@@ -9222,7 +9222,7 @@ void NEP::compute(
     r12.data() + size_x12 * 5,
     Fp.data(), sum_fxyz.data(), charge.data(), charge_derivative.data(), potential.data(), nullptr);
 
-  zero_total_charge(N, charge.data());
+  subtract_mean(N, charge.data());
 
   find_bec_diagonal(N, charge.data(), bec.data());
   find_bec_radial_small_box(
@@ -9299,6 +9299,11 @@ void NEP::compute(
       potential.data(),
       D_real.data());
   }
+
+  // The predicted charges are projected onto the zero-sum subspace above.
+  // Apply the transpose of the same projection to dE/dq before propagating it
+  // through the charge network: P is symmetric and P^T D = D - mean(D).
+  subtract_mean(N, D_real.data());
 
   find_force_radial_small_box(
     paramb, annmb, N, NN_radial.data(), NL_radial.data(), type.data(), r12.data(),
