@@ -185,3 +185,23 @@ remains available; the experimental PPPM implementation is compiled only with
 `-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON`. A default build that is explicitly
 asked for `NEP_ADAPTERS_QNEP_KSPACE=pppm` returns an error instead of silently
 switching algorithms.
+
+### Automated wheel builds
+
+`.github/workflows/python-package.yml` builds source distributions and CPU
+wheels for CPython 3.10-3.14 on Linux x86_64, macOS x86_64/arm64, and Windows
+x86_64. Publishing a GitHub release runs the build automatically, attaches all
+artifacts to that release, and publishes only the source distribution and CPU
+wheels to PyPI through trusted publishing.
+
+The optional Linux CUDA build uses a strict manylinux_2_28 repair step and the
+standard `1cuda` wheel build tag. This keeps its filename distinct from the CPU
+wheel without defining a second Python package. CUDA wheels are GitHub Release
+assets and are not uploaded to PyPI, so a normal `pip install nep-adapters`
+cannot select the GPU build accidentally.
+
+Every built wheel is installed and exercised through a CPU calculation. GPU
+wheels additionally import `nep_gpu`; CUDA numerical tests remain a separate
+4090 release gate because GitHub-hosted builders have no GPU. The archive audit
+rejects unexpected native files, vendored `.libs`/ `.dylibs` directories, and
+CUDA libraries including cuFFT and the CUDA runtime.

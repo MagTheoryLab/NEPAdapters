@@ -75,11 +75,13 @@ endif()
 install(
   TARGETS nep_adapters_python_cpu
   LIBRARY DESTINATION nep_adapters
+  RUNTIME DESTINATION nep_adapters
 )
 if(TARGET nep_adapters_python_gpu)
   install(
     TARGETS nep_adapters_python_gpu
     LIBRARY DESTINATION nep_adapters
+    RUNTIME DESTINATION nep_adapters
   )
 endif()
 

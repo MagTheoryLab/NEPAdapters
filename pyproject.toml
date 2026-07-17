@@ -9,6 +9,7 @@ build-backend = "scikit_build_core.build"
 name = "nep-adapters"
 version = "0.1.0"
 description = "NEP runtime adapters for Python and LAMMPS frontends"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "numpy",
@@ -33,3 +34,13 @@ NEP_ADAPTERS_CPU_ENABLE_OPENMP = "OFF"
 NEP_ADAPTERS_ENABLE_PYTHON = "ON"
 NEP_ADAPTERS_ENABLE_LAMMPS = "OFF"
 NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES = "OFF"
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_* *-manylinux_i686 *-win32"
+build-verbosity = 1
+test-command = "python {project}/frontends/python/tests/test_wheel_install.py"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+repair-wheel-command = "auditwheel repair --wheel-dir {dest_dir} {wheel}"

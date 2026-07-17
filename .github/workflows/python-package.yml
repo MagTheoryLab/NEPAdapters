@@ -1,0 +1,207 @@
+name: Build Python packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing tag to build, or empty for the current ref
+        required: false
+        default: ""
+        type: string
+      build_gpu:
+        description: Build Linux CUDA wheels
+        required: false
+        default: true
+        type: boolean
+      publish_pypi:
+        description: Publish CPU artifacts to PyPI
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-package-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag_name || github.ref }}
+
+jobs:
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Validate release version
+        if: github.event_name == 'release' || inputs.tag_name != ''
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          expected = f"v{version}"
+          actual = os.environ["RELEASE_TAG"]
+          if actual != expected:
+              raise SystemExit(f"release tag {actual!r} must equal {expected!r}")
+          PY
+      - name: Build and verify sdist
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build --sdist
+          python -m twine check dist/*
+          python -m pip install dist/*.tar.gz
+          python -c "import nep_adapters"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  cpu_wheels:
+    name: CPU wheels (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            archs: x86_64
+          - os: macos-15-intel
+            label: macos-x86_64
+            archs: x86_64
+          - os: macos-latest
+            label: macos-arm64
+            archs: arm64
+          - os: windows-2022
+            label: windows-x86_64
+            archs: AMD64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build CPU wheels
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+      - name: Audit CPU wheel contents
+        run: python tools/check_wheel_contents.py --variant cpu --wheel-dir wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-cpu-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpu_wheels:
+    name: CUDA wheels (Linux x86_64)
+    if: github.event_name == 'release' || inputs.build_gpu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build CUDA wheels
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
+        env:
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          CIBW_BEFORE_ALL_LINUX: |
+            set -euxo pipefail
+            dnf install -y dnf-plugins-core
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+            dnf install -y cuda-toolkit-12-4
+            ln -sfn /usr/local/cuda-12.4 /usr/local/cuda
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH=/usr/local/cuda/bin:$PATH
+            CUDACXX=/usr/local/cuda/bin/nvcc
+            SKBUILD_WHEEL_BUILD_TAG=1cuda
+            CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
+            -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
+            -DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual"
+          CIBW_TEST_COMMAND_LINUX: >-
+            NEP_ADAPTERS_EXPECT_GPU_MODULE=1
+            python {project}/frontends/python/tests/test_wheel_install.py
+      - name: Audit CUDA wheel contents
+        run: python tools/check_wheel_contents.py --variant gpu --wheel-dir wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-gpu-linux-x86_64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  release_assets:
+    name: Attach packages to GitHub release
+    needs: [sdist, cpu_wheels, gpu_wheels]
+    if: >-
+      always() &&
+      (github.event_name == 'release' || inputs.tag_name != '') &&
+      needs.sdist.result == 'success' &&
+      needs.cpu_wheels.result == 'success' &&
+      (needs.gpu_wheels.result == 'success' || needs.gpu_wheels.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag_name }}
+          files: dist/*
+          overwrite_files: true
+
+  publish_pypi:
+    name: Publish CPU packages to PyPI
+    needs: [sdist, cpu_wheels, gpu_wheels]
+    if: >-
+      always() &&
+      (github.event_name == 'release' || inputs.publish_pypi) &&
+      needs.sdist.result == 'success' &&
+      needs.cpu_wheels.result == 'success' &&
+      (needs.gpu_wheels.result == 'success' || needs.gpu_wheels.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-sdist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-cpu-*
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
