@@ -29,6 +29,12 @@ ASE. It accepts duck-typed structures with `get_chemical_symbols()` or `symbols`
 plus `positions`, `cell`, and optional `pbc`, then returns a `Prediction`
 dataclass:
 
+`pbc` defaults to `(1, 1, 1)` in both the native NumPy methods and the
+high-level calculator. Structures without a `pbc` attribute are also treated
+as fully periodic. Explicit values other than full periodicity are rejected;
+explicit `None` is also rejected. NEPAdapters does not provide a non-periodic
+or legacy-sentinel fallback.
+
 - `energy`, shape `(nstructures,)`;
 - `potential`, shape `(natoms,)`;
 - `forces`, shape `(natoms, 3)`;

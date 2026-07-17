@@ -10,6 +10,9 @@ import numpy as np
 from .runtime import Model, load_model
 
 
+_FULLY_PERIODIC_PBC = (1, 1, 1)
+
+
 @dataclass(frozen=True)
 class Prediction:
     energy: np.ndarray
@@ -77,7 +80,7 @@ def _cell_to_nep_box(cell) -> np.ndarray:
 def _structure_pbc(structure) -> np.ndarray:
     pbc = getattr(structure, "pbc", None)
     if pbc is None:
-        return np.asarray([1, 1, 1], dtype=np.int32)
+        return np.asarray(_FULLY_PERIODIC_PBC, dtype=np.int32)
     return np.asarray(pbc, dtype=np.int32).reshape(3)
 
 
@@ -212,7 +215,7 @@ class NEPCalculator:
         positions,
         boxes,
         atom_counts=None,
-        pbc=None,
+        pbc=_FULLY_PERIODIC_PBC,
     ) -> Prediction:
         types_array = np.ascontiguousarray(types, dtype=np.int32)
         positions_array = np.ascontiguousarray(positions, dtype=np.float64)
@@ -266,7 +269,7 @@ class NEPCalculator:
         spins,
         boxes,
         atom_counts=None,
-        pbc=None,
+        pbc=_FULLY_PERIODIC_PBC,
     ) -> SpinPrediction:
         types_array = np.ascontiguousarray(types, dtype=np.int32)
         positions_array = np.ascontiguousarray(positions, dtype=np.float64)
@@ -336,7 +339,7 @@ class NEPCalculator:
         positions,
         boxes,
         atom_counts=None,
-        pbc=None,
+        pbc=_FULLY_PERIODIC_PBC,
     ) -> np.ndarray:
         types_array = np.ascontiguousarray(types, dtype=np.int32)
         positions_array = np.ascontiguousarray(positions, dtype=np.float64)
@@ -375,7 +378,7 @@ class NEPCalculator:
         spins,
         boxes,
         atom_counts=None,
-        pbc=None,
+        pbc=_FULLY_PERIODIC_PBC,
     ) -> np.ndarray:
         types_array = np.ascontiguousarray(types, dtype=np.int32)
         positions_array = np.ascontiguousarray(positions, dtype=np.float64)

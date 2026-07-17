@@ -34,6 +34,12 @@ def main():
             box,
         )
         direct_descriptors = model.descriptors(types, box, structure.positions, atom_counts)
+        periodic_energy, periodic_forces, periodic_virial = model.find_force(
+            types,
+            structure.positions,
+            box,
+            (1, 1, 1),
+        )
 
     if "ase" in getattr(nep_adapters, "__dict__", {}):
         raise AssertionError("core nep_adapters import should not import ASE adapter")
@@ -69,6 +75,12 @@ def main():
         raise AssertionError("calculator forces differ from direct native find_force")
     if not np.allclose(prediction.virials.sum(axis=0), direct_virial, rtol=0.0, atol=1.0e-10):
         raise AssertionError("calculator virial differs from direct native find_force")
+    if abs(float(direct_energy) - float(periodic_energy)) > 1.0e-10:
+        raise AssertionError("default pbc differs from explicit full periodicity")
+    if not np.allclose(direct_forces, periodic_forces, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("default pbc forces differ from explicit full periodicity")
+    if not np.allclose(direct_virial, periodic_virial, rtol=0.0, atol=1.0e-10):
+        raise AssertionError("default pbc virial differs from explicit full periodicity")
     if abs(float(prediction.energy[0]) - structure.energy) > 1.0e-10:
         raise AssertionError("calculator energy differs from fixed baseline label")
     if not np.allclose(prediction.forces, structure.forces, rtol=0.0, atol=1.0e-10):

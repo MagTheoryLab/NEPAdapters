@@ -37,6 +37,13 @@ def main():
             atom_counts,
         )
         descriptors = model.descriptors(types, box, positions, atom_counts)
+        explicit_periodic = model.calculate(
+            types,
+            box,
+            positions,
+            atom_counts,
+            (1, 1, 1),
+        )
         try:
             model.calculate_spin(
                 types,
@@ -64,6 +71,13 @@ def main():
                 raise
         else:
             raise AssertionError("non-periodic input must be rejected")
+        try:
+            model.find_force(types, positions, box, None)
+        except ValueError as error:
+            if "omit it instead of passing None" not in str(error):
+                raise
+        else:
+            raise AssertionError("explicit pbc=None must be rejected")
 
     force_l1 = float(np.abs(forces).sum())
     if not math.isfinite(float(energy)) or force_l1 <= 0:
@@ -88,6 +102,14 @@ def main():
         raise AssertionError("descriptors differ from fixed baseline labels")
     if not np.allclose(calc_forces, forces, rtol=0.0, atol=1.0e-10):
         raise AssertionError("calculate() and find_force() forces differ")
+    if not all(
+        np.allclose(default, explicit, rtol=0.0, atol=1.0e-10)
+        for default, explicit in zip(
+            (potentials, calc_forces, calc_virials),
+            explicit_periodic,
+        )
+    ):
+        raise AssertionError("default pbc must equal explicit (1, 1, 1)")
     if abs(float(np.sum(potentials)) - float(energy)) > 1.0e-10:
         raise AssertionError("per-atom potentials do not sum to structure energy")
     if abs(float(np.sum(potentials)) - structure.energy) > 1.0e-10:

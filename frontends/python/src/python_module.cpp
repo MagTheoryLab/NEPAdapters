@@ -128,29 +128,29 @@ PreparedBatch prepare_batch(
     prepared.boxes = prepared.boxes_for_batch.data();
   }
 
-  prepared.default_pbc.assign(
-      static_cast<std::size_t>(prepared.structure_count) * 3,
-      1);
-  prepared.pbc = prepared.default_pbc.data();
-  if (!pbc_object.is_none()) {
-    prepared.pbc_array = py::cast<
-        py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
-        pbc_object);
-    py::buffer_info pbc_info = prepared.pbc_array.request();
-    if (!((pbc_info.ndim == 1 && pbc_info.size == 3) ||
-          (pbc_info.ndim == 2 && pbc_info.shape[0] == prepared.structure_count &&
-           pbc_info.shape[1] == 3))) {
-      throw std::invalid_argument("pbc must have shape (3,) or (nstructures, 3)");
+  if (pbc_object.is_none()) {
+    throw std::invalid_argument(
+        "pbc defaults to (1,1,1); omit it instead of passing None");
+  }
+  prepared.pbc_array = py::cast<
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
+      pbc_object);
+  py::buffer_info pbc_info = prepared.pbc_array.request();
+  if (!((pbc_info.ndim == 1 && pbc_info.size == 3) ||
+        (pbc_info.ndim == 2 && pbc_info.shape[0] == prepared.structure_count &&
+         pbc_info.shape[1] == 3))) {
+    throw std::invalid_argument("pbc must have shape (3,) or (nstructures, 3)");
+  }
+  if (pbc_info.ndim == 1 && prepared.structure_count > 1) {
+    prepared.default_pbc.resize(
+        static_cast<std::size_t>(prepared.structure_count) * 3);
+    const auto* one_pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
+    for (std::int32_t i = 0; i < prepared.structure_count; ++i) {
+      std::copy(one_pbc, one_pbc + 3, prepared.default_pbc.data() + 3 * i);
     }
-    if (pbc_info.ndim == 1 && prepared.structure_count > 1) {
-      const auto* one_pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
-      for (std::int32_t i = 0; i < prepared.structure_count; ++i) {
-        std::copy(one_pbc, one_pbc + 3, prepared.default_pbc.data() + 3 * i);
-      }
-      prepared.pbc = prepared.default_pbc.data();
-    } else {
-      prepared.pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
-    }
+    prepared.pbc = prepared.default_pbc.data();
+  } else {
+    prepared.pbc = static_cast<const std::int32_t*>(pbc_info.ptr);
   }
   require_fully_periodic(
       prepared.pbc,
@@ -399,20 +399,19 @@ class PyModel {
     py::buffer_info type_info = types.request();
     py::buffer_info position_info = positions.request();
     py::buffer_info box_info = box.request();
-    std::int32_t default_pbc[] = {1, 1, 1};
-    const std::int32_t* pbc_ptr = default_pbc;
-
-    py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> pbc_array;
-    if (!pbc_object.is_none()) {
-      pbc_array = py::cast<
-          py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
-          pbc_object);
-      py::buffer_info pbc_info = pbc_array.request();
-      if (pbc_info.size != 3) {
-        throw std::invalid_argument("pbc must contain 3 values");
-      }
-      pbc_ptr = static_cast<const std::int32_t*>(pbc_info.ptr);
+    if (pbc_object.is_none()) {
+      throw std::invalid_argument(
+          "pbc defaults to (1,1,1); omit it instead of passing None");
     }
+    py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> pbc_array;
+    pbc_array = py::cast<
+        py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>>(
+        pbc_object);
+    py::buffer_info pbc_info = pbc_array.request();
+    if (pbc_info.size != 3) {
+      throw std::invalid_argument("pbc must contain 3 values");
+    }
+    const auto* pbc_ptr = static_cast<const std::int32_t*>(pbc_info.ptr);
     require_fully_periodic(pbc_ptr, 3);
 
     if (type_info.ndim != 1) {
@@ -494,14 +493,14 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("boxes"),
           py::arg("positions"),
           py::arg("atom_counts"),
-          py::arg("pbc") = py::none())
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
           "find_force",
           &PyModel::find_force,
           py::arg("types"),
           py::arg("positions"),
           py::arg("box"),
-          py::arg("pbc") = py::none())
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
           "calculate_spin",
           &PyModel::calculate_spin,
@@ -510,7 +509,7 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("positions"),
           py::arg("spins"),
           py::arg("atom_counts"),
-          py::arg("pbc") = py::none())
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
           "descriptors",
           &PyModel::descriptors,
@@ -518,7 +517,7 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("boxes"),
           py::arg("positions"),
           py::arg("atom_counts"),
-          py::arg("pbc") = py::none())
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
           "descriptors_spin",
           &PyModel::descriptors_spin,
@@ -527,7 +526,7 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("positions"),
           py::arg("spins"),
           py::arg("atom_counts"),
-          py::arg("pbc") = py::none())
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def("close", &PyModel::close)
       .def(
           "__enter__",
