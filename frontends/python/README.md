@@ -20,9 +20,8 @@
 
 spin 模型必须使用显式接口，避免普通调用遗漏 spin 输入：
 
-- `Model.calculate_spin()` 接受 `(natoms, 3)` 的 spin 数组，返回势能、力、每原子 virial、磁力和 torque；
+- `Model.calculate_spin()` 接受 `(natoms, 3)` 的 spin 数组，返回势能、力、每原子 virial 和磁力；
 - `Model.descriptors_spin()` 返回 spin 模型的 descriptor 矩阵；
-- torque 定义为 `spin × magnetic_force`。
 
 ## 使用 `NEPCalculator`
 

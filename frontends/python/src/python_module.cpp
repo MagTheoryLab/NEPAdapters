@@ -264,7 +264,6 @@ class PyModel {
     py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
     py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
     py::array_t<double> mforces({input.total_atoms, static_cast<std::int32_t>(3)});
-    py::array_t<double> tau({input.total_atoms, static_cast<std::int32_t>(3)});
     std::vector<double> energies(static_cast<std::size_t>(input.structure_count), 0.0);
     std::vector<double> structure_virials(
         static_cast<std::size_t>(input.structure_count) * 9,
@@ -288,13 +287,12 @@ class PyModel {
     result.virials_row_major9 = structure_virials.data();
     result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
     result.mforces_aos3 = static_cast<double*>(mforces.request().ptr);
-    result.tau_aos3 = static_cast<double*>(tau.request().ptr);
 
     {
       py::gil_scoped_release release;
       check_status(nepa_find_force_batch(model_.get(), &batch, &result));
     }
-    return py::make_tuple(potentials, forces, virials, mforces, tau);
+    return py::make_tuple(potentials, forces, virials, mforces);
   }
 
   py::array_t<double> descriptors(

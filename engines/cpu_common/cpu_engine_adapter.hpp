@@ -153,17 +153,6 @@ class CpuModel final : public Model {
                 result.mforces_aos3[3 * global_atom + 2] =
                     mforce_soa[static_cast<std::size_t>(2) * atom_count + atom];
               }
-              if (result.tau_aos3 != nullptr) {
-                const double sx = batch.spins_aos3[3 * global_atom + 0];
-                const double sy = batch.spins_aos3[3 * global_atom + 1];
-                const double sz = batch.spins_aos3[3 * global_atom + 2];
-                const double mx = mforce_soa[atom];
-                const double my = mforce_soa[static_cast<std::size_t>(atom_count) + atom];
-                const double mz = mforce_soa[static_cast<std::size_t>(2) * atom_count + atom];
-                result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
-                result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
-                result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
-              }
               if (result.spin_transfer_per_atom_row_major9 != nullptr) {
                 for (std::int32_t component = 0; component < 9; ++component) {
                   result.spin_transfer_per_atom_row_major9[

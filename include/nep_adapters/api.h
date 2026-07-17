@@ -84,7 +84,6 @@ typedef struct NepaFindForceResult {
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* bec_per_atom_row_major9;
   double* mforces_aos3;
-  double* tau_aos3;
   /* Optional per-atom spin-energy-transfer tensor A_j with
      A[j,a,alpha] = -sum_i r_ij[a] * dU_i/ds_j[alpha].
      Row-major order is xSx, xSy, xSz, ySx, ySy, ySz, zSx, zSy, zSz. */

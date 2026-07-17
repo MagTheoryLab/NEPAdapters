@@ -392,7 +392,6 @@ void copy_prepared_batch_results_to_host(
     int atom_count,
     int structure_offset,
     int atom_offset,
-    const NepaStructureBatch& source_batch,
     bool spin_model,
     bool charge_model,
     NepaFindForceResult& result) {
@@ -451,39 +450,14 @@ void copy_prepared_batch_results_to_host(
         "failed to copy CUDA per-atom charges");
   }
 
-  if (!spin_model ||
-      (result.mforces_aos3 == nullptr && result.tau_aos3 == nullptr)) {
+  if (!spin_model || result.mforces_aos3 == nullptr) {
     return;
-  }
-  std::vector<double> local_mforces;
-  double* mforces = result.mforces_aos3 != nullptr
-      ? result.mforces_aos3 + 3 * static_cast<std::size_t>(atom_offset)
-      : nullptr;
-  if (mforces == nullptr) {
-    local_mforces.resize(static_cast<std::size_t>(atom_count) * 3);
-    mforces = local_mforces.data();
   }
   copy_device_doubles_to_host(
       view.output_mforces_aos3,
       static_cast<std::size_t>(atom_count) * 3,
-      mforces,
+      result.mforces_aos3 + 3 * static_cast<std::size_t>(atom_offset),
       "failed to copy CUDA mforces");
-  if (result.tau_aos3 == nullptr) {
-    return;
-  }
-  for (int atom = 0; atom < atom_count; ++atom) {
-    const std::size_t global_atom =
-        static_cast<std::size_t>(atom_offset + atom);
-    const double sx = source_batch.spins_aos3[3 * global_atom + 0];
-    const double sy = source_batch.spins_aos3[3 * global_atom + 1];
-    const double sz = source_batch.spins_aos3[3 * global_atom + 2];
-    const double mx = mforces[3 * static_cast<std::size_t>(atom) + 0];
-    const double my = mforces[3 * static_cast<std::size_t>(atom) + 1];
-    const double mz = mforces[3 * static_cast<std::size_t>(atom) + 2];
-    result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
-    result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
-    result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
-  }
 }
 
 
@@ -609,7 +583,6 @@ class CudaModel : public nep_adapters::Model {
             batch.total_atoms,
             0,
             0,
-            batch,
             false,
             false,
             result);
@@ -720,7 +693,6 @@ class CudaModel : public nep_adapters::Model {
             single.atom_count,
             structure,
             single.atom_offset,
-            batch,
             protocol_.spin_mode != 0,
             protocol_.charge_mode > 0,
             result);

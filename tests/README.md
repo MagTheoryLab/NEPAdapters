@@ -43,7 +43,7 @@ CPU 正确性同时使用固定 golden label 和独立编译的严格 FP64 oracl
 普通模型和 spin 模型使用独立门禁。spin calculator 测试覆盖：
 
 - native 与高层 calculation/descriptor parity；
-- magnetic force 和 torque；
+- magnetic force；
 - 单结构与多结构 batch；
 - 结构自带 spin 和显式 spin 数组；
 - 空结果；

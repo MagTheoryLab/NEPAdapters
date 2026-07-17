@@ -78,10 +78,10 @@ def main():
         else:
             raise AssertionError("spin model calculation without spins must fail")
 
-    potentials, forces, virials, mforces, tau = outputs
+    potentials, forces, virials, mforces = outputs
     if potentials.shape != (4,) or forces.shape != (4, 3):
         raise AssertionError("spin calculation output shape mismatch")
-    if virials.shape != (4, 9) or mforces.shape != (4, 3) or tau.shape != (4, 3):
+    if virials.shape != (4, 9) or mforces.shape != (4, 3):
         raise AssertionError("spin calculation output shape mismatch")
     if descriptors.shape != (4, info["descriptor_dim"]):
         raise AssertionError("spin descriptor output shape mismatch")
@@ -95,9 +95,6 @@ def main():
         raise AssertionError("spin virial differs from fixture")
     if not np.allclose(descriptors.reshape(-1), reference["descriptor"], rtol=0.0, atol=1.0e-10):
         raise AssertionError("spin descriptors differ from fixture")
-    if not np.allclose(tau, np.cross(spins, mforces), rtol=0.0, atol=1.0e-12):
-        raise AssertionError("tau must equal spin cross magnetic force")
-
     with nep_adapters.NEPCalculator(model_path) as calculator:
         prediction = calculator.predict_spin_structures(structure)
         explicit_prediction = calculator.predict_spin_structures(structure, spins)
@@ -134,11 +131,11 @@ def main():
         raise AssertionError("high-level spin prediction type mismatch")
     if not np.allclose(prediction.mforces, mforces, rtol=0.0, atol=1.0e-10):
         raise AssertionError("high-level magnetic forces differ from native API")
-    if not np.allclose(explicit_prediction.tau, tau, rtol=0.0, atol=1.0e-12):
+    if not np.allclose(explicit_prediction.mforces, mforces, rtol=0.0, atol=1.0e-10):
         raise AssertionError("explicit spin input differs from structure spin input")
     if batch_prediction.atom_counts.tolist() != [4, 4]:
         raise AssertionError("spin structure batch atom counts mismatch")
-    if len(batch_prediction.mforce_blocks()) != 2 or len(batch_prediction.tau_blocks()) != 2:
+    if len(batch_prediction.mforce_blocks()) != 2:
         raise AssertionError("spin structure batch block split mismatch")
     if not np.allclose(
         batch_prediction.energy,
@@ -157,7 +154,7 @@ def main():
         raise AssertionError("get_spin_descriptor output mismatch")
     if mean_descriptors.shape != (1, info["descriptor_dim"]):
         raise AssertionError("mean spin descriptor shape mismatch")
-    if len(calculated) != 5 or calculated[3][0].shape != (4, 3):
+    if len(calculated) != 4 or calculated[3][0].shape != (4, 3):
         raise AssertionError("calculate_spin facade result mismatch")
 
     print(

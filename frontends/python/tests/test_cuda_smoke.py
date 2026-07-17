@@ -130,7 +130,7 @@ def main():
     compare_outputs(
         "spin",
         spin,
-        (2.0e-4, 2.0e-4, 1.0e-2, 2.0e-4, 2.0e-4, 2.0e-4),
+        (2.0e-4, 2.0e-4, 1.0e-2, 2.0e-4, 2.0e-4),
     )
 
     with nep_adapters.NEPCalculator(ordinary_model, backend="cuda") as calculator:
@@ -165,14 +165,14 @@ def main():
             spin_counts,
         )
     assert_close("high-level spin mforce", prediction.mforces, spin["cuda"][3])
-    assert_close("high-level spin descriptor", descriptors, spin["cuda"][5])
+    assert_close("high-level spin descriptor", descriptors, spin["cuda"][4])
 
     print(
         "python CUDA smoke:",
         f"ordinary_atoms={len(types)}",
         f"spin_atoms={len(spin_types)}",
         f"ordinary_descriptor_dim={ordinary['cuda'][3].shape[1]}",
-        f"spin_descriptor_dim={spin['cuda'][5].shape[1]}",
+        f"spin_descriptor_dim={spin['cuda'][4].shape[1]}",
     )
     return 0
 

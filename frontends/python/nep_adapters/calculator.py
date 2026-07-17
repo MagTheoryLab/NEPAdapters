@@ -39,17 +39,11 @@ class Prediction:
 @dataclass(frozen=True)
 class SpinPrediction(Prediction):
     mforces: np.ndarray
-    tau: np.ndarray
 
     def mforce_blocks(self) -> list[np.ndarray]:
         if len(self.atom_counts) == 0:
             return []
         return list(np.split(self.mforces, np.cumsum(self.atom_counts)[:-1]))
-
-    def tau_blocks(self) -> list[np.ndarray]:
-        if len(self.atom_counts) == 0:
-            return []
-        return list(np.split(self.tau, np.cumsum(self.atom_counts)[:-1]))
 
 
 def _read_type_map(model_path: str | Path) -> dict[str, int]:
@@ -130,7 +124,6 @@ def _empty_spin_prediction() -> SpinPrediction:
         structure_virials=empty.structure_virials,
         atom_counts=empty.atom_counts,
         mforces=np.empty((0, 3), dtype=np.float64),
-        tau=np.empty((0, 3), dtype=np.float64),
     )
 
 
@@ -284,7 +277,7 @@ class NEPCalculator:
         if boxes_array.ndim == 1 and len(atom_counts_array) > 1:
             boxes_array = np.tile(boxes_array.reshape(1, 9), (len(atom_counts_array), 1))
 
-        potentials, forces, virials, mforces, tau = self.model.calculate_spin(
+        potentials, forces, virials, mforces = self.model.calculate_spin(
             types_array,
             boxes_array,
             positions_array,
@@ -309,7 +302,6 @@ class NEPCalculator:
             structure_virials=structure_virials,
             atom_counts=atom_counts_array,
             mforces=np.asarray(mforces, dtype=np.float64),
-            tau=np.asarray(tau, dtype=np.float64),
         )
 
     def predict_spin_structures(self, structures, spins=None) -> SpinPrediction:
@@ -440,7 +432,6 @@ class NEPCalculator:
             prediction.force_blocks(),
             prediction.virial_blocks(mean=mean_virial),
             prediction.mforce_blocks(),
-            prediction.tau_blocks(),
         )
 
     def get_descriptor(self, structure) -> np.ndarray:

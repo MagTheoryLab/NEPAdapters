@@ -56,7 +56,6 @@ struct Prediction {
   std::vector<double> virial;
   std::vector<double> atom_virial;
   std::vector<double> mforce;
-  std::vector<double> tau;
   std::vector<double> spin_transfer;
   std::vector<double> descriptor;
   std::vector<double> charge;
@@ -84,7 +83,6 @@ struct Budgets {
   Budget virial;
   Budget atom_virial;
   Budget mforce;
-  Budget tau;
   Budget descriptor;
   Budget radial_basis_sum;
   Budget charge;
@@ -414,7 +412,6 @@ Prediction evaluate_batch(
   out.atom_virial.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   if (test_case.is_spin()) {
     out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
-    out.tau.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
     if (include_spin_transfer) {
       out.spin_transfer.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
     }
@@ -431,7 +428,6 @@ Prediction evaluate_batch(
   result.virials_row_major9 = out.virial.data();
   result.virials_per_atom_row_major9 = out.atom_virial.data();
   result.mforces_aos3 = out.mforce.empty() ? nullptr : out.mforce.data();
-  result.tau_aos3 = out.tau.empty() ? nullptr : out.tau.data();
   result.spin_transfer_per_atom_row_major9 =
       out.spin_transfer.empty() ? nullptr : out.spin_transfer.data();
   result.charge_per_atom = out.charge.empty() ? nullptr : out.charge.data();
@@ -1088,7 +1084,6 @@ Budgets cpu_budgets() {
       {5.0e-7, 2.0e-11},
       {5.0e-7, 2.0e-11},
       {5.0e-8, 2.0e-11},
-      {5.0e-8, 2.0e-11},
       {2.0e-8, 2.0e-11},
       {2.0e-8, 2.0e-11},
       {5.0e-8, 2.0e-11},
@@ -1103,7 +1098,6 @@ Budgets cuda_budgets() {
       {5.0e-3, 0.0},
       {5.0e-3, 0.0},
       {1.0e-3, 0.0},
-      {1.0e-3, 0.0},
       {5.0e-4, 0.0},
       {2.0e-6, 2.0e-6},
       {1.0e-3, 0.0},
@@ -1117,7 +1111,6 @@ Budgets qnep_cuda_budgets() {
       {2.0e-5, 2.0e-6},
       {1.0e-4, 2.0e-6},
       {3.0e-5, 2.0e-6},
-      {0.0, 0.0},
       {0.0, 0.0},
       {5.0e-6, 2.0e-6},
       {5.0e-6, 2.0e-6},
@@ -1229,9 +1222,6 @@ bool compare_prediction(
     ok = report_field(
              backend, test_case.name, "mforce", candidate.mforce,
              oracle.mforce, budgets.mforce) && ok;
-    ok = report_field(
-             backend, test_case.name, "tau", candidate.tau,
-             oracle.tau, budgets.tau) && ok;
     ok = report_field(
              backend, test_case.name, "spin_transfer", candidate.spin_transfer,
              oracle.spin_transfer, budgets.mforce) && ok;
