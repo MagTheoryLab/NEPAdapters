@@ -25,8 +25,42 @@ def read_xyz_input(path, type_map):
     return types, positions, box
 
 
-def max_error(actual, expected):
-    return float(np.max(np.abs(np.asarray(actual) - np.asarray(expected))))
+def error_stats(actual, expected, atol, rtol):
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    if actual.shape != expected.shape:
+        raise AssertionError(
+            f"shape mismatch: actual={actual.shape} expected={expected.shape}"
+        )
+    difference = np.abs(actual - expected)
+    flat_index = int(np.argmax(difference))
+    index = np.unravel_index(flat_index, difference.shape)
+    reference_scale = float(np.max(np.abs(expected)))
+    relative_floor = max(1.0e-12, reference_scale * 1.0e-8)
+    relative = difference / np.maximum(np.abs(expected), relative_floor)
+    limit = atol + rtol * np.abs(expected)
+    return {
+        "max_abs": float(difference[index]),
+        "max_rel": float(np.max(relative)),
+        "rms": float(np.sqrt(np.mean(np.square(difference)))),
+        "index": tuple(int(value) for value in index),
+        "actual": float(actual[index]),
+        "expected": float(expected[index]),
+        "violations": int(np.count_nonzero(difference > limit)),
+    }
+
+
+def require_within_budget(label, actual, expected, atol, rtol):
+    stats = error_stats(actual, expected, atol, rtol)
+    if stats["violations"]:
+        raise AssertionError(
+            f"{label} mismatch: max_abs={stats['max_abs']:.12g} "
+            f"max_rel={stats['max_rel']:.12g} rms={stats['rms']:.12g} "
+            f"index={stats['index']} actual={stats['actual']:.12g} "
+            f"expected={stats['expected']:.12g} "
+            f"violations={stats['violations']}"
+        )
+    return stats
 
 
 def main():
@@ -59,18 +93,20 @@ def main():
         )
         if not all(np.all(np.isfinite(values)) for values in (potentials, forces, virials)):
             raise AssertionError("qNEP CUDA output contains non-finite values")
-        force_error = max_error(forces, force_reference)
-        virial_error = max_error(virials, virial_reference)
         descriptors = model.descriptors(types, box, positions, atom_counts)
-        descriptor_error = max_error(descriptors, descriptor_reference)
-        if force_error > 5.0e-3:
-            raise AssertionError(f"qNEP force mismatch: max_abs_error={force_error:.12g}")
-        if virial_error > 1.0e-2:
-            raise AssertionError(f"qNEP virial mismatch: max_abs_error={virial_error:.12g}")
-        if descriptor_error > 5.0e-4:
-            raise AssertionError(
-                f"qNEP descriptor mismatch: max_abs_error={descriptor_error:.12g}"
-            )
+        force_stats = require_within_budget(
+            "qNEP force", forces, force_reference, 2.0e-4, 2.0e-6
+        )
+        virial_stats = require_within_budget(
+            "qNEP virial", virials, virial_reference, 1.5e-3, 2.0e-6
+        )
+        descriptor_stats = require_within_budget(
+            "qNEP descriptor",
+            descriptors,
+            descriptor_reference,
+            1.0e-5,
+            2.0e-6,
+        )
 
         os.environ["NEP_ADAPTERS_QNEP_KSPACE"] = "pppm"
         try:
@@ -86,9 +122,15 @@ def main():
     print(
         "python CUDA qNEP:",
         f"atoms={len(types)}",
-        f"force_max_abs_error={force_error:.12g}",
-        f"virial_max_abs_error={virial_error:.12g}",
-        f"descriptor_max_abs_error={descriptor_error:.12g}",
+        f"force_max_abs={force_stats['max_abs']:.12g}",
+        f"force_rms={force_stats['rms']:.12g}",
+        f"force_worst={force_stats['index']}",
+        f"virial_max_abs={virial_stats['max_abs']:.12g}",
+        f"virial_rms={virial_stats['rms']:.12g}",
+        f"virial_worst={virial_stats['index']}",
+        f"descriptor_max_abs={descriptor_stats['max_abs']:.12g}",
+        f"descriptor_rms={descriptor_stats['rms']:.12g}",
+        f"descriptor_worst={descriptor_stats['index']}",
         "pppm=disabled-fail-closed",
     )
     return 0

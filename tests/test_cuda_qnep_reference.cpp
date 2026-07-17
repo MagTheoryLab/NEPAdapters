@@ -181,13 +181,13 @@ int main() {
   }
 
   const bool force_ok =
-      near_all(forces, force_ref, 5.0e-3, "qNEP force", 3);
+      near_all(forces, force_ref, 2.0e-4, "qNEP force", 3);
   const bool virial_ok =
-      near_all(total_virial, total_virial_ref, 1.0e-2, "qNEP virial", 9);
+      near_all(total_virial, total_virial_ref, 7.0e-3, "qNEP virial", 9);
   const bool per_atom_virial_ok = near_all(
       per_atom_virial,
       per_atom_virial_ref,
-      1.0e-2,
+      1.5e-3,
       "qNEP per-atom virial",
       9);
   return force_ok && virial_ok && per_atom_virial_ok ? EXIT_SUCCESS

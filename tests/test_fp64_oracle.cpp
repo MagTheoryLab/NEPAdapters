@@ -1,4 +1,5 @@
 #include "nep_adapters/api.h"
+#include "nep_adapters/capability.hpp"
 #include "nep_adapters/engines/cpu.hpp"
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
 #include "nep_adapters/engines/cuda.hpp"
@@ -58,6 +59,7 @@ struct Prediction {
   std::vector<double> tau;
   std::vector<double> spin_transfer;
   std::vector<double> descriptor;
+  std::vector<double> charge;
 };
 
 struct LammpsPrediction {
@@ -85,6 +87,7 @@ struct Budgets {
   Budget tau;
   Budget descriptor;
   Budget radial_basis_sum;
+  Budget charge;
 };
 
 struct ErrorStats {
@@ -93,6 +96,7 @@ struct ErrorStats {
   double rms = 0.0;
   std::uint64_t max_float_ulp = 0;
   std::size_t max_index = 0;
+  double relative_floor = 1.0e-12;
   bool finite = true;
 };
 
@@ -132,6 +136,12 @@ ErrorStats error_stats(
     out.finite = false;
     return out;
   }
+  double reference_scale = 0.0;
+  for (double value : reference) {
+    reference_scale = std::max(reference_scale, std::abs(value));
+  }
+  const double near_zero_floor = std::max(1.0e-12, reference_scale * 1.0e-8);
+  out.relative_floor = near_zero_floor;
   long double sum_sq = 0.0L;
   for (std::size_t i = 0; i < candidate.size(); ++i) {
     if (!std::isfinite(candidate[i]) || !std::isfinite(reference[i])) {
@@ -139,7 +149,7 @@ ErrorStats error_stats(
       continue;
     }
     const double abs_error = std::abs(candidate[i] - reference[i]);
-    const double denominator = std::max(std::abs(reference[i]), 1.0e-12);
+    const double denominator = std::max(std::abs(reference[i]), near_zero_floor);
     const double rel_error = abs_error / denominator;
     const std::uint64_t ulp = float_ulp_distance(candidate[i], reference[i]);
     if (abs_error > out.max_abs) {
@@ -179,9 +189,18 @@ bool report_field(
     const std::string& field,
     const std::vector<double>& candidate,
     const std::vector<double>& reference,
-    const Budget& budget) {
+    const Budget& budget,
+    std::size_t columns = 0) {
   const ErrorStats stats = error_stats(candidate, reference);
   const bool ok = stats.finite && within_budget(candidate, reference, budget);
+  std::size_t violations = 0;
+  for (std::size_t i = 0; i < candidate.size() && i < reference.size(); ++i) {
+    const double limit = budget.atol + budget.rtol * std::abs(reference[i]);
+    if (!std::isfinite(candidate[i]) || !std::isfinite(reference[i]) ||
+        std::abs(candidate[i] - reference[i]) > limit) {
+      ++violations;
+    }
+  }
   std::cout << std::scientific << std::setprecision(9)
             << "FP64_ACCURACY backend=" << backend
             << " case=" << case_name
@@ -189,9 +208,15 @@ bool report_field(
             << " count=" << candidate.size()
             << " max_abs=" << stats.max_abs
             << " max_rel=" << stats.max_rel
+            << " rel_floor=" << stats.relative_floor
             << " rms=" << stats.rms
             << " max_float_ulp=" << stats.max_float_ulp
             << " max_index=" << stats.max_index
+            << " max_row="
+            << (columns > 0 ? stats.max_index / columns : stats.max_index)
+            << " max_component="
+            << (columns > 0 ? stats.max_index % columns : 0)
+            << " violations=" << violations
             << " candidate_at_max="
             << (stats.max_index < candidate.size()
                     ? candidate[stats.max_index]
@@ -394,6 +419,10 @@ Prediction evaluate_batch(
       out.spin_transfer.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
     }
   }
+  if (nep_adapters::has_capability(
+          info.capabilities, nep_adapters::Capability::charge)) {
+    out.charge.assign(atom_count, 0.0);
+  }
 
   NepaFindForceResult result{};
   result.energy_per_structure = &out.energy;
@@ -405,6 +434,7 @@ Prediction evaluate_batch(
   result.tau_aos3 = out.tau.empty() ? nullptr : out.tau.data();
   result.spin_transfer_per_atom_row_major9 =
       out.spin_transfer.empty() ? nullptr : out.spin_transfer.data();
+  result.charge_per_atom = out.charge.empty() ? nullptr : out.charge.data();
   require_status(runner.find_force_batch(batch, result), "find_force_batch");
 
   if (include_descriptors) {
@@ -459,6 +489,21 @@ CaseData make_dense_nonmag_case() {
   }
   const double length = width * spacing;
   out.box = {length, 0.0, 0.0, 0.0, length, 0.0, 0.0, 0.0, length};
+  out.pbc = {1, 1, 1};
+  return out;
+}
+
+CaseData make_qnep_fixture() {
+  const std::string model_path = NEP_ADAPTERS_FP64_QNEP_MODEL_PATH;
+  const auto type_map = cpu_test::read_type_map(model_path);
+  const cpu_test::Frame frame =
+      cpu_test::read_xyz_in(NEP_ADAPTERS_FP64_QNEP_XYZ_PATH, type_map);
+  CaseData out;
+  out.name = "qnep_periodic_fixture";
+  out.model_path = model_path;
+  out.types = frame.types;
+  out.positions = frame.positions_aos3;
+  std::copy(frame.box, frame.box + 9, out.box.begin());
   out.pbc = {1, 1, 1};
   return out;
 }
@@ -589,6 +634,39 @@ bool validate_spin_frozen_reference(
   return ok;
 }
 
+bool validate_qnep_frozen_reference(
+    const Prediction& oracle,
+    const CaseData& test_case) {
+  const cpu_test::Matrix force =
+      cpu_test::read_plain_matrix(NEP_ADAPTERS_FP64_QNEP_FORCE_PATH, 3);
+  const cpu_test::Matrix atom_virial =
+      cpu_test::read_plain_matrix(NEP_ADAPTERS_FP64_QNEP_VIRIAL_PATH, 9);
+  const std::size_t descriptor_dim =
+      oracle.descriptor.size() / static_cast<std::size_t>(test_case.atom_count());
+  const cpu_test::Matrix descriptor = cpu_test::read_plain_matrix(
+      NEP_ADAPTERS_FP64_QNEP_DESCRIPTOR_PATH, descriptor_dim);
+  const double force_diff = max_abs_diff(oracle.force, force.values);
+  const double virial_diff = max_abs_diff(oracle.atom_virial, atom_virial.values);
+  const double descriptor_diff = max_abs_diff(oracle.descriptor, descriptor.values);
+  const double charge_sum =
+      std::accumulate(oracle.charge.begin(), oracle.charge.end(), 0.0);
+  const bool shapes_ok =
+      force.rows == static_cast<std::size_t>(test_case.atom_count()) &&
+      atom_virial.rows == static_cast<std::size_t>(test_case.atom_count()) &&
+      descriptor.rows == static_cast<std::size_t>(test_case.atom_count());
+  const bool ok = shapes_ok && force_diff <= 1.0e-10 &&
+                  virial_diff <= 1.0e-10 && descriptor_diff <= 1.0e-10 &&
+                  std::abs(charge_sum) <= 1.0e-10;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_ORACLE_SELF_CHECK case=" << test_case.name
+            << " force=" << force_diff
+            << " atom_virial=" << virial_diff
+            << " descriptor=" << descriptor_diff
+            << " charge_sum=" << std::abs(charge_sum)
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
 CaseData displaced_case(
     const CaseData& base,
     bool spin_coordinate,
@@ -600,13 +678,30 @@ CaseData displaced_case(
   return out;
 }
 
-CaseData strained_case(const CaseData& base, int axis, double strain) {
+CaseData deformed_case(
+    const CaseData& base,
+    int raw_virial_component,
+    double strain) {
+  if (raw_virial_component < 0 || raw_virial_component >= 9) {
+    throw std::runtime_error("invalid raw9 virial component");
+  }
+  // raw9 stores r_position_axis * F_force_axis.  A deformation
+  // r_force_axis += strain * r_position_axis therefore has negative energy
+  // derivative raw9[position_axis, force_axis].  Transform the cell with the
+  // same deformation so periodic and triclinic structures remain consistent.
+  const int position_axis = raw_virial_component / 3;
+  const int force_axis = raw_virial_component % 3;
   CaseData out = base;
   for (int atom = 0; atom < out.atom_count(); ++atom) {
-    out.positions[3 * static_cast<std::size_t>(atom) + axis] *= 1.0 + strain;
+    const std::size_t offset = 3 * static_cast<std::size_t>(atom);
+    out.positions[offset + force_axis] =
+        base.positions[offset + force_axis] +
+        strain * base.positions[offset + position_axis];
   }
   for (int column = 0; column < 3; ++column) {
-    out.box[3 * axis + column] *= 1.0 + strain;
+    out.box[3 * force_axis + column] =
+        base.box[3 * force_axis + column] +
+        strain * base.box[3 * position_axis + column];
   }
   return out;
 }
@@ -616,60 +711,259 @@ double energy_only(Runner& runner, const CaseData& test_case) {
   return evaluate_batch(runner, test_case, false).energy;
 }
 
-template <typename Runner>
-bool validate_oracle_derivatives(
-    Runner& oracle,
-    const CaseData& test_case) {
-  const Prediction base = evaluate_batch(oracle, test_case, false);
-  constexpr double h = 2.0e-4;
-  double force_diff = 0.0;
-  for (std::size_t coordinate = 0; coordinate < test_case.positions.size(); ++coordinate) {
-    const double em2 = energy_only(
-        oracle, displaced_case(test_case, false, coordinate, -2.0 * h));
-    const double em1 = energy_only(
-        oracle, displaced_case(test_case, false, coordinate, -h));
-    const double ep1 = energy_only(
-        oracle, displaced_case(test_case, false, coordinate, h));
-    const double ep2 = energy_only(
-        oracle, displaced_case(test_case, false, coordinate, 2.0 * h));
-    const double finite_difference_force =
+struct DerivativeScan {
+  std::array<double, 6> estimates{};
+  double selected = 0.0;
+  double selected_step = 0.0;
+  double plateau_error = 0.0;
+  std::size_t selected_index = 1;
+};
+
+struct DerivativeFieldSummary {
+  double max_analytic_error = 0.0;
+  double max_plateau_error = 0.0;
+  std::size_t worst_analytic_index = 0;
+  std::size_t worst_plateau_index = 0;
+  double worst_analytic_value = 0.0;
+  DerivativeScan worst_analytic_scan;
+};
+
+struct DerivativeBudgets {
+  Budget force;
+  Budget mforce;
+  Budget virial;
+  double force_plateau = 0.0;
+  double mforce_plateau = 0.0;
+  double virial_plateau = 0.0;
+  double force_sum = 0.0;
+  double virial_sum = 0.0;
+  double virial_symmetry = 0.0;
+};
+
+struct DerivativeReference {
+  std::vector<std::size_t> force_coordinates;
+  std::vector<double> force;
+  std::vector<double> mforce;
+  std::vector<double> virial;
+};
+
+struct CandidateDerivativeBudgets {
+  Budget force;
+  Budget mforce;
+  Budget virial;
+  double force_sum = 0.0;
+  double virial_sum = 0.0;
+  double virial_symmetry = 0.0;
+};
+
+constexpr std::array<double, 6> derivative_steps = {
+    3.0e-2, 1.0e-2, 3.0e-3, 1.0e-3, 3.0e-4, 1.0e-4};
+
+template <typename Runner, typename Perturber>
+DerivativeScan scan_negative_energy_derivative(
+    Runner& runner,
+    Perturber&& perturb) {
+  DerivativeScan out;
+  for (std::size_t step = 0; step < derivative_steps.size(); ++step) {
+    const double h = derivative_steps[step];
+    const double em2 = energy_only(runner, perturb(-2.0 * h));
+    const double em1 = energy_only(runner, perturb(-h));
+    const double ep1 = energy_only(runner, perturb(h));
+    const double ep2 = energy_only(runner, perturb(2.0 * h));
+    out.estimates[step] =
         (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
-    force_diff = std::max(
-        force_diff,
-        std::abs(base.force[coordinate] - finite_difference_force));
   }
 
-  double mforce_diff = 0.0;
-  if (test_case.is_spin()) {
-    for (std::size_t coordinate = 0; coordinate < test_case.spins.size(); ++coordinate) {
-      const double em2 = energy_only(
-          oracle, displaced_case(test_case, true, coordinate, -2.0 * h));
-      const double em1 = energy_only(
-          oracle, displaced_case(test_case, true, coordinate, -h));
-      const double ep1 = energy_only(
-          oracle, displaced_case(test_case, true, coordinate, h));
-      const double ep2 = energy_only(
-          oracle, displaced_case(test_case, true, coordinate, 2.0 * h));
-      const double finite_difference_mforce =
-          (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
-      mforce_diff = std::max(
-          mforce_diff,
-          std::abs(base.mforce[coordinate] - finite_difference_mforce));
+  // Select a plateau using only agreement between adjacent step sizes.  The
+  // analytic force/virial is deliberately excluded from this choice so a bad
+  // analytic result cannot make the finite-difference test pick a favorable h.
+  std::size_t selected = 1;
+  double best_stability = std::numeric_limits<double>::infinity();
+  for (std::size_t middle = 1; middle + 1 < derivative_steps.size(); ++middle) {
+    const double stability = std::max(
+        std::abs(out.estimates[middle] - out.estimates[middle - 1]),
+        std::abs(out.estimates[middle + 1] - out.estimates[middle]));
+    if (stability < best_stability) {
+      best_stability = stability;
+      selected = middle;
+    }
+  }
+  out.selected = out.estimates[selected];
+  out.selected_step = derivative_steps[selected];
+  out.plateau_error = best_stability;
+  out.selected_index = selected;
+  return out;
+}
+
+void update_derivative_summary(
+    DerivativeFieldSummary& summary,
+    std::size_t index,
+    double analytic,
+    const DerivativeScan& scan) {
+  const double analytic_error = std::abs(analytic - scan.selected);
+  if (analytic_error > summary.max_analytic_error) {
+    summary.max_analytic_error = analytic_error;
+    summary.worst_analytic_index = index;
+    summary.worst_analytic_value = analytic;
+    summary.worst_analytic_scan = scan;
+  }
+  if (scan.plateau_error > summary.max_plateau_error) {
+    summary.max_plateau_error = scan.plateau_error;
+    summary.worst_plateau_index = index;
+  }
+}
+
+bool derivative_field_passes(
+    const DerivativeFieldSummary& summary,
+    const std::vector<double>& analytic,
+    const Budget& budget,
+    double plateau_budget) {
+  const double reference = analytic.at(summary.worst_analytic_index);
+  return summary.max_analytic_error <=
+             budget.atol + budget.rtol * std::abs(reference) &&
+         summary.max_plateau_error <= plateau_budget;
+}
+
+std::vector<std::size_t> all_coordinates(std::size_t count) {
+  std::vector<std::size_t> out(count);
+  std::iota(out.begin(), out.end(), 0);
+  return out;
+}
+
+std::vector<std::size_t> qnep_force_coordinates(const CaseData& test_case) {
+  std::vector<std::size_t> atoms = {
+      0,
+      static_cast<std::size_t>(test_case.atom_count() / 2),
+      static_cast<std::size_t>(test_case.atom_count() - 1),
+      100};
+  for (std::size_t atom = 0; atom < test_case.types.size(); ++atom) {
+    if (test_case.types[atom] != test_case.types.front()) {
+      atoms.push_back(atom);
+      break;
+    }
+  }
+  std::sort(atoms.begin(), atoms.end());
+  atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
+  std::vector<std::size_t> coordinates;
+  for (const std::size_t atom : atoms) {
+    if (atom >= test_case.types.size()) {
+      continue;
+    }
+    for (int component = 0; component < 3; ++component) {
+      coordinates.push_back(3 * atom + component);
+    }
+  }
+  return coordinates;
+}
+
+std::vector<double> sum_atom_virial_raw9(const Prediction& prediction) {
+  std::vector<double> out(9, 0.0);
+  for (std::size_t atom = 0; atom < prediction.atom_virial.size() / 9; ++atom) {
+    for (int component = 0; component < 9; ++component) {
+      out[component] += prediction.atom_virial[9 * atom + component];
+    }
+  }
+  return out;
+}
+
+double raw9_symmetry_error(const std::vector<double>& virial) {
+  if (virial.size() != 9) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return std::max({
+      std::abs(virial[1] - virial[3]),
+      std::abs(virial[2] - virial[6]),
+      std::abs(virial[5] - virial[7])});
+}
+
+void report_derivative_field(
+    const std::string& backend,
+    const CaseData& test_case,
+    const std::string& field,
+    const DerivativeFieldSummary& summary,
+    bool passed) {
+  const DerivativeScan& scan = summary.worst_analytic_scan;
+  const std::size_t selected = scan.selected_index;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_DERIVATIVE backend=" << backend
+            << " case=" << test_case.name
+            << " field=" << field
+            << " max_abs=" << summary.max_analytic_error
+            << " worst_index=" << summary.worst_analytic_index
+            << " analytic=" << summary.worst_analytic_value
+            << " selected_h=" << scan.selected_step
+            << " fd_prev=" << scan.estimates[selected - 1]
+            << " fd_selected=" << scan.estimates[selected]
+            << " fd_next=" << scan.estimates[selected + 1]
+            << " max_plateau=" << summary.max_plateau_error
+            << " worst_plateau_index=" << summary.worst_plateau_index
+            << " status=" << (passed ? "pass" : "fail") << '\n';
+}
+
+template <typename Runner>
+bool validate_derivative_contract(
+    const std::string& backend,
+    Runner& runner,
+    const CaseData& test_case,
+    const std::vector<std::size_t>& force_coordinates,
+    const DerivativeBudgets& budgets,
+    DerivativeReference* reference = nullptr) {
+  const Prediction base = evaluate_batch(runner, test_case, false);
+  if (reference != nullptr) {
+    reference->force_coordinates = force_coordinates;
+    reference->force.clear();
+    reference->mforce.clear();
+    reference->virial.clear();
+  }
+  DerivativeFieldSummary force_summary;
+  for (const std::size_t coordinate : force_coordinates) {
+    if (coordinate >= test_case.positions.size()) {
+      throw std::runtime_error("force derivative coordinate is out of range");
+    }
+    const DerivativeScan scan = scan_negative_energy_derivative(
+        runner,
+        [&](double delta) {
+          return displaced_case(test_case, false, coordinate, delta);
+        });
+    update_derivative_summary(
+        force_summary, coordinate, base.force[coordinate], scan);
+    if (reference != nullptr) {
+      reference->force.push_back(scan.selected);
     }
   }
 
-  double virial_diff = 0.0;
-  for (int axis = 0; axis < 3; ++axis) {
-    const double em2 = energy_only(oracle, strained_case(test_case, axis, -2.0 * h));
-    const double em1 = energy_only(oracle, strained_case(test_case, axis, -h));
-    const double ep1 = energy_only(oracle, strained_case(test_case, axis, h));
-    const double ep2 = energy_only(oracle, strained_case(test_case, axis, 2.0 * h));
-    // Public NEP virial follows the negative strain derivative convention.
-    const double finite_difference_virial =
-        (-em2 + 8.0 * em1 - 8.0 * ep1 + ep2) / (12.0 * h);
-    virial_diff = std::max(
-        virial_diff,
-        std::abs(base.virial[4 * axis] - finite_difference_virial));
+  DerivativeFieldSummary mforce_summary;
+  if (test_case.is_spin()) {
+    for (std::size_t coordinate = 0; coordinate < test_case.spins.size();
+         ++coordinate) {
+      const DerivativeScan scan = scan_negative_energy_derivative(
+          runner,
+          [&](double delta) {
+            return displaced_case(test_case, true, coordinate, delta);
+          });
+      update_derivative_summary(
+          mforce_summary, coordinate, base.mforce[coordinate], scan);
+      if (reference != nullptr) {
+        reference->mforce.push_back(scan.selected);
+      }
+    }
+  }
+
+  DerivativeFieldSummary virial_summary;
+  for (int component = 0; component < 9; ++component) {
+    const DerivativeScan scan = scan_negative_energy_derivative(
+        runner,
+        [&](double strain) {
+          return deformed_case(test_case, component, strain);
+        });
+    update_derivative_summary(
+        virial_summary,
+        static_cast<std::size_t>(component),
+        base.virial[component],
+        scan);
+    if (reference != nullptr) {
+      reference->virial.push_back(scan.selected);
+    }
   }
 
   std::array<double, 3> force_sum{};
@@ -682,16 +976,110 @@ bool validate_oracle_derivatives(
   const double force_sum_max = std::max(
       std::abs(force_sum[0]),
       std::max(std::abs(force_sum[1]), std::abs(force_sum[2])));
-  const bool ok = force_diff <= 2.0e-7 && mforce_diff <= 2.0e-7 &&
-                  virial_diff <= 2.0e-7 && force_sum_max <= 2.0e-10;
+
+  const double virial_sum_error =
+      max_abs_diff(base.virial, sum_atom_virial_raw9(base));
+  const double virial_symmetry = raw9_symmetry_error(base.virial);
+  // Holding spin vectors fixed while deforming coordinates can produce an
+  // antisymmetric spin virial.  Symmetry is therefore a valid invariant only
+  // for the non-spin models in this test.
+  const bool symmetry_ok =
+      test_case.is_spin() || virial_symmetry <= budgets.virial_symmetry;
+  const bool force_ok = derivative_field_passes(
+      force_summary, base.force, budgets.force, budgets.force_plateau);
+  const bool mforce_ok = !test_case.is_spin() || derivative_field_passes(
+      mforce_summary, base.mforce, budgets.mforce, budgets.mforce_plateau);
+  const bool virial_ok = derivative_field_passes(
+      virial_summary, base.virial, budgets.virial, budgets.virial_plateau);
+  const bool invariants_ok =
+      force_sum_max <= budgets.force_sum &&
+      virial_sum_error <= budgets.virial_sum &&
+      symmetry_ok;
+  report_derivative_field(
+      backend, test_case, "force", force_summary, force_ok);
+  if (test_case.is_spin()) {
+    report_derivative_field(
+        backend, test_case, "mforce", mforce_summary, mforce_ok);
+  }
+  report_derivative_field(
+      backend, test_case, "virial_raw9", virial_summary, virial_ok);
   std::cout << std::scientific << std::setprecision(9)
-            << "FP64_ORACLE_DERIVATIVE case=" << test_case.name
-            << " force=" << force_diff
-            << " mforce=" << mforce_diff
-            << " virial_diag=" << virial_diff
+            << "FP64_DERIVATIVE_INVARIANTS backend=" << backend
+            << " case=" << test_case.name
             << " force_sum=" << force_sum_max
-            << " status=" << (ok ? "pass" : "fail") << '\n';
-  return ok;
+            << " virial_sum=" << virial_sum_error
+            << " virial_symmetry=" << virial_symmetry
+            << " status=" << (invariants_ok ? "pass" : "fail") << '\n';
+  return force_ok && mforce_ok && virial_ok && invariants_ok;
+}
+
+template <typename Runner>
+bool validate_candidate_against_derivative_reference(
+    const std::string& backend,
+    Runner& runner,
+    const CaseData& test_case,
+    const DerivativeReference& reference,
+    const CandidateDerivativeBudgets& budgets) {
+  const Prediction candidate = evaluate_batch(runner, test_case, false);
+  std::vector<double> sampled_force;
+  sampled_force.reserve(reference.force_coordinates.size());
+  for (const std::size_t coordinate : reference.force_coordinates) {
+    sampled_force.push_back(candidate.force.at(coordinate));
+  }
+
+  bool ok = report_field(
+      backend,
+      test_case.name,
+      "force_vs_fp64_fd",
+      sampled_force,
+      reference.force,
+      budgets.force);
+  if (test_case.is_spin()) {
+    ok = report_field(
+             backend,
+             test_case.name,
+             "mforce_vs_fp64_fd",
+             candidate.mforce,
+             reference.mforce,
+             budgets.mforce) && ok;
+  }
+  ok = report_field(
+           backend,
+           test_case.name,
+           "virial_raw9_vs_fp64_fd",
+           candidate.virial,
+           reference.virial,
+           budgets.virial,
+           9) && ok;
+
+  std::array<double, 3> force_sum{};
+  for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+    for (int component = 0; component < 3; ++component) {
+      force_sum[component] += candidate.force[
+          3 * static_cast<std::size_t>(atom) + component];
+    }
+  }
+  const double force_sum_max = std::max({
+      std::abs(force_sum[0]),
+      std::abs(force_sum[1]),
+      std::abs(force_sum[2])});
+  const double virial_sum_error =
+      max_abs_diff(candidate.virial, sum_atom_virial_raw9(candidate));
+  const double virial_symmetry = raw9_symmetry_error(candidate.virial);
+  const bool symmetry_ok =
+      test_case.is_spin() || virial_symmetry <= budgets.virial_symmetry;
+  const bool invariants_ok =
+      force_sum_max <= budgets.force_sum &&
+      virial_sum_error <= budgets.virial_sum &&
+      symmetry_ok;
+  std::cout << std::scientific << std::setprecision(9)
+            << "FP64_FD_CANDIDATE_INVARIANTS backend=" << backend
+            << " case=" << test_case.name
+            << " force_sum=" << force_sum_max
+            << " virial_sum=" << virial_sum_error
+            << " virial_symmetry=" << virial_symmetry
+            << " status=" << (invariants_ok ? "pass" : "fail") << '\n';
+  return ok && invariants_ok;
 }
 
 Budgets cpu_budgets() {
@@ -705,6 +1093,7 @@ Budgets cpu_budgets() {
       {5.0e-8, 2.0e-11},
       {2.0e-8, 2.0e-11},
       {2.0e-8, 2.0e-11},
+      {5.0e-8, 2.0e-11},
   };
 }
 
@@ -719,6 +1108,72 @@ Budgets cuda_budgets() {
       {1.0e-3, 0.0},
       {5.0e-4, 0.0},
       {2.0e-6, 2.0e-6},
+      {1.0e-3, 0.0},
+  };
+}
+
+Budgets qnep_cuda_budgets() {
+  return {
+      {2.0e-6, 2.0e-6},
+      {5.0e-6, 2.0e-6},
+      {2.0e-4, 2.0e-6},
+      {7.0e-3, 2.0e-6},
+      {1.5e-3, 2.0e-6},
+      {0.0, 0.0},
+      {0.0, 0.0},
+      {1.0e-5, 2.0e-6},
+      {5.0e-6, 2.0e-6},
+      {2.0e-6, 2.0e-6},
+  };
+}
+
+DerivativeBudgets fp64_derivative_budgets() {
+  return {
+      {2.0e-7, 2.0e-10},
+      {2.0e-7, 2.0e-10},
+      {2.0e-7, 2.0e-10},
+      5.0e-8,
+      5.0e-8,
+      5.0e-7,
+      2.0e-10,
+      2.0e-10,
+      2.0e-10,
+  };
+}
+
+DerivativeBudgets qnep_fp64_derivative_budgets() {
+  return {
+      {5.0e-5, 2.0e-8},
+      {0.0, 0.0},
+      {3.8e-3, 2.0e-8},
+      4.0e-5,
+      0.0,
+      3.0e-3,
+      2.0e-10,
+      2.0e-10,
+      2.0e-10,
+  };
+}
+
+CandidateDerivativeBudgets cuda_spin_derivative_budgets() {
+  return {
+      {2.0e-6, 2.0e-6},
+      {2.0e-7, 2.0e-6},
+      {5.0e-6, 2.0e-6},
+      1.0e-6,
+      1.0e-8,
+      0.0,
+  };
+}
+
+CandidateDerivativeBudgets qnep_cuda_derivative_budgets() {
+  return {
+      {1.0e-4, 2.0e-6},
+      {0.0, 0.0},
+      {7.0e-3, 2.0e-6},
+      1.0e-5,
+      1.0e-8,
+      5.0e-6,
   };
 }
 
@@ -743,18 +1198,20 @@ bool compare_prediction(
            oracle.potential, budgets.potential) && ok;
   ok = report_field(
            backend, test_case.name, "force", candidate.force,
-           oracle.force, budgets.force) && ok;
+           oracle.force, budgets.force, 3) && ok;
   ok = report_field(
            backend, test_case.name, "virial", candidate.virial,
-           oracle.virial, budgets.virial) && ok;
+           oracle.virial, budgets.virial, 9) && ok;
   if (compare_atom_virial) {
     ok = report_field(
              backend, test_case.name, "atom_virial", candidate.atom_virial,
-             oracle.atom_virial, budgets.atom_virial) && ok;
+             oracle.atom_virial, budgets.atom_virial, 9) && ok;
   }
   ok = report_field(
            backend, test_case.name, "descriptor", candidate.descriptor,
-           oracle.descriptor, budgets.descriptor) && ok;
+           oracle.descriptor, budgets.descriptor,
+           candidate.descriptor.size() /
+               static_cast<std::size_t>(test_case.atom_count())) && ok;
   const int radial_dim = read_radial_descriptor_dim(test_case.model_path);
   ok = report_field(
            backend,
@@ -764,7 +1221,12 @@ bool compare_prediction(
                candidate.descriptor, test_case.atom_count(), radial_dim),
            radial_descriptor_channels(
                oracle.descriptor, test_case.atom_count(), radial_dim),
-           budgets.radial_basis_sum) && ok;
+           budgets.radial_basis_sum, radial_dim) && ok;
+  if (!oracle.charge.empty()) {
+    ok = report_field(
+             backend, test_case.name, "charge", candidate.charge,
+             oracle.charge, budgets.charge, 1) && ok;
+  }
   if (test_case.is_spin()) {
     ok = report_field(
              backend, test_case.name, "mforce", candidate.mforce,
@@ -1932,7 +2394,12 @@ int main() {
         evaluate_batch(nonmag_oracle, nonmag_fixture);
     ok = validate_nonmag_frozen_reference(
              nonmag_fixture_oracle, nonmag_fixture) && ok;
-    ok = validate_oracle_derivatives(nonmag_oracle, nonmag_fixture) && ok;
+    ok = validate_derivative_contract(
+             "fp64_cpu",
+             nonmag_oracle,
+             nonmag_fixture,
+             all_coordinates(nonmag_fixture.positions.size()),
+             fp64_derivative_budgets()) && ok;
 
     const CaseData dense_nonmag = make_dense_nonmag_case();
     const Prediction dense_nonmag_oracle =
@@ -1941,6 +2408,21 @@ int main() {
         {nonmag_fixture, nonmag_fixture_oracle},
         {dense_nonmag, dense_nonmag_oracle},
     };
+
+    OracleRunner qnep_oracle(NEP_ADAPTERS_FP64_QNEP_MODEL_PATH);
+    const CaseData qnep_fixture = make_qnep_fixture();
+    const Prediction qnep_fixture_oracle =
+        evaluate_batch(qnep_oracle, qnep_fixture);
+    ok = validate_qnep_frozen_reference(
+             qnep_fixture_oracle, qnep_fixture) && ok;
+    DerivativeReference qnep_derivative_reference;
+    ok = validate_derivative_contract(
+             "fp64_cpu",
+             qnep_oracle,
+             qnep_fixture,
+             qnep_force_coordinates(qnep_fixture),
+             qnep_fp64_derivative_budgets(),
+             &qnep_derivative_reference) && ok;
 
     OracleRunner spin_oracle(NEP_ADAPTERS_FP64_SPIN_MODEL_PATH);
     const CaseData spin_reference = make_spin_reference_case();
@@ -1951,7 +2433,14 @@ int main() {
     const CaseData spin_isolated_periodic = make_spin_finite_difference_case();
     const Prediction spin_isolated_periodic_oracle =
         evaluate_batch(spin_oracle, spin_isolated_periodic);
-    ok = validate_oracle_derivatives(spin_oracle, spin_isolated_periodic) && ok;
+    DerivativeReference spin_derivative_reference;
+    ok = validate_derivative_contract(
+             "fp64_cpu",
+             spin_oracle,
+             spin_isolated_periodic,
+             all_coordinates(spin_isolated_periodic.positions.size()),
+             fp64_derivative_budgets(),
+             &spin_derivative_reference) && ok;
     const CaseData dense_spin = make_dense_spin_case();
     const Prediction dense_spin_oracle = evaluate_batch(spin_oracle, dense_spin);
     const std::vector<std::pair<CaseData, Prediction>> spin_cases = {
@@ -1964,6 +2453,13 @@ int main() {
              cpu_budgets(),
              nonmag_cases,
              spin_cases) && ok;
+    ApiRunner cpu_qnep("cpu", qnep_fixture.model_path);
+    ok = compare_prediction(
+             "cpu",
+             qnep_fixture,
+             evaluate_batch(cpu_qnep, qnep_fixture),
+             qnep_fixture_oracle,
+             cpu_budgets()) && ok;
 
     CaseData nonmag_lammps = nonmag_fixture;
     nonmag_lammps.name = "nonmag_isolated_periodic";
@@ -1992,6 +2488,19 @@ int main() {
              cuda_budgets(),
              nonmag_cases,
              spin_cases) && ok;
+    ApiRunner cuda_qnep("cuda", qnep_fixture.model_path);
+    ok = compare_prediction(
+             "cuda",
+             qnep_fixture,
+             evaluate_batch(cuda_qnep, qnep_fixture),
+             qnep_fixture_oracle,
+             qnep_cuda_budgets()) && ok;
+    ok = validate_candidate_against_derivative_reference(
+             "cuda",
+             cuda_qnep,
+             qnep_fixture,
+             qnep_derivative_reference,
+             qnep_cuda_derivative_budgets()) && ok;
     ApiRunner cuda_nonmag("cuda", nonmag_lammps.model_path);
     ok = run_lammps_case(
              "cuda",
@@ -2013,6 +2522,12 @@ int main() {
              nonmag_oracle,
              dense_nonmag_lammps) && ok;
     ApiRunner cuda_spin("cuda", spin_isolated_periodic.model_path);
+    ok = validate_candidate_against_derivative_reference(
+             "cuda",
+             cuda_spin,
+             spin_isolated_periodic,
+             spin_derivative_reference,
+             cuda_spin_derivative_budgets()) && ok;
     ok = validate_spin_heat_current_host_paths(
              "cuda", cuda_spin, spin_oracle, spin_isolated_periodic,
              2.0e-4) && ok;

@@ -162,9 +162,9 @@ int main(int argc, char** argv) {
   const double charge_sum =
       std::accumulate(charge.begin(), charge.end(), 0.0);
 #if defined(NEP_ADAPTERS_REFERENCE_CUDA)
-  constexpr double force_tolerance = 5.0e-3;
-  constexpr double virial_tolerance = 1.0e-2;
-  constexpr double descriptor_tolerance = 5.0e-4;
+  constexpr double force_tolerance = 2.0e-4;
+  constexpr double virial_tolerance = 1.5e-3;
+  constexpr double descriptor_tolerance = 1.0e-5;
   constexpr double sum_tolerance = 1.0e-6;
 #else
   constexpr double force_tolerance = 1.0e-10;

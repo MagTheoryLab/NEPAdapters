@@ -620,6 +620,11 @@ if(TARGET NEPAdapters::cpu)
       NEP_ADAPTERS_FP64_MODEL_PATH="${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
       NEP_ADAPTERS_FP64_XYZ_PATH="${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
       NEP_ADAPTERS_FP64_DESCRIPTOR_PATH="${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/descriptor.txt"
+      NEP_ADAPTERS_FP64_QNEP_MODEL_PATH="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt"
+      NEP_ADAPTERS_FP64_QNEP_XYZ_PATH="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in"
+      NEP_ADAPTERS_FP64_QNEP_FORCE_PATH="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/force_analytical_ref.out"
+      NEP_ADAPTERS_FP64_QNEP_VIRIAL_PATH="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/virial_ref.out"
+      NEP_ADAPTERS_FP64_QNEP_DESCRIPTOR_PATH="${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/descriptor_ref.out"
       NEP_ADAPTERS_FP64_SPIN_MODEL_PATH="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
       NEP_ADAPTERS_FP64_SPIN_REFERENCE_PATH="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
   )
@@ -658,7 +663,7 @@ if(TARGET NEPAdapters::cpu)
     NAME nep_adapters_fp64_oracle_test
     COMMAND nep_adapters_fp64_oracle_test)
   set_tests_properties(nep_adapters_fp64_oracle_test PROPERTIES
-    LABELS "parity;oracle;fp64;cpu;spin${NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL}")
+    LABELS "parity;oracle;fp64;cpu;qnep;spin${NEP_ADAPTERS_FP64_ORACLE_CUDA_LABEL}")
 
   add_executable(nep_adapters_cpu_spin_test
     test_cpu_spin.cpp)
