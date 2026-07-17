@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -99,10 +100,20 @@ def write_data(path, fixture, elements):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_input(path, plugin, model, elements, pair_style="nep/cpu"):
+def write_input(
+    path,
+    plugin,
+    model,
+    elements,
+    pair_style="nep/cpu",
+    plugin_load_mode="environment",
+):
     stress_cols = " ".join(f"c_satom[{index}]" for index in range(1, 7))
     atom_style = "atomic/kk" if pair_style == "nep/gpu" else "atomic"
     run_style = "verlet/kk" if pair_style == "nep/gpu" else "verlet"
+    plugin_command = (
+        [f"plugin load {plugin}"] if plugin_load_mode == "command" else []
+    )
     path.write_text(
         "\n".join(
             [
@@ -110,7 +121,7 @@ def write_input(path, plugin, model, elements, pair_style="nep/cpu"):
                 "units metal",
                 f"atom_style {atom_style}",
                 "boundary p p p",
-                f"plugin load {plugin}",
+                *plugin_command,
                 "read_data data.baseline",
                 f"run_style {run_style}",
                 f"pair_style {pair_style}",
@@ -132,10 +143,11 @@ def write_input(path, plugin, model, elements, pair_style="nep/cpu"):
     )
 
 
-def run_command(args, cwd):
+def run_command(args, cwd, env=None):
     completed = subprocess.run(
         args,
         cwd=cwd,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -143,6 +155,18 @@ def run_command(args, cwd):
     if completed.returncode != 0:
         raise RuntimeError(completed.stdout)
     return completed.stdout
+
+
+def plugin_environment(plugin):
+    plugin_path = Path(plugin)
+    if not plugin_path.name.endswith("plugin.so"):
+        raise ValueError(
+            "LAMMPS_PLUGIN_PATH auto-loading requires a filename ending in "
+            f"'plugin.so': {plugin_path.name}"
+        )
+    env = os.environ.copy()
+    env["LAMMPS_PLUGIN_PATH"] = str(plugin_path.parent)
+    return env
 
 
 def lammps_command(lmp, pair_style):
@@ -254,6 +278,15 @@ def main():
     parser.add_argument(
         "--pair-style", choices=("nep/cpu", "nep/gpu"), default="nep/cpu"
     )
+    parser.add_argument(
+        "--plugin-load-mode",
+        choices=("environment", "command"),
+        default="environment",
+        help=(
+            "Load through LAMMPS_PLUGIN_PATH by default; use 'command' only "
+            "to exercise an explicit plugin load line."
+        ),
+    )
     parser.add_argument("--work-dir", default="build-lammps-baseline-smoke")
     parser.add_argument("--energy-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--force-tolerance", type=float, default=1.0e-8)
@@ -278,11 +311,18 @@ def main():
         args.model,
         elements,
         args.pair_style,
+        args.plugin_load_mode,
     )
 
+    run_env = (
+        plugin_environment(args.plugin)
+        if args.plugin_load_mode == "environment"
+        else None
+    )
     screen = run_command(
         lammps_command(args.lmp, args.pair_style),
         work_dir,
+        env=run_env,
     )
     (work_dir / "screen.out").write_text(screen, encoding="utf-8")
     payload = {
@@ -291,6 +331,7 @@ def main():
         "model": args.model,
         "fixture": args.fixture,
         "pair_style": args.pair_style,
+        "plugin_load_mode": args.plugin_load_mode,
         "result": compare(
             fixture,
             parse_dump(work_dir / "dump.out"),

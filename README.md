@@ -126,15 +126,41 @@ cmake --build .build/lammps -j2
 ctest --test-dir .build/lammps -L lammps --output-on-failure
 ```
 
-LAMMPS 输入：
+构建目录中的插件可以通过 `LAMMPS_PLUGIN_PATH` 自动加载：
+
+```sh
+PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadaptersplugin.so"
+export LAMMPS_PLUGIN_PATH="$(dirname "$PLUGIN")"
+/path/to/lmp -in lmp.in
+```
+
+LAMMPS 会在启动时扫描该目录中名称以 `plugin.so` 结尾的文件，因此 `lmp.in` 不需要包含构建路径：
 
 ```lammps
-plugin load /path/to/nepadaptersplugin.so
 pair_style nep/cpu
 pair_coeff * * nep.txt Fe
 ```
 
-CUDA 插件要求 LAMMPS Kokkos 已启用 CUDA，使用 `pair_style nep/gpu`。GPU pair style 直接传递设备视图，不提供 host 或 CPU fallback。当前发布门禁只声明普通 NEP pair style；spin 模型虽然已有内部数据通路，但在真实 LAMMPS 端到端测试完成前不作为生产支持面。详细构建限制见 [LAMMPS 前端说明](frontends/lammps/README.md)。
+如需安装到固定位置，建议使用静态内部库和 runtime-only 安装，让安装目录只包含一个 LAMMPS 插件：
+
+```sh
+cmake -S . -B .build/lammps-install \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/path/to/nepadapters \
+  -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DNEP_ADAPTERS_BUILD_TESTS=OFF \
+  -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
+  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps
+cmake --build .build/lammps-install --target nepadaptersplugin -j2
+cmake --install .build/lammps-install
+export LAMMPS_PLUGIN_PATH=/path/to/nepadapters/lib
+```
+
+此时插件路径是 `/path/to/nepadapters/lib/nepadaptersplugin.so`。如果不显式设置 `CMAKE_INSTALL_LIBDIR=lib`，实际目录以 CMake 选择的 `lib` 或 `lib64` 为准。启用 `NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=ON` 时，还会安装头文件、C/C++ 库和 `lib/cmake/NEPAdapters/` 包元数据。
+
+CUDA 插件要求 LAMMPS Kokkos 已启用 CUDA，支持 `pair_style nep/gpu`；使用 Kokkos 后缀模式时也可显式写 `pair_style nep/gpu/kk`。GPU pair style 直接传递设备视图，不提供 host 或 CPU fallback。不要同时使用 `LAMMPS_PLUGIN_PATH` 和输入文件中的 `plugin load` 重复加载同一个插件。当前发布门禁只声明普通 NEP pair style；spin 模型虽然已有内部数据通路，但在真实 LAMMPS 端到端测试完成前不作为生产支持面。详细构建、安装和提交脚本示例见 [LAMMPS 前端说明](frontends/lammps/README.md)。
 
 ## 运行测试
 

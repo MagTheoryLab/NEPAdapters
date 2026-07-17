@@ -42,6 +42,31 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
     self.assertIn("atom_style atomic/kk", contents)
     self.assertIn("run_style verlet/kk", contents)
     self.assertNotIn("pair_style nep/cpu", contents)
+    self.assertNotIn("plugin load", contents)
+
+  def test_command_load_mode_writes_explicit_plugin_command(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "in.baseline"
+      smoke.write_input(
+          path,
+          "nepadaptersplugin.so",
+          "nep.txt",
+          ["Fe"],
+          plugin_load_mode="command",
+      )
+
+      contents = path.read_text(encoding="utf-8")
+
+    self.assertIn("plugin load nepadaptersplugin.so", contents)
+
+  def test_plugin_environment_points_to_plugin_directory(self):
+    env = smoke.plugin_environment("/opt/nepadapters/lib/nepadaptersplugin.so")
+
+    self.assertEqual(env["LAMMPS_PLUGIN_PATH"], "/opt/nepadapters/lib")
+
+  def test_plugin_environment_rejects_non_plugin_filename(self):
+    with self.assertRaisesRegex(ValueError, "ending in 'plugin.so'"):
+      smoke.plugin_environment("/opt/nepadapters/lib/nepadapters.so")
 
 
 if __name__ == "__main__":
