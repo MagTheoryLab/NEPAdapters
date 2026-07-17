@@ -19,7 +19,7 @@ native engine 和 Python 接口当前支持普通 NEP、spin NEP 和 qNEP。生�
 
 | 场景 | 后端 | 要求 |
 |---|---|---|
-| 普通 CPU 计算、Python CPU wheel、LAMMPS CPU 插件 | `cpu` | C++17；OpenMP 可选 |
+| 普通 CPU 计算、Python CPU wheel、LAMMPS CPU 插件 | `cpu` | C++17；OpenMP |
 | NVIDIA GPU 批计算或 LAMMPS Kokkos | `cuda` | CUDA Toolkit；LAMMPS 路径还需要启用 CUDA 的 Kokkos |
 
 两个后端通过相同的核心 API 暴露能力，但实现、打包和测试保持分离：
@@ -34,6 +34,7 @@ native engine 和 Python 接口当前支持普通 NEP、spin NEP 和 qNEP。生�
 ```sh
 cmake -S . -B .build/release \
   -DCMAKE_BUILD_TYPE=Release \
+  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
   -DNEP_ADAPTERS_BUILD_TESTS=ON
 cmake --build .build/release -j2
 ctest --test-dir .build/release --output-on-failure
@@ -92,11 +93,25 @@ python3 tools/run_cuda_tests.py --cuda-arch 70
 本机构建 GPU wheel：
 
 ```sh
-python -m build --wheel \
-  -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
+NEP_CUDA=1 python -m build --wheel
 ```
 
-仓库默认编译 `sm_89`。发布 wheel 会嵌入 `sm_70`、`sm_75`、`sm_80`、`sm_86`、`sm_89` 的 SASS，并保留 `compute_89` PTX 用于较新架构的前向 JIT：
+直接从源码安装 GPU 版使用短开关：
+
+```sh
+NEP_CUDA=1 pip install .
+```
+
+不传 `CMAKE_CUDA_ARCHITECTURES` 时使用 `native`。默认 `pip install .` 只构建
+启用 OpenMP 的 CPU 扩展，不会探测 CUDA。macOS 源码构建需要先安装
+Homebrew `libomp`；CMake 会自动读取其安装路径。
+
+高级用法仍可通过
+`--config-settings=cmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON` 显式传递 CMake
+选项；一般用户不需要记忆这条长命令。
+
+发布 wheel 不使用 `native`，而是嵌入 `sm_70`、`sm_75`、`sm_80`、`sm_86`、
+`sm_89` 的 SASS，并保留 `compute_89` PTX 用于较新架构的前向 JIT：
 
 ```sh
 CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual' \
@@ -121,6 +136,7 @@ CPU 插件：
 ```sh
 cmake -S . -B .build/lammps \
   -DNEP_ADAPTERS_BUILD_TESTS=ON \
+  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
   -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
   -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
   -DNEP_ADAPTERS_LAMMPS_EXECUTABLE=/path/to/lmp
@@ -153,6 +169,7 @@ cmake -S . -B .build/lammps-install \
   -DBUILD_SHARED_LIBS=OFF \
   -DNEP_ADAPTERS_BUILD_TESTS=OFF \
   -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
+  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
   -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
   -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps
 cmake --build .build/lammps-install --target nepadapterscpuplugin -j2

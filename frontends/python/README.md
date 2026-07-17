@@ -107,20 +107,34 @@ CPU wheel：
 python -m build --wheel
 ```
 
-wheel 配置默认关闭 CUDA、qNEP PPPM/cuFFT、OpenMP 和 C/C++ 开发文件安装。基础 wheel 包含 Python 包和 ABI 匹配的 `nep_cpu` 扩展。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
+wheel 配置默认关闭 CUDA 和 qNEP PPPM/cuFFT，但 CPU 扩展始终启用 OpenMP。基础 wheel 包含 Python 包、ABI 匹配的 `nep_cpu` 扩展和必要时由 wheel 修复工具打包的 OpenMP runtime。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
 
 GPU wheel：
 
 ```sh
-python -m build --wheel \
-  -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
+NEP_CUDA=1 python -m build --wheel
 ```
+
+直接从源码安装 GPU 版使用短开关：
+
+```sh
+NEP_CUDA=1 pip install .
+```
+
+不传 `CMAKE_CUDA_ARCHITECTURES` 时使用 `native`。默认 `pip install .` 只构建
+启用 OpenMP 的 CPU 扩展，不会探测 CUDA。macOS 源码构建需要先执行
+`brew install libomp`；CMake 会自动读取 Homebrew 安装路径。
+
+高级用法仍可通过
+`--config-settings=cmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON` 显式传递 CMake
+选项；一般用户不需要记忆这条长命令。
 
 GPU wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或选择 `cpu` 时只加载 `nep_cpu`；只有显式选择 `backend="cuda"` 才按需导入 `nep_gpu`。CUDA 加载失败不会切换到 CPU。
 
 CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型可以通过 `nep_gpu` 执行 `calculate()` 和 `descriptors()`。
 
-仓库默认 CUDA 架构为 `sm_89`，用于本地 RTX 4090。发布 wheel 可同时嵌入 V100、T4、A100、A10/RTX 30 和 RTX 4090 的 SASS，并保留 `compute_89` PTX：
+发布 wheel 不使用 `native`，而是同时嵌入 V100、T4、A100、A10/RTX 30 和
+RTX 4090 的 SASS，并保留 `compute_89` PTX：
 
 ```sh
 CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual' \
@@ -137,6 +151,7 @@ wheel 不会复制当前 Python 环境：
 - NumPy 是运行时依赖，由包管理器单独安装；
 - ASE 是可选依赖，不嵌入 wheel；
 - pybind11、CMake、scikit-build-core 和编译器只用于构建；
+- CPU 和 GPU wheel 都启用 OpenMP；Linux/macOS 修复后的 wheel 可能携带 `libgomp` 或 `libomp`，Windows 使用对应的 OpenMP runtime；
 - 默认 Linux GPU wheel 不携带 `libcuda`、`libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
 - glibc、libstdc++、libm 和 libgcc 使用系统库，其最低符号版本由 manylinux 构建环境决定。
 

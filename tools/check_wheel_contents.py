@@ -18,6 +18,12 @@ FORBIDDEN_NAMES = (
     "libcusolver",
     "libcurand",
 )
+ALLOWED_OPENMP_RUNTIME_NAMES = (
+    "libgomp",
+    "libiomp",
+    "libomp",
+    "vcomp",
+)
 
 
 def backend_name(member: str) -> str | None:
@@ -42,12 +48,6 @@ def inspect_wheel(path: Path, variant: str) -> None:
         members = archive.namelist()
         lower_members = [member.lower() for member in members]
 
-        if any(
-            component.endswith((".libs", ".dylibs"))
-            for member in members
-            for component in PurePosixPath(member).parts
-        ):
-            raise AssertionError(f"{path.name}: repaired wheel vendors a library directory")
         for forbidden in FORBIDDEN_NAMES:
             if any(forbidden in member for member in lower_members):
                 raise AssertionError(f"{path.name}: bundled forbidden library {forbidden}")
@@ -55,7 +55,25 @@ def inspect_wheel(path: Path, variant: str) -> None:
         native_members = [
             member for member in members if member.lower().endswith(NATIVE_SUFFIXES)
         ]
-        backends = [backend_name(member) for member in native_members]
+        backend_members = [
+            member for member in native_members if backend_name(member) is not None
+        ]
+        runtime_members = [
+            member for member in native_members if backend_name(member) is None
+        ]
+        unexpected_runtime_members = [
+            member
+            for member in runtime_members
+            if not PurePosixPath(member).name.lower().startswith(
+                ALLOWED_OPENMP_RUNTIME_NAMES
+            )
+        ]
+        if unexpected_runtime_members:
+            raise AssertionError(
+                f"{path.name}: bundled unexpected native libraries "
+                f"{unexpected_runtime_members!r}"
+            )
+        backends = [backend_name(member) for member in backend_members]
         expected = ["nep_cpu"] if variant == "cpu" else ["nep_cpu", "nep_gpu"]
         if sorted(backends) != expected:
             raise AssertionError(
@@ -78,6 +96,7 @@ def inspect_wheel(path: Path, variant: str) -> None:
 
     print(
         f"{path.name}: variant={variant} native={','.join(expected)} "
+        f"openmp_runtime={','.join(PurePosixPath(member).name for member in runtime_members) or 'system'} "
         f"size={path.stat().st_size}"
     )
 

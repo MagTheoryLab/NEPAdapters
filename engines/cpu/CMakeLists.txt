@@ -11,7 +11,7 @@ if(NOT EXISTS "${NEP_ADAPTERS_CPU_SOURCE_DIR}/nep.h" OR
     "ewald_nep.cpp, and nep.h.")
 endif()
 
-option(NEP_ADAPTERS_CPU_ENABLE_OPENMP "Build cpu with OpenMP when available" ON)
+option(NEP_ADAPTERS_CPU_ENABLE_OPENMP "Build cpu with required OpenMP support" ON)
 option(NEP_ADAPTERS_CPU_ENABLE_NATIVE_ARCH
   "Build cpu for the host CPU architecture when supported"
   OFF)
@@ -79,13 +79,23 @@ if(NEP_ADAPTERS_CPU_USE_RADIAL_TABLE)
 endif()
 
 if(NEP_ADAPTERS_CPU_ENABLE_OPENMP)
-  find_package(OpenMP)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(nep_adapters_cpu PRIVATE OpenMP::OpenMP_CXX)
-    set(NEP_ADAPTERS_PACKAGE_NEEDS_OPENMP ON PARENT_SCOPE)
-  else()
-    message(FATAL_ERROR "NEP_ADAPTERS_CPU_ENABLE_OPENMP=ON but OpenMP was not found.")
+  if(APPLE AND NOT DEFINED OpenMP_ROOT)
+    find_program(NEP_ADAPTERS_HOMEBREW_EXECUTABLE brew)
+    if(NEP_ADAPTERS_HOMEBREW_EXECUTABLE)
+      execute_process(
+        COMMAND "${NEP_ADAPTERS_HOMEBREW_EXECUTABLE}" --prefix libomp
+        OUTPUT_VARIABLE NEP_ADAPTERS_HOMEBREW_LIBOMP_ROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE NEP_ADAPTERS_HOMEBREW_LIBOMP_STATUS
+      )
+      if(NEP_ADAPTERS_HOMEBREW_LIBOMP_STATUS EQUAL 0)
+        set(OpenMP_ROOT "${NEP_ADAPTERS_HOMEBREW_LIBOMP_ROOT}")
+      endif()
+    endif()
   endif()
+  find_package(OpenMP REQUIRED COMPONENTS CXX)
+  target_link_libraries(nep_adapters_cpu PRIVATE OpenMP::OpenMP_CXX)
+  set(NEP_ADAPTERS_PACKAGE_NEEDS_OPENMP ON PARENT_SCOPE)
 endif()
 
 if(APPLE)

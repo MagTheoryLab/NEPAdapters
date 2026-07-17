@@ -1,6 +1,20 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 
-option(NEP_ADAPTERS_ENABLE_CUDA "Enable the CUDA engine" OFF)
+set(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT OFF)
+if(DEFINED ENV{NEP_CUDA})
+  string(TOUPPER "$ENV{NEP_CUDA}" NEP_ADAPTERS_CUDA_ENV)
+  if(NEP_ADAPTERS_CUDA_ENV MATCHES "^(1|ON|TRUE|YES)$")
+    set(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT ON)
+  elseif(NOT NEP_ADAPTERS_CUDA_ENV MATCHES "^(0|OFF|FALSE|NO)$")
+    message(FATAL_ERROR
+      "NEP_CUDA must be one of 1/0, ON/OFF, TRUE/FALSE, or YES/NO.")
+  endif()
+  unset(NEP_ADAPTERS_CUDA_ENV)
+endif()
+option(NEP_ADAPTERS_ENABLE_CUDA
+  "Enable the CUDA engine; NEP_CUDA=1 provides a source-install shortcut"
+  ${NEP_ADAPTERS_ENABLE_CUDA_DEFAULT})
+unset(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT)
 option(
   NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM
   "Build the optional qNEP PPPM implementation and link cuFFT"
@@ -13,7 +27,11 @@ endif()
 
 if(NEP_ADAPTERS_ENABLE_CUDA AND
    NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 89)
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+if(NEP_ADAPTERS_ENABLE_CUDA)
+  message(STATUS
+    "NEPAdapters CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
 if(NEP_ADAPTERS_ENABLE_CUDA)
