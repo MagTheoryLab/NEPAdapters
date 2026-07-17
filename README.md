@@ -114,6 +114,8 @@ PPPM 当前只适合单节点实验，不属于默认生产包。未启用 PPPM 
 
 ## 使用 LAMMPS 插件
 
+LAMMPS 插件按后端拆分：CPU 产物为 `nepadapterscpuplugin.so`，GPU 产物为 `nepadaptersgpuplugin.so`。两者可以单独构建，也可以同时安装到同一个目录；运行时通过 `pair_style` 明确选择后端，不存在 CPU/GPU fallback。
+
 CPU 插件：
 
 ```sh
@@ -129,7 +131,7 @@ ctest --test-dir .build/lammps -L lammps --output-on-failure
 构建目录中的插件可以通过 `LAMMPS_PLUGIN_PATH` 自动加载：
 
 ```sh
-PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadaptersplugin.so"
+PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadapterscpuplugin.so"
 export LAMMPS_PLUGIN_PATH="$(dirname "$PLUGIN")"
 /path/to/lmp -in lmp.in
 ```
@@ -153,14 +155,33 @@ cmake -S . -B .build/lammps-install \
   -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
   -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
   -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps
-cmake --build .build/lammps-install --target nepadaptersplugin -j2
+cmake --build .build/lammps-install --target nepadapterscpuplugin -j2
 cmake --install .build/lammps-install
 export LAMMPS_PLUGIN_PATH=/path/to/nepadapters/lib
 ```
 
-此时插件路径是 `/path/to/nepadapters/lib/nepadaptersplugin.so`。如果不显式设置 `CMAKE_INSTALL_LIBDIR=lib`，实际目录以 CMake 选择的 `lib` 或 `lib64` 为准。启用 `NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=ON` 时，还会安装头文件、C/C++ 库和 `lib/cmake/NEPAdapters/` 包元数据。
+此时 CPU 插件路径是 `/path/to/nepadapters/lib/nepadapterscpuplugin.so`。如果不显式设置 `CMAKE_INSTALL_LIBDIR=lib`，实际目录以 CMake 选择的 `lib` 或 `lib64` 为准。启用 `NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=ON` 时，还会安装头文件、C/C++ 库和 `lib/cmake/NEPAdapters/` 包元数据。
 
-CUDA 插件要求 LAMMPS Kokkos 已启用 CUDA，支持 `pair_style nep/gpu`；使用 Kokkos 后缀模式时也可显式写 `pair_style nep/gpu/kk`。GPU pair style 直接传递设备视图，不提供 host 或 CPU fallback。不要同时使用 `LAMMPS_PLUGIN_PATH` 和输入文件中的 `plugin load` 重复加载同一个插件。当前发布门禁只声明普通 NEP pair style；spin 模型虽然已有内部数据通路，但在真实 LAMMPS 端到端测试完成前不作为生产支持面。详细构建、安装和提交脚本示例见 [LAMMPS 前端说明](frontends/lammps/README.md)。
+GPU-only 安装模板：
+
+```sh
+cmake -S . -B .build/lammps-gpu-install \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/path/to/nepadapters \
+  -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DNEP_ADAPTERS_BUILD_TESTS=OFF \
+  -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
+  -DNEP_ADAPTERS_ENABLE_CPU=OFF \
+  -DNEP_ADAPTERS_ENABLE_CUDA=ON \
+  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
+  -DNEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR=/path/to/lammps-kokkos-build
+cmake --build .build/lammps-gpu-install --target nepadaptersgpuplugin -j2
+cmake --install .build/lammps-gpu-install
+```
+
+CUDA 插件要求 LAMMPS Kokkos 已启用 CUDA，产物为 `nepadaptersgpuplugin.so`，支持 `pair_style nep/gpu`；使用 Kokkos 后缀模式时也可显式写 `pair_style nep/gpu/kk`。GPU pair style 直接传递设备视图，不提供 host 或 CPU fallback。CPU、GPU 同时启用时，安装目录会同时包含两个插件，`LAMMPS_PLUGIN_PATH` 只需指向该目录。不要同时使用 `LAMMPS_PLUGIN_PATH` 和输入文件中的 `plugin load` 重复加载同一个插件。当前发布门禁只声明普通 NEP pair style；spin 模型虽然已有内部数据通路，但在真实 LAMMPS 端到端测试完成前不作为生产支持面。完整的 CPU-only、GPU-only 和同时安装模板见 [LAMMPS 前端说明](frontends/lammps/README.md)。
 
 ## 运行测试
 

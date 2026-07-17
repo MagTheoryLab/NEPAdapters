@@ -502,7 +502,7 @@ def main():
         plugin_path = (
             Path(args.lammps_plugin).resolve()
             if args.lammps_plugin
-            else build_dir / "frontends" / "lammps" / "nepadaptersplugin.so"
+            else build_dir / "frontends" / "lammps" / "nepadapterscpuplugin.so"
         )
         model_env = os.environ.get("NEP_ADAPTERS_NEP89_MODEL_PATH", "")
         model_path = Path(model_env) if model_env else Path()

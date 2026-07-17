@@ -4,12 +4,12 @@ LAMMPS 集成属于 frontend。它负责转换 LAMMPS 的原子、盒子、类�
 
 当前发布形式为 runtime plugin：
 
-| pair style | 后端 | 输入路径 |
-|---|---|---|
-| `nep/cpu` | `cpu` | host 外部邻居表 |
-| `nep/gpu`、`nep/gpu/kk`、`nep/gpu/kk/device` | `cuda` | Kokkos CUDA device view |
+| 插件 | pair style | 后端 | 输入路径 |
+|---|---|---|---|
+| `nepadapterscpuplugin.so` | `nep/cpu` | `cpu` | host 外部邻居表 |
+| `nepadaptersgpuplugin.so` | `nep/gpu`、`nep/gpu/kk`、`nep/gpu/kk/device` | `cuda` | Kokkos CUDA device view |
 
-插件文件名为 `nepadaptersplugin.so`。`nep/gpu` 是纯设备路径，不提供 host 或 CPU fallback。
+CPU 和 GPU 是两个独立插件，可以单独构建，也可以在一次配置中同时构建并安装到同一个目录。CPU 插件不链接 CUDA/Kokkos，GPU 插件不注册 `nep/cpu`。`nep/gpu` 是纯设备路径，不提供 host 或 CPU fallback。
 
 当前 plugin 没有注册 `nep/spin/cpu` 或 `nep/spin/gpu`。pair 内部可以识别 spin 模型，并在缺少 LAMMPS `atom_style spin` 的 `sp`/`fm` 数据时报错；但真实 LAMMPS spin 端到端发布门禁尚未完成，因此当前文档不把 spin LAMMPS 列为生产支持面。
 
@@ -32,7 +32,7 @@ ctest --test-dir .build/lammps -L lammps --output-on-failure
 ```sh
 python3 tools/run_lammps_baseline_smoke.py \
   --lmp /path/to/lmp \
-  --plugin .build/lammps/frontends/lammps/nepadaptersplugin.so \
+  --plugin .build/lammps/frontends/lammps/nepadapterscpuplugin.so \
   --model tests/fixtures/cpu_baseline/nep.txt \
   --fixture tests/fixtures/cpu_baseline/train.xyz
 ```
@@ -40,20 +40,20 @@ python3 tools/run_lammps_baseline_smoke.py \
 推荐由运行脚本设置插件目录：
 
 ```sh
-PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadaptersplugin.so"
+PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadapterscpuplugin.so"
 test -f "$PLUGIN"
 export LAMMPS_PLUGIN_PATH="$(dirname "$PLUGIN")"
 /path/to/lmp -in lmp.in
 ```
 
-`LAMMPS_PLUGIN_PATH` 必须是目录而不是 `.so` 文件路径。LAMMPS 会自动加载目录中名称以 `plugin.so` 结尾的文件；`nepadaptersplugin.so` 符合该命名规则。此时输入文件只保留模型配置：
+`LAMMPS_PLUGIN_PATH` 必须是目录而不是 `.so` 文件路径。LAMMPS 会自动加载目录中名称以 `plugin.so` 结尾的文件；CPU、GPU 插件都符合该命名规则。此时输入文件只保留模型配置：
 
 ```lammps
 pair_style nep/cpu
 pair_coeff * * nep.txt Fe
 ```
 
-一次性调试也可以不设置环境变量，改为在输入文件中显式写 `plugin load /path/to/nepadaptersplugin.so`。两种方式选择一种，不要重复加载。
+一次性调试也可以不设置环境变量，改为在输入文件中显式写 `plugin load /path/to/nepadapterscpuplugin.so`。两种方式选择一种，不要重复加载。
 
 ## 安装插件
 
@@ -69,7 +69,7 @@ cmake -S . -B .build/lammps-install \
   -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
   -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
   -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps
-cmake --build .build/lammps-install --target nepadaptersplugin -j2
+cmake --build .build/lammps-install --target nepadapterscpuplugin -j2
 cmake --install .build/lammps-install
 ```
 
@@ -78,7 +78,7 @@ cmake --install .build/lammps-install
 ```text
 /path/to/nepadapters/
 └── lib/
-    └── nepadaptersplugin.so
+    └── nepadapterscpuplugin.so
 ```
 
 使用安装版本：
@@ -105,7 +105,7 @@ cmake -S . -B .build/lammps-cuda \
   -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
   -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
   -DNEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR=/path/to/lammps-kokkos-build
-cmake --build .build/lammps-cuda --target nepadaptersplugin -j2
+cmake --build .build/lammps-cuda --target nepadaptersgpuplugin -j2
 cmake --install .build/lammps-cuda
 ```
 
@@ -127,3 +127,41 @@ mpirun -np 2 /path/to/lmp \
 ```
 
 `nep/gpu` 仍是有效的基础名称；`-sf kk` 或显式 `/kk` 名称用于 Kokkos 后缀路径。安装前应先使用启用测试的独立构建跑过 CTest；安装后应在运行日志中确认出现 `Loaded 1 plugins from ...`。GPU 路径缺少 Kokkos device state 时会直接报错，不会改走 host 邻居表。
+
+## 同时构建并安装 CPU、GPU 插件
+
+同时启用两个 engine 即可在一次构建中生成两个插件：
+
+```sh
+cmake -S . -B .build/lammps-all \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/path/to/nepadapters \
+  -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DNEP_ADAPTERS_BUILD_TESTS=OFF \
+  -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
+  -DNEP_ADAPTERS_ENABLE_CPU=ON \
+  -DNEP_ADAPTERS_ENABLE_CUDA=ON \
+  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
+  -DNEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR=/path/to/lammps-kokkos-build
+cmake --build .build/lammps-all \
+  --target nepadapterscpuplugin nepadaptersgpuplugin -j2
+cmake --install .build/lammps-all
+```
+
+两个插件会共存于同一目录：
+
+```text
+/path/to/nepadapters/
+└── lib/
+    ├── nepadapterscpuplugin.so
+    └── nepadaptersgpuplugin.so
+```
+
+设置一次插件目录后，LAMMPS 会同时加载两者，输入文件通过 `pair_style nep/cpu` 或 `pair_style nep/gpu/kk` 明确选择后端：
+
+```sh
+export LAMMPS_PLUGIN_PATH=/path/to/nepadapters/lib
+/path/to/lmp -in lmp.in
+```

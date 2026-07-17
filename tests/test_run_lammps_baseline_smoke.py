@@ -49,7 +49,7 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
       path = Path(directory) / "in.baseline"
       smoke.write_input(
           path,
-          "nepadaptersplugin.so",
+          "nepadapterscpuplugin.so",
           "nep.txt",
           ["Fe"],
           plugin_load_mode="command",
@@ -57,10 +57,10 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
 
       contents = path.read_text(encoding="utf-8")
 
-    self.assertIn("plugin load nepadaptersplugin.so", contents)
+    self.assertIn("plugin load nepadapterscpuplugin.so", contents)
 
   def test_plugin_environment_points_to_plugin_directory(self):
-    env = smoke.plugin_environment("/opt/nepadapters/lib/nepadaptersplugin.so")
+    env = smoke.plugin_environment("/opt/nepadapters/lib/nepadapterscpuplugin.so")
 
     self.assertEqual(env["LAMMPS_PLUGIN_PATH"], "/opt/nepadapters/lib")
 

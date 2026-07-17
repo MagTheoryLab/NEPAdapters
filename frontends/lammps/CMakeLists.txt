@@ -173,41 +173,24 @@ set_target_properties(
     POSITION_INDEPENDENT_CODE ON
 )
 
-if(EXISTS "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/lammpsplugin.h")
-  add_library(nepadaptersplugin MODULE
-    nepadaptersplugin.cpp
-    pair_nep_adapters_common.cpp
-  )
-  if(TARGET NEPAdapters::cpu)
-    target_sources(nepadaptersplugin PRIVATE pair_nep_adapters_cpu.cpp)
-    target_link_libraries(nepadaptersplugin PRIVATE NEPAdapters::cpu)
-    target_compile_definitions(nepadaptersplugin PRIVATE
-      NEP_ADAPTERS_LAMMPS_ENABLE_CPU=1)
-  endif()
-  if(TARGET NEPAdapters::cuda)
-    target_sources(nepadaptersplugin PRIVATE pair_nep_adapters_cuda.cpp)
-    target_link_libraries(nepadaptersplugin PRIVATE NEPAdapters::cuda)
-    target_compile_definitions(nepadaptersplugin PRIVATE
-      NEP_ADAPTERS_LAMMPS_ENABLE_CUDA=1)
-  endif()
-  nep_adapters_lammps_enable_kokkos(nepadaptersplugin NO_LINK)
+function(nep_adapters_lammps_configure_plugin target)
   if(MPI_CXX_FOUND)
-    target_link_libraries(nepadaptersplugin PRIVATE MPI::MPI_CXX)
+    target_link_libraries(${target} PRIVATE MPI::MPI_CXX)
   else()
     target_include_directories(
-      nepadaptersplugin
+      ${target}
       PRIVATE
         "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/STUBS"
     )
   endif()
   target_include_directories(
-    nepadaptersplugin
+    ${target}
     PRIVATE
       "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src"
   )
-  target_compile_features(nepadaptersplugin PRIVATE cxx_std_17)
+  target_compile_features(${target} PRIVATE cxx_std_17)
   set_target_properties(
-    nepadaptersplugin
+    ${target}
     PROPERTIES
       PREFIX ""
       SUFFIX ".so"
@@ -216,12 +199,39 @@ if(EXISTS "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/lammpsplugin.h")
       INSTALL_RPATH "$ORIGIN"
   )
   if(APPLE)
-    target_link_options(nepadaptersplugin PRIVATE "-undefined" "dynamic_lookup")
+    target_link_options(${target} PRIVATE "-undefined" "dynamic_lookup")
   endif()
   install(
-    TARGETS nepadaptersplugin
+    TARGETS ${target}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
+endfunction()
+
+if(EXISTS "${NEP_ADAPTERS_LAMMPS_SOURCE_DIR}/src/lammpsplugin.h")
+  if(TARGET NEPAdapters::cpu)
+    add_library(nepadapterscpuplugin MODULE
+      nepadaptersplugin.cpp
+      pair_nep_adapters_common.cpp
+      pair_nep_adapters_cpu.cpp
+    )
+    target_link_libraries(nepadapterscpuplugin PRIVATE NEPAdapters::cpu)
+    target_compile_definitions(nepadapterscpuplugin PRIVATE
+      NEP_ADAPTERS_LAMMPS_ENABLE_CPU=1)
+    nep_adapters_lammps_configure_plugin(nepadapterscpuplugin)
+  endif()
+
+  if(TARGET NEPAdapters::cuda)
+    add_library(nepadaptersgpuplugin MODULE
+      nepadaptersplugin.cpp
+      pair_nep_adapters_common.cpp
+      pair_nep_adapters_cuda.cpp
+    )
+    target_link_libraries(nepadaptersgpuplugin PRIVATE NEPAdapters::cuda)
+    target_compile_definitions(nepadaptersgpuplugin PRIVATE
+      NEP_ADAPTERS_LAMMPS_ENABLE_CUDA=1)
+    nep_adapters_lammps_enable_kokkos(nepadaptersgpuplugin NO_LINK)
+    nep_adapters_lammps_configure_plugin(nepadaptersgpuplugin)
+  endif()
 endif()
 
 if(NEP_ADAPTERS_BUILD_TESTS)
@@ -237,60 +247,72 @@ if(NEP_ADAPTERS_BUILD_TESTS)
   set_tests_properties(nep_adapters_lammps_frontend_compile_test PROPERTIES
     LABELS "smoke;frontend;lammps")
 
-  if(TARGET nepadaptersplugin)
+  if(TARGET nepadapterscpuplugin)
     add_test(
-      NAME nep_adapters_lammps_plugin_compile_test
+      NAME nep_adapters_lammps_cpu_plugin_compile_test
       COMMAND
         "${CMAKE_COMMAND}"
         --build "${CMAKE_BINARY_DIR}"
-        --target nepadaptersplugin
+        --target nepadapterscpuplugin
     )
-    set_tests_properties(nep_adapters_lammps_plugin_compile_test PROPERTIES
-      LABELS "smoke;frontend;lammps;plugin")
+    set_tests_properties(nep_adapters_lammps_cpu_plugin_compile_test PROPERTIES
+      LABELS "smoke;frontend;lammps;plugin;cpu")
+  endif()
 
-    if(Python3_Interpreter_FOUND AND
-       EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
-       EXISTS "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt" AND
-       EXISTS "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz")
-      if(TARGET NEPAdapters::cpu)
-        add_test(
-          NAME nep_adapters_lammps_plugin_baseline_test
-          COMMAND
-            "${Python3_EXECUTABLE}"
-            "${PROJECT_SOURCE_DIR}/tools/run_lammps_baseline_smoke.py"
-            --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
-            --plugin "$<TARGET_FILE:nepadaptersplugin>"
-            --model "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
-            --fixture "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
-            --work-dir "${CMAKE_BINARY_DIR}/lammps_baseline_smoke"
-        )
-        set_tests_properties(
-          nep_adapters_lammps_plugin_baseline_test PROPERTIES
-          LABELS "smoke;frontend;lammps;plugin;baseline;cpu"
-          DEPENDS "nep_adapters_lammps_plugin_compile_test")
-      endif()
+  if(TARGET nepadaptersgpuplugin)
+    add_test(
+      NAME nep_adapters_lammps_gpu_plugin_compile_test
+      COMMAND
+        "${CMAKE_COMMAND}"
+        --build "${CMAKE_BINARY_DIR}"
+        --target nepadaptersgpuplugin
+    )
+    set_tests_properties(nep_adapters_lammps_gpu_plugin_compile_test PROPERTIES
+      LABELS "smoke;frontend;lammps;plugin;cuda;kokkos")
+  endif()
 
-      if(TARGET NEPAdapters::cuda AND Kokkos_ENABLE_CUDA)
-        add_test(
-          NAME nep_adapters_lammps_cuda_plugin_baseline_test
-          COMMAND
-            "${Python3_EXECUTABLE}"
-            "${PROJECT_SOURCE_DIR}/tools/run_lammps_baseline_smoke.py"
-            --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
-            --plugin "$<TARGET_FILE:nepadaptersplugin>"
-            --model "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
-            --fixture "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
-            --pair-style nep/gpu
-            --energy-tolerance 1.0e-6
-            --force-tolerance 1.0e-6
-            --virial-tolerance 5.0e-6
-            --work-dir "${CMAKE_BINARY_DIR}/lammps_cuda_baseline_smoke"
-        )
-        set_tests_properties(
-          nep_adapters_lammps_cuda_plugin_baseline_test PROPERTIES
-          LABELS "smoke;frontend;lammps;plugin;baseline;cuda;kokkos;device"
-          DEPENDS "nep_adapters_lammps_plugin_compile_test")
-      endif()
+  if(Python3_Interpreter_FOUND AND
+     EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
+     EXISTS "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt" AND
+     EXISTS "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz")
+    if(TARGET nepadapterscpuplugin)
+      add_test(
+        NAME nep_adapters_lammps_plugin_baseline_test
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/run_lammps_baseline_smoke.py"
+          --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+          --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
+          --model "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
+          --fixture "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
+          --work-dir "${CMAKE_BINARY_DIR}/lammps_baseline_smoke"
+      )
+      set_tests_properties(
+        nep_adapters_lammps_plugin_baseline_test PROPERTIES
+        LABELS "smoke;frontend;lammps;plugin;baseline;cpu"
+        DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
+    endif()
+
+    if(TARGET nepadaptersgpuplugin AND Kokkos_ENABLE_CUDA)
+      add_test(
+        NAME nep_adapters_lammps_cuda_plugin_baseline_test
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/run_lammps_baseline_smoke.py"
+          --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+          --plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
+          --model "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
+          --fixture "${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
+          --pair-style nep/gpu
+          --energy-tolerance 1.0e-6
+          --force-tolerance 1.0e-6
+          --virial-tolerance 5.0e-6
+          --work-dir "${CMAKE_BINARY_DIR}/lammps_cuda_baseline_smoke"
+      )
+      set_tests_properties(
+        nep_adapters_lammps_cuda_plugin_baseline_test PROPERTIES
+        LABELS "smoke;frontend;lammps;plugin;baseline;cuda;kokkos;device"
+        DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
     endif()
   endif()
 endif()

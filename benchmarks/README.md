@@ -48,7 +48,7 @@ python3 tools/generate_test_report.py --openmp-threads 4
 python3 tools/generate_test_report.py \
   --lammps-source-dir /path/to/lammps \
   --lmp-executable /path/to/lmp \
-  --lammps-plugin /path/to/nepadaptersplugin.so
+  --lammps-plugin /path/to/nepadapterscpuplugin.so
 ```
 
 传入 `--lmp-executable` 后，脚本会先使用 `tests/fixtures/cpu_baseline/` 运行真实 LAMMPS baseline smoke，再运行 MPI smoke。

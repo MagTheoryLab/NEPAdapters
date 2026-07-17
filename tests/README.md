@@ -56,7 +56,7 @@ Python/batch 始终使用常规 `compute` API，不继承 LAMMPS 邻居表或 gh
 
 `nep_adapters_cpu_lammps_neighbors_test` 覆盖 LAMMPS 形状的 `ilist`、`numneigh`、`firstneigh`、`type_map`、`double** x`、`double** f` 和 raw9 每原子 virial，并与固定 golden label 比较。
 
-`nep_adapters_lammps_plugin_baseline_test` 是真实 LAMMPS runtime 测试。当 `NEP_ADAPTERS_LAMMPS_EXECUTABLE` 指向 `lmp` 时，它会加载 `nepadaptersplugin.so`，使用 `pair_style nep/cpu` 运行固定 fixture，并核对总能量、每原子能量和、力以及从 `stress/atom` 重建的 virial。
+`nep_adapters_lammps_plugin_baseline_test` 是真实 LAMMPS runtime 测试。当 `NEP_ADAPTERS_LAMMPS_EXECUTABLE` 指向 `lmp` 时，它会加载 `nepadapterscpuplugin.so`，使用 `pair_style nep/cpu` 运行固定 fixture，并核对总能量、每原子能量和、力以及从 `stress/atom` 重建的 virial。CUDA 对应测试加载 `nepadaptersgpuplugin.so`，不会借用 CPU 插件或 fallback。
 
 `nep_adapters_domain_decomp_contract_test` 是纯 C++ 测试，不调用 LAMMPS。它比较完整体系与 2 个包含 ghost 原子的模拟 rank-local 体系，然后执行 ghost force foldback 和 virial reduction。各 engine 的外部邻居 runner 应复用这一契约形状。
 
