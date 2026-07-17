@@ -33,6 +33,23 @@ void upload_float_array(
       name);
 }
 
+void upload_double_array(
+    const std::vector<double>& host,
+    double*& device,
+    std::size_t& bytes,
+    const char* name) {
+  bytes = host.size() * sizeof(double);
+  if (host.empty()) {
+    device = nullptr;
+    return;
+  }
+
+  check_cuda(cudaMalloc(reinterpret_cast<void**>(&device), bytes), name);
+  check_cuda(
+      cudaMemcpy(device, host.data(), bytes, cudaMemcpyHostToDevice),
+      name);
+}
+
 void upload_int_array(
     const std::vector<int>& host,
     int*& device,
@@ -51,6 +68,13 @@ void upload_int_array(
 }
 
 void free_device(float*& ptr) noexcept {
+  if (ptr != nullptr) {
+    cudaFree(ptr);
+    ptr = nullptr;
+  }
+}
+
+void free_device(double*& ptr) noexcept {
   if (ptr != nullptr) {
     cudaFree(ptr);
     ptr = nullptr;
@@ -106,7 +130,7 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.q_scaler_bytes,
         "upload q_scaler");
     view_.q_scaler_count = host.q_scaler.size();
-    upload_float_array(
+    upload_double_array(
         host.spin_baseline,
         spin_baseline_device_,
         summary_.spin_baseline_bytes,

@@ -257,6 +257,8 @@ int main() {
       summary.angular_coefficients_center_type_major_bytes !=
           host.angular_coefficients_center_type_major.size() * sizeof(float) ||
       summary.q_scaler_bytes != host.q_scaler.size() * sizeof(float) ||
+      summary.spin_baseline_bytes !=
+          host.spin_baseline.size() * sizeof(double) ||
       summary.atomic_numbers_bytes != host.atomic_numbers.size() * sizeof(int) ||
       summary.total_bytes !=
           (host.ann_type_major.size() + host.ann_type_major_qscaled.size() +
@@ -265,6 +267,7 @@ int main() {
            host.angular_coefficients_center_type_major.size() +
            host.q_scaler.size()) *
                   sizeof(float) +
+              host.spin_baseline.size() * sizeof(double) +
               host.atomic_numbers.size() * sizeof(int)) {
     std::fprintf(stderr, "device model upload summary contract failed\n");
     return EXIT_FAILURE;

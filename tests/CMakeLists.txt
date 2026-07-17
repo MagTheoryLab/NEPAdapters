@@ -77,6 +77,14 @@ if(Python3_Interpreter_FOUND)
   set_tests_properties(nep_adapters_lammps_baseline_tool_unit_test PROPERTIES
     LABELS "tooling;python;unit;lammps"
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+  add_test(
+    NAME nep_adapters_lammps_spin_tool_unit_test
+    COMMAND "${Python3_EXECUTABLE}" -m unittest -v
+            tests.test_run_lammps_spin_smoke)
+  set_tests_properties(nep_adapters_lammps_spin_tool_unit_test PROPERTIES
+    LABELS "tooling;python;unit;lammps;spin"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 endif()
 
 if(TARGET NEPAdapters::cpu AND

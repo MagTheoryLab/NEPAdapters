@@ -22,7 +22,7 @@ std::string write_model() {
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
-  out << "spin_baseline -2\n";
+  out << "spin_baseline -3409.039123456789\n";
   out << "spin_n_max 0 0\n";
   out << "spin_basis_size 0 0\n";
   out << "spin_l_max 4 0 0\n";

@@ -62,7 +62,7 @@ struct ModelProtocol {
   std::size_t q_scaler_count = 0;
   std::vector<std::string> elements;
   std::vector<int> atomic_numbers;
-  std::vector<float> spin_baseline;
+  std::vector<double> spin_baseline;
   std::vector<int> spin_dof_type_active;
   std::vector<int> spin_env_type_active;
   BodyChannelConfig body_channels;

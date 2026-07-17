@@ -113,7 +113,7 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
     const int* __restrict__ schedule_active_type_counts,
     const float* __restrict__ descriptors,
     const float* __restrict__ ann_type_major,
-    const float* __restrict__ spin_baseline,
+    const double* __restrict__ spin_baseline,
     double* __restrict__ potential,
     float* __restrict__ fp) {
   extern __shared__ float shared_storage[];
@@ -223,10 +223,10 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
   }
   if (sublane == 0 && type_is_valid) {
     const float type_bias = version == 5 ? w1[hidden_neurons] : 0.0f;
-    const float baseline =
-        spin_baseline != nullptr ? spin_baseline[type] : 0.0f;
+    const double baseline =
+        spin_baseline != nullptr ? spin_baseline[type] : 0.0;
     potential[atom] =
-        static_cast<double>(energy - type_bias - b1[0] + baseline);
+        static_cast<double>(energy - type_bias - b1[0]) + baseline;
   }
 }
 

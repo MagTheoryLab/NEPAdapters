@@ -11,7 +11,7 @@ LAMMPS 集成属于 frontend。它负责转换 LAMMPS 的原子、盒子、类�
 
 CPU 和 GPU 是两个独立插件，可以单独构建，也可以在一次配置中同时构建并安装到同一个目录。CPU 插件不链接 CUDA/Kokkos，GPU 插件不注册 `nep/cpu`。`nep/gpu` 是纯设备路径，不提供 host 或 CPU fallback。
 
-当前 plugin 没有注册 `nep/spin/cpu` 或 `nep/spin/gpu`。pair 内部可以识别 spin 模型，并在缺少 LAMMPS `atom_style spin` 的 `sp`/`fm` 数据时报错；但真实 LAMMPS spin 端到端发布门禁尚未完成，因此当前文档不把 spin LAMMPS 列为生产支持面。
+当前 plugin 没有注册 `nep/spin/cpu` 或 `nep/spin/gpu`。spin 模型继续使用 `nep/cpu` 或 `nep/gpu/kk`，pair 会识别 spin capability，并要求 LAMMPS 提供 `atom_style spin` 或 `atom_style spin/kk` 的 `sp`/`fm` 数据。CPU 和 CUDA 单 rank、全周期 spin pair 计算已经通过真实 LAMMPS 端到端门禁，覆盖总能量、每原子能量、力、磁力、virial 和 spin 读回；spin MPI 多 rank 尚未列入发布支持范围。
 
 当前 MPI smoke 已检查 `mpirun -np 1/2/4` 下的能量、力、每原子能量、`stress/atom` 和 `centroid/stress/atom`。提供 LAMMPS 可执行文件时，测试还会使用 `tests/fixtures/cpu_baseline/train.xyz` 核对总能量、每原子能量和、力以及从 `stress/atom` 重建的 virial。
 

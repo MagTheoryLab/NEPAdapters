@@ -241,7 +241,7 @@ void parse_spin_header_line(
     protocol.spin_baseline.resize(static_cast<std::size_t>(protocol.num_types));
     for (int type = 0; type < protocol.num_types; ++type) {
       protocol.spin_baseline[static_cast<std::size_t>(type)] =
-          parse_float_token(tokens[static_cast<std::size_t>(1 + type)]);
+          parse_double(tokens[static_cast<std::size_t>(1 + type)]);
     }
   } else if (tokens[0] == "spin_chiral") {
     protocol.spin_chiral = parse_int(tokens[1]);
@@ -341,7 +341,7 @@ void finalize_counts(ModelProtocol& protocol) {
       protocol.spin_env_type_active = protocol.spin_dof_type_active;
     }
     if (protocol.spin_baseline.empty()) {
-      protocol.spin_baseline.assign(static_cast<std::size_t>(protocol.num_types), 0.0f);
+      protocol.spin_baseline.assign(static_cast<std::size_t>(protocol.num_types), 0.0);
     }
     protocol.spin_descriptor_dim = make_spin_core_layout(protocol).descriptor_dim;
   }

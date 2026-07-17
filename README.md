@@ -2,7 +2,7 @@
 
 NEPAdapters 提供统一的 NEP 运行时。同一套模型可以通过 Python 或 LAMMPS 调用，并明确选择 CPU 或 CUDA 后端。
 
-native engine 和 Python 接口当前支持普通 NEP、spin NEP 和 qNEP。生产 CPU 后端统一使用 `cpu`；CUDA 后端使用 `cuda`。不再提供 `cpu_nep3`，也不会在 GPU 不可用或模型不受支持时自动回退到 CPU。LAMMPS 的普通 NEP frontend 已进入发布面；spin LAMMPS 尚未作为生产 frontend 发布。
+native engine 和 Python 接口当前支持普通 NEP、spin NEP 和 qNEP。生产 CPU 后端统一使用 `cpu`；CUDA 后端使用 `cuda`。不再提供 `cpu_nep3`，也不会在 GPU 不可用或模型不受支持时自动回退到 CPU。LAMMPS 的普通 NEP frontend 和单 rank 全周期 spin pair 计算均已进入发布面；spin MPI 多 rank 尚未列入发布支持范围。
 
 ## 快速入口
 

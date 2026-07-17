@@ -183,7 +183,7 @@ bool check_lammps(NepaModel* model, const Prediction& ref) {
       ref.virial[1],
       ref.virial[2],
       ref.virial[5]};
-  const bool ok = std::abs(total_potential - ref.energy) < 2.0e-4 &&
+  const bool ok = std::abs(total_potential - ref.energy) < 1.0e-6 &&
                   max_abs_diff(force, ref.force) < 2.0e-4 &&
                   max_abs_diff(mforce, ref.mforce) < 2.0e-4 &&
                   max_abs_diff(std::vector<double>(total_virial6, total_virial6 + 6),
@@ -232,7 +232,7 @@ int main() {
       max_index = static_cast<int>(i);
     }
   }
-  const bool ok = energy_diff < 2.0e-4 && potential_diff < 2.0e-4 &&
+  const bool ok = energy_diff < 1.0e-6 && potential_diff < 1.0e-6 &&
                   force_diff < 2.0e-4 && virial_diff < 2.0e-4 &&
                   mforce_diff < 2.0e-4 && descriptor_diff < 2.0e-4 &&
                   check_lammps(gpu, cpu_out);

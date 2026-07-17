@@ -315,4 +315,56 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
     endif()
   endif()
+
+  set(_nep_adapters_spin_fixture_dir
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol")
+  if(Python3_Interpreter_FOUND AND
+     EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
+     EXISTS "${_nep_adapters_spin_fixture_dir}/nep.txt" AND
+     EXISTS "${_nep_adapters_spin_fixture_dir}/lammps_structure.json" AND
+     EXISTS "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt")
+    if(TARGET nepadapterscpuplugin)
+      add_test(
+        NAME nep_adapters_lammps_spin_cpu_plugin_test
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
+          --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+          --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
+          --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+          --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
+          --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
+          --pair-style nep/cpu
+          --work-dir "${CMAKE_BINARY_DIR}/lammps_spin_cpu_smoke"
+      )
+      set_tests_properties(
+        nep_adapters_lammps_spin_cpu_plugin_test PROPERTIES
+        LABELS "smoke;frontend;lammps;plugin;spin;cpu;real_lammps"
+        DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
+    endif()
+
+    if(TARGET nepadaptersgpuplugin AND Kokkos_ENABLE_CUDA)
+      add_test(
+        NAME nep_adapters_lammps_spin_cuda_plugin_test
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
+          --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+          --plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
+          --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+          --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
+          --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
+          --pair-style nep/gpu/kk
+          --work-dir "${CMAKE_BINARY_DIR}/lammps_spin_cuda_smoke"
+          --energy-tolerance 1.0e-6
+          --force-tolerance 2.0e-4
+          --mforce-tolerance 2.0e-4
+          --virial-tolerance 2.0e-4
+      )
+      set_tests_properties(
+        nep_adapters_lammps_spin_cuda_plugin_test PROPERTIES
+        LABELS "smoke;frontend;lammps;plugin;spin;cuda;kokkos;device;real_lammps"
+        DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
+    endif()
+  endif()
 endif()

@@ -81,7 +81,7 @@ CPU LAMMPS pair 通过 LAMMPS 形状的 external-neighbor 契约进入 `cpu`，�
 - `nep/cpu`：CPU NEP；
 - `nep/gpu`、`nep/gpu/kk`、`nep/gpu/kk/device`：CUDA Kokkos NEP。
 
-pair 内部已经能够识别 spin capability，并要求 LAMMPS `atom_style spin` 提供 `sp` 和 `fm`。但在真实 LAMMPS spin 端到端门禁完成前，这条路径只算集成中的能力，不属于生产 frontend 声明。不要虚构未注册的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。
+pair 内部能够识别 spin capability，并要求 CPU 路径的 `atom_style spin` 或 CUDA 路径的 `atom_style spin/kk` 提供 `sp` 和 `fm`。单 rank、全周期 spin pair 计算已通过真实 LAMMPS 端到端门禁，属于生产 frontend；MPI 多 rank 仍不在当前发布范围。不要虚构未注册的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。
 
 ## 公共 API 与 engine SPI
 
