@@ -34,6 +34,8 @@ void set_view_pointer(
     view.mforce_soa3 = static_cast<double*>(device);
   } else if (name == "virial_soa9") {
     view.virial_soa9 = static_cast<double*>(device);
+  } else if (name == "spin_transfer_soa9") {
+    view.spin_transfer_soa9 = static_cast<float*>(device);
   } else if (name == "charge") {
     view.charge = static_cast<double*>(device);
   } else if (name == "bec_soa9") {

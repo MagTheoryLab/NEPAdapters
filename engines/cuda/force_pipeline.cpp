@@ -214,6 +214,7 @@ void execute_force_pipeline(
         model,
         workspace,
         virial_target,
+        request.spin_transfer_per_atom,
         timings == nullptr ? nullptr : &spin_timings);
     measured.spin_onsite_ms = spin_timings.onsite_ms;
     measured.spin_density_ms = spin_timings.density_ms;

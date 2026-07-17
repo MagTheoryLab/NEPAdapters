@@ -48,6 +48,7 @@ class CpuModel final : public Model {
     if constexpr (HasSpin<NativeNep>::value) {
       if (nep_.paramb.spin_mode > 0) {
         out.capabilities |= to_mask(Capability::spin);
+        out.capabilities |= to_mask(Capability::spin_energy_transfer);
       }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
@@ -67,6 +68,12 @@ class CpuModel final : public Model {
       if (nep_.paramb.spin_mode > 0 && batch.spins_aos3 == nullptr) {
         return NEPA_STATUS_INVALID_ARGUMENT;
       }
+      if (nep_.paramb.spin_mode == 0 &&
+          result.spin_transfer_per_atom_row_major9 != nullptr) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
+    } else if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+      return NEPA_STATUS_UNSUPPORTED;
     }
     for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
       const std::int32_t atom_count = batch.atom_counts[structure];
@@ -121,6 +128,11 @@ class CpuModel final : public Model {
             std::vector<double> descriptor_soa(
                 static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
             std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
+            std::vector<double> spin_transfer_soa;
+            if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+              spin_transfer_soa.assign(
+                  static_cast<std::size_t>(atom_count) * 9, 0.0);
+            }
             native.compute(
                 types,
                 box,
@@ -130,7 +142,8 @@ class CpuModel final : public Model {
                 force_soa,
                 virial_soa,
                 descriptor_soa,
-                mforce_soa);
+                mforce_soa,
+                spin_transfer_soa.empty() ? nullptr : &spin_transfer_soa);
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
               const std::int32_t global_atom = atom_offset + atom;
               if (result.mforces_aos3 != nullptr) {
@@ -150,6 +163,15 @@ class CpuModel final : public Model {
                 result.tau_aos3[3 * global_atom + 0] = sy * mz - sz * my;
                 result.tau_aos3[3 * global_atom + 1] = sz * mx - sx * mz;
                 result.tau_aos3[3 * global_atom + 2] = sx * my - sy * mx;
+              }
+              if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+                for (std::int32_t component = 0; component < 9; ++component) {
+                  result.spin_transfer_per_atom_row_major9[
+                      9 * static_cast<std::size_t>(global_atom) + component] =
+                      spin_transfer_soa[
+                          static_cast<std::size_t>(component) * atom_count +
+                          atom];
+                }
               }
             }
           } else if (native.paramb.charge_mode > 0) {
@@ -380,6 +402,10 @@ class CpuModel final : public Model {
       double total_potential = 0.0;
       double total_virial[6] = {};
       if constexpr (HasSpin<NativeNep>::value) {
+        if (nep_.paramb.spin_mode == 0 &&
+            result.spin_transfer_per_atom_row_major9 != nullptr) {
+          return NEPA_STATUS_UNSUPPORTED;
+        }
         if (nep_.paramb.spin_mode > 0) {
           if (input.spins == nullptr) {
             return NEPA_STATUS_INVALID_ARGUMENT;
@@ -399,7 +425,8 @@ class CpuModel final : public Model {
               result.potential_per_atom,
               result.forces,
               result.mforces,
-              result.virials_per_atom9);
+              result.virials_per_atom9,
+              result.spin_transfer_per_atom_row_major9);
         } else {
           nep_.compute_for_lammps(
               input.nlocal,
@@ -417,6 +444,9 @@ class CpuModel final : public Model {
               result.virials_per_atom9);
         }
       } else {
+        if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+          return NEPA_STATUS_UNSUPPORTED;
+        }
         nep_.compute_for_lammps(
           input.nlocal,
           input.inum,

@@ -898,7 +898,10 @@ int main() {
   NepaModelInfo info{};
   if (nepa_model_info(model, &info) != NEPA_STATUS_OK ||
       info.descriptor_dim != kDescriptorDim ||
-      !nep_adapters::has_capability(info.capabilities, nep_adapters::Capability::spin)) {
+      !nep_adapters::has_capability(info.capabilities, nep_adapters::Capability::spin) ||
+      !nep_adapters::has_capability(
+          info.capabilities,
+          nep_adapters::Capability::spin_energy_transfer)) {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }

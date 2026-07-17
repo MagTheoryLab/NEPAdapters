@@ -219,7 +219,8 @@ public:
     std::vector<double>& force,
     std::vector<double>& virial,
     std::vector<double>& descriptor,
-    std::vector<double>& mforce);
+    std::vector<double>& mforce,
+    std::vector<double>* spin_transfer = nullptr);
 
   void compute(
     const std::vector<int>& type,
@@ -323,7 +324,8 @@ public:
     double* potential,
     double** f,
     double** mforce,
-    double** virial);
+    double** virial,
+    double** spin_transfer = nullptr);
 
   int num_atoms = 0;
   int num_cells[3];
@@ -349,6 +351,7 @@ public:
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
   std::vector<double> lammps_mforce_private;
+  std::vector<double> lammps_spin_transfer_private;
   std::vector<double> lammps_total_virial_private;
   std::vector<double> lammps_virial_private;
   std::vector<int> lammps_angular_edge_offsets;

@@ -109,6 +109,27 @@ __device__ __forceinline__ void atomic_add_per_atom_virial_double(
       &virial_soa9[8 * atom_stride + atom], -static_cast<double>(z12 * fy));
 }
 
+__device__ __forceinline__ void atomic_add_spin_transfer_float(
+    int atom_stride,
+    int atom,
+    float x12,
+    float y12,
+    float z12,
+    const float* grad_sj,
+    float* spin_transfer_soa9) {
+  const float rij[3] = {x12, y12, z12};
+#pragma unroll
+  for (int row = 0; row < 3; ++row) {
+#pragma unroll
+    for (int spin_component = 0; spin_component < 3; ++spin_component) {
+      atomicAdd(
+          spin_transfer_soa9 +
+              (3 * row + spin_component) * atom_stride + atom,
+          -rij[row] * grad_sj[spin_component]);
+    }
+  }
+}
+
 __device__ __forceinline__ void
 atomic_add_force_and_per_atom_virial_float_warp_aggregated(
     unsigned active_mask,
@@ -351,6 +372,7 @@ void accumulate_spin_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
+    bool accumulate_spin_transfer,
     SpinForceTimings* timings = nullptr);
 
 }  // namespace nep_adapters::cuda_backend

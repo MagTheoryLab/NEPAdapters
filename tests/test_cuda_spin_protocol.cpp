@@ -32,6 +32,12 @@ int main() {
     std::cerr << "CUDA spin model did not advertise spin capability\n";
     return EXIT_FAILURE;
   }
+  if (!nep_adapters::has_capability(
+          info.capabilities,
+          nep_adapters::Capability::spin_energy_transfer)) {
+    std::cerr << "CUDA spin model did not advertise spin-energy-transfer capability\n";
+    return EXIT_FAILURE;
+  }
   if (info.descriptor_dim != 88) {
     std::cerr << "unexpected descriptor_dim=" << info.descriptor_dim << "\n";
     return EXIT_FAILURE;

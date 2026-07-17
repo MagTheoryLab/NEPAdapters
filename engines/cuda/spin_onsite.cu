@@ -53,6 +53,15 @@ void dispatch_spin_virial_mode(
 }
 
 template <typename Launch>
+void dispatch_spin_transfer_mode(bool enabled, const Launch& launch) {
+  if (enabled) {
+    launch(std::true_type{});
+  } else {
+    launch(std::false_type{});
+  }
+}
+
+template <typename Launch>
 void dispatch_spin_channels(int channels, const Launch& launch) {
   switch (channels) {
     case 1:
@@ -212,23 +221,28 @@ void launch_spin_density_forces(
     const SimulationBox& box,
     const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    SpinVirialMode virial_mode) {
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
   const auto launch_channels = [&](auto channel_tag) {
     constexpr int C = decltype(channel_tag)::value;
     const auto launch_lmax = [&](auto lmax_tag) {
       constexpr int LMax = decltype(lmax_tag)::value;
       const auto launch_virial = [&](auto virial_tag) {
-        constexpr int AtomsPerWarp = 8;
-        constexpr int EdgesPerAtomBatch = 4;
         constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
-        const int tile_blocks =
-            (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
-        accumulate_spin_density_forces_tile_f32<
-            C,
-            LMax,
-            VirialMode,
-            AtomsPerWarp,
-            EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+        const auto launch_transfer = [&](auto transfer_tag) {
+          constexpr int AtomsPerWarp = 8;
+          constexpr int EdgesPerAtomBatch = 4;
+          constexpr bool AccumulateSpinTransfer =
+              decltype(transfer_tag)::value;
+          const int tile_blocks =
+              (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+          accumulate_spin_density_forces_tile_f32<
+              C,
+              LMax,
+              VirialMode,
+              AccumulateSpinTransfer,
+              AtomsPerWarp,
+              EdgesPerAtomBatch><<<tile_blocks, 32>>>(
                 atom_count,
                 static_cast<int>(view.atom_capacity),
                 protocol.struct_descriptor_dim,
@@ -255,7 +269,11 @@ void launch_spin_density_forces(
                 view.force_soa3,
                 view.mforce_soa3,
                 view.virial_soa9,
-                view.per_atom_virial_float_soa9);
+                view.per_atom_virial_float_soa9,
+                view.spin_transfer_soa9);
+        };
+        dispatch_spin_transfer_mode(
+            accumulate_spin_transfer, launch_transfer);
       };
       dispatch_spin_virial_mode(virial_mode, launch_virial);
     };
@@ -270,21 +288,26 @@ void launch_spin_chiral_forces(
     const SimulationBox& box,
     const DeviceModelView& model_view,
     const DeviceWorkspaceView& view,
-    SpinVirialMode virial_mode) {
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
   const SpinCoreLayout layout = make_spin_core_layout(protocol);
   const auto launch_channels = [&](auto channel_tag) {
     constexpr int C = decltype(channel_tag)::value;
     const auto launch_virial = [&](auto virial_tag) {
-      constexpr int AtomsPerWarp = 8;
-      constexpr int EdgesPerAtomBatch = 4;
       constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
-      const int tile_blocks =
-          (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
-      accumulate_spin_chiral_forces_tile_f32<
-          C,
-          VirialMode,
-          AtomsPerWarp,
-          EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+      const auto launch_transfer = [&](auto transfer_tag) {
+        constexpr int AtomsPerWarp = 8;
+        constexpr int EdgesPerAtomBatch = 4;
+        constexpr bool AccumulateSpinTransfer =
+            decltype(transfer_tag)::value;
+        const int tile_blocks =
+            (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+        accumulate_spin_chiral_forces_tile_f32<
+            C,
+            VirialMode,
+            AccumulateSpinTransfer,
+            AtomsPerWarp,
+            EdgesPerAtomBatch><<<tile_blocks, 32>>>(
               atom_count,
               static_cast<int>(view.atom_capacity),
               protocol.struct_descriptor_dim,
@@ -310,7 +333,11 @@ void launch_spin_chiral_forces(
               view.force_soa3,
               view.mforce_soa3,
               view.virial_soa9,
-              view.per_atom_virial_float_soa9);
+              view.per_atom_virial_float_soa9,
+              view.spin_transfer_soa9);
+      };
+      dispatch_spin_transfer_mode(
+          accumulate_spin_transfer, launch_transfer);
     };
     dispatch_spin_virial_mode(virial_mode, launch_virial);
   };
@@ -481,7 +508,8 @@ static void accumulate_spin_density_forces_impl(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    SpinVirialMode virial_mode) {
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
   require(protocol.spin_mode != 0, "spin density force requires spin model");
   require(protocol.spin_compress > 0 &&
               protocol.spin_compress <= kMaxSpinCompress,
@@ -511,6 +539,9 @@ static void accumulate_spin_density_forces_impl(
       virial_mode != SpinVirialMode::center_and_neighbor_float_sink ||
           view.per_atom_virial_float_soa9 != nullptr,
       "workspace missing spin per-atom virial sink");
+  require(
+      !accumulate_spin_transfer || view.spin_transfer_soa9 != nullptr,
+      "workspace missing spin-transfer output");
   require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
   require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
   require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
@@ -530,7 +561,13 @@ static void accumulate_spin_density_forces_impl(
           "model descriptor coefficient buffer is too small");
   if (atom_count > 0) {
     launch_spin_density_forces(
-        protocol, atom_count, box, model_view, view, virial_mode);
+        protocol,
+        atom_count,
+        box,
+        model_view,
+        view,
+        virial_mode,
+        accumulate_spin_transfer);
   }
   check_cuda(cudaGetLastError(), "accumulate spin density forces");
 }
@@ -541,7 +578,8 @@ static void accumulate_spin_chiral_forces_impl(
     const SimulationBox& box,
     const DeviceModel& model,
     DeviceWorkspace& workspace,
-    SpinVirialMode virial_mode) {
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
   require(protocol.spin_mode != 0, "spin chiral polar force requires spin model");
   require(protocol.spin_chiral != 0, "spin chiral polar force requires chiral model");
   require(
@@ -567,6 +605,9 @@ static void accumulate_spin_chiral_forces_impl(
       virial_mode != SpinVirialMode::center_and_neighbor_float_sink ||
           view.per_atom_virial_float_soa9 != nullptr,
       "workspace missing spin per-atom virial sink");
+  require(
+      !accumulate_spin_transfer || view.spin_transfer_soa9 != nullptr,
+      "workspace missing spin-transfer output");
   require(view.spin_density_geom != nullptr, "workspace missing spin density geom");
   require(view.spin_density_raw1 != nullptr,
           "workspace missing spin density raw1");
@@ -582,7 +623,13 @@ static void accumulate_spin_chiral_forces_impl(
           "model descriptor coefficient buffer is too small");
   if (atom_count > 0) {
     launch_spin_chiral_forces(
-        protocol, atom_count, box, model_view, view, virial_mode);
+        protocol,
+        atom_count,
+        box,
+        model_view,
+        view,
+        virial_mode,
+        accumulate_spin_transfer);
   }
   check_cuda(cudaGetLastError(), "accumulate spin chiral polar forces");
 }
@@ -594,6 +641,7 @@ void accumulate_spin_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
+    bool accumulate_spin_transfer,
     SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
   require(
@@ -604,6 +652,17 @@ void accumulate_spin_forces_on_device(
   SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
   SpinVirialMode virial_mode = SpinVirialMode::disabled;
+  const DeviceWorkspaceView view = workspace.view();
+  if (accumulate_spin_transfer) {
+    require(view.spin_transfer_soa9 != nullptr,
+            "workspace missing spin-transfer output");
+    check_cuda(
+        cudaMemset(
+            view.spin_transfer_soa9,
+            0,
+            9 * view.atom_capacity * sizeof(float)),
+        "clear spin-transfer output");
+  }
   switch (virial_target) {
     case VirialTarget::none:
       break;
@@ -622,12 +681,24 @@ void accumulate_spin_forces_on_device(
   timer.split(measured.onsite_ms);
 
   accumulate_spin_density_forces_impl(
-      protocol, atom_count, box, model, workspace, virial_mode);
+      protocol,
+      atom_count,
+      box,
+      model,
+      workspace,
+      virial_mode,
+      accumulate_spin_transfer);
   timer.split(measured.density_ms);
 
   if (protocol.spin_chiral != 0) {
     accumulate_spin_chiral_forces_impl(
-        protocol, atom_count, box, model, workspace, virial_mode);
+        protocol,
+        atom_count,
+        box,
+        model,
+        workspace,
+        virial_mode,
+        accumulate_spin_transfer);
   }
   timer.split(measured.chiral_ms);
 }

@@ -16,6 +16,7 @@ enum class Capability : CapabilityMask {
   charge = NEPA_CAPABILITY_CHARGE,
   virial = NEPA_CAPABILITY_VIRIAL,
   descriptors = NEPA_CAPABILITY_DESCRIPTORS,
+  spin_energy_transfer = NEPA_CAPABILITY_SPIN_ENERGY_TRANSFER,
 };
 
 constexpr CapabilityMask to_mask(Capability capability) {

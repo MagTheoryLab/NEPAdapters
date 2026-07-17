@@ -249,7 +249,8 @@ const DeviceArrayPlan* WorkspacePlan::find_array(const std::string& name) const 
 WorkspacePlan make_internal_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
-    std::size_t structure_capacity) {
+    std::size_t structure_capacity,
+    bool include_spin_transfer) {
   if (atom_capacity == 0) {
     throw std::runtime_error("atom_capacity must be positive");
   }
@@ -265,6 +266,16 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
 
   add_common_atom_arrays(plan);
   add_spin_arrays(plan, protocol);
+  if (include_spin_transfer) {
+    if (protocol.spin_mode == 0) {
+      throw std::runtime_error("spin-transfer output requires a spin model");
+    }
+    add_array(
+        plan,
+        "spin_transfer_soa9",
+        ScalarType::float32,
+        atom_capacity * 9);
+  }
   add_array(plan, "atom_to_structure", ScalarType::int32, atom_capacity);
   add_array(plan, "structure_atom_counts", ScalarType::int32, structure_capacity);
   add_array(plan, "structure_atom_offsets", ScalarType::int32, structure_capacity);
@@ -299,7 +310,8 @@ WorkspacePlan make_external_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
-    bool include_per_atom_virial_sink) {
+    bool include_per_atom_virial_sink,
+    bool include_spin_transfer) {
   if (atom_capacity == 0) {
     throw std::runtime_error("atom_capacity must be positive");
   }
@@ -315,6 +327,16 @@ WorkspacePlan make_external_neighbor_workspace_plan(
 
   add_common_atom_arrays(plan);
   add_spin_arrays(plan, protocol);
+  if (include_spin_transfer) {
+    if (protocol.spin_mode == 0) {
+      throw std::runtime_error("spin-transfer output requires a spin model");
+    }
+    add_array(
+        plan,
+        "spin_transfer_soa9",
+        ScalarType::float32,
+        atom_capacity * 9);
+  }
   add_array(plan, "active_atom_indices", ScalarType::int32, active_atom_capacity);
   add_slot_major_neighbor_arrays(plan, protocol);
   add_array(plan, "neighbor_overflow", ScalarType::int32, 3);

@@ -43,13 +43,15 @@ struct WorkspacePlan {
 WorkspacePlan make_internal_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
-    std::size_t structure_capacity);
+    std::size_t structure_capacity,
+    bool include_spin_transfer = false);
 
 WorkspacePlan make_external_neighbor_workspace_plan(
     const ModelProtocol& protocol,
     std::size_t atom_capacity,
     std::size_t active_atom_capacity,
-    bool include_per_atom_virial_sink = false);
+    bool include_per_atom_virial_sink = false,
+    bool include_spin_transfer = false);
 
 struct DeviceWorkspaceSummary {
   std::size_t total_bytes = 0;
@@ -69,6 +71,7 @@ struct DeviceWorkspaceView {
   double* force_soa3 = nullptr;
   double* mforce_soa3 = nullptr;
   double* virial_soa9 = nullptr;
+  float* spin_transfer_soa9 = nullptr;
   double* charge = nullptr;
   double* bec_soa9 = nullptr;
   float* d_real = nullptr;

@@ -24,6 +24,7 @@ struct ForceEvaluationRequest {
       ForceNeighborTopology::single_box_symmetric;
   VirialOutputMode virial = VirialOutputMode::total_only;
   bool store_potential = true;
+  bool spin_transfer_per_atom = false;
 };
 
 constexpr bool requests_per_atom_virial(

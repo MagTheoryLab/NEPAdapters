@@ -56,6 +56,7 @@ struct Prediction {
   std::vector<double> atom_virial;
   std::vector<double> mforce;
   std::vector<double> tau;
+  std::vector<double> spin_transfer;
   std::vector<double> descriptor;
 };
 
@@ -66,6 +67,7 @@ struct LammpsPrediction {
   std::vector<double> force;
   std::vector<double> mforce;
   std::vector<double> atom_virial9;
+  std::vector<double> spin_transfer;
 };
 
 struct Budget {
@@ -355,7 +357,8 @@ template <typename Runner>
 Prediction evaluate_batch(
     Runner& runner,
     const CaseData& test_case,
-    bool include_descriptors = true) {
+    bool include_descriptors = true,
+    bool include_spin_transfer = true) {
   NepaModelInfo info{};
   require_status(runner.model_info(info), "model_info");
   const int atom_count = test_case.atom_count();
@@ -387,6 +390,9 @@ Prediction evaluate_batch(
   if (test_case.is_spin()) {
     out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
     out.tau.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+    if (include_spin_transfer) {
+      out.spin_transfer.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+    }
   }
 
   NepaFindForceResult result{};
@@ -397,6 +403,8 @@ Prediction evaluate_batch(
   result.virials_per_atom_row_major9 = out.atom_virial.data();
   result.mforces_aos3 = out.mforce.empty() ? nullptr : out.mforce.data();
   result.tau_aos3 = out.tau.empty() ? nullptr : out.tau.data();
+  result.spin_transfer_per_atom_row_major9 =
+      out.spin_transfer.empty() ? nullptr : out.spin_transfer.data();
   require_status(runner.find_force_batch(batch, result), "find_force_batch");
 
   if (include_descriptors) {
@@ -764,6 +772,9 @@ bool compare_prediction(
     ok = report_field(
              backend, test_case.name, "tau", candidate.tau,
              oracle.tau, budgets.tau) && ok;
+    ok = report_field(
+             backend, test_case.name, "spin_transfer", candidate.spin_transfer,
+             oracle.spin_transfer, budgets.mforce) && ok;
   }
   return ok;
 }
@@ -989,6 +1000,8 @@ LammpsPrediction evaluate_lammps_device(
       test_case.is_spin() ? static_cast<std::size_t>(atom_count) * 3 : 0);
   DeviceBuffer<double> d_atom_virial(
       static_cast<std::size_t>(atom_count) * 9);
+  DeviceBuffer<double> d_spin_transfer(
+      test_case.is_spin() ? static_cast<std::size_t>(atom_count) * 9 : 0);
 
   NepaLammpsDeviceNeighborInput input{};
   input.nlocal = atom_count;
@@ -1023,6 +1036,10 @@ LammpsPrediction evaluate_lammps_device(
   result.virials_per_atom9 = d_atom_virial.data();
   result.virial_atom_stride = 9;
   result.virial_component_stride = 1;
+  result.spin_transfer_per_atom_row_major9 =
+      test_case.is_spin() ? d_spin_transfer.data() : nullptr;
+  result.spin_transfer_atom_stride = test_case.is_spin() ? 9 : 0;
+  result.spin_transfer_component_stride = test_case.is_spin() ? 1 : 0;
   require_status(
       runner.find_force_lammps_device_neighbors(input, result),
       "find_force_lammps_device_neighbors");
@@ -1034,6 +1051,7 @@ LammpsPrediction evaluate_lammps_device(
   out.force.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
   if (test_case.is_spin()) {
     out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+    out.spin_transfer.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   }
   out.atom_virial9.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   d_energy.copy_to(energy);
@@ -1042,6 +1060,7 @@ LammpsPrediction evaluate_lammps_device(
   d_force.copy_to(out.force);
   if (test_case.is_spin()) {
     d_mforce.copy_to(out.mforce);
+    d_spin_transfer.copy_to(out.spin_transfer);
   }
   d_atom_virial.copy_to(out.atom_virial9);
   out.energy = energy[0];
@@ -1063,11 +1082,16 @@ LammpsPrediction evaluate_lammps(
       test_case.is_spin() ? atom_count : 0, nullptr);
   std::vector<std::array<double, 9>> virial_rows(atom_count);
   std::vector<double*> virial_ptrs(atom_count, nullptr);
+  std::vector<std::array<double, 9>> spin_transfer_rows(
+      test_case.is_spin() ? atom_count : 0);
+  std::vector<double*> spin_transfer_ptrs(
+      test_case.is_spin() ? atom_count : 0, nullptr);
   for (int atom = 0; atom < atom_count; ++atom) {
     force_ptrs[atom] = force_rows[atom].data();
     virial_ptrs[atom] = virial_rows[atom].data();
     if (test_case.is_spin()) {
       mforce_ptrs[atom] = mforce_rows[atom].data();
+      spin_transfer_ptrs[atom] = spin_transfer_rows[atom].data();
     }
   }
 
@@ -1078,6 +1102,7 @@ LammpsPrediction evaluate_lammps(
   out.atom_virial9.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   if (test_case.is_spin()) {
     out.mforce.assign(static_cast<std::size_t>(atom_count) * 3, 0.0);
+    out.spin_transfer.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
   }
 
   NepaLammpsNeighborResult result{};
@@ -1087,6 +1112,8 @@ LammpsPrediction evaluate_lammps(
   result.forces = force_ptrs.data();
   result.mforces = mforce_ptrs.empty() ? nullptr : mforce_ptrs.data();
   result.virials_per_atom9 = virial_ptrs.data();
+  result.spin_transfer_per_atom_row_major9 =
+      spin_transfer_ptrs.empty() ? nullptr : spin_transfer_ptrs.data();
   require_status(
       runner.find_force_lammps_neighbors(storage.input, result),
       "find_force_lammps_neighbors");
@@ -1103,6 +1130,10 @@ LammpsPrediction evaluate_lammps(
     for (int component = 0; component < 9; ++component) {
       out.atom_virial9[9 * static_cast<std::size_t>(atom) + component] =
           virial_rows[atom][component];
+      if (test_case.is_spin()) {
+        out.spin_transfer[9 * static_cast<std::size_t>(atom) + component] =
+            spin_transfer_rows[atom][component];
+      }
     }
   }
   return out;
@@ -1298,6 +1329,188 @@ bool validate_cuda_n2_heat_current(
                velocities),
            reference) && ok;
   return ok;
+}
+#endif
+
+std::array<double, 3> spin_heat_current_from_transfer(
+    const std::vector<double>& spin_transfer,
+    const std::vector<double>& spin_rates) {
+  if (spin_transfer.size() % 9 != 0 ||
+      spin_rates.size() != spin_transfer.size() / 3) {
+    throw std::runtime_error("invalid spin-transfer contraction shape");
+  }
+  std::array<double, 3> current{};
+  for (std::size_t atom = 0; atom < spin_rates.size() / 3; ++atom) {
+    for (int spatial = 0; spatial < 3; ++spatial) {
+      for (int spin_component = 0; spin_component < 3; ++spin_component) {
+        current[spatial] +=
+            spin_transfer[9 * atom + 3 * spatial + spin_component] *
+            spin_rates[3 * atom + spin_component];
+      }
+    }
+  }
+  return current;
+}
+
+struct DirectSpinHeatCurrentReference {
+  std::array<double, 3> neighbor_owned{};
+  std::array<double, 3> center_owned{};
+};
+
+double max_abs_diff3(
+    const std::array<double, 3>& lhs,
+    const std::array<double, 3>& rhs) {
+  double out = 0.0;
+  for (int component = 0; component < 3; ++component) {
+    out = std::max(out, std::abs(lhs[component] - rhs[component]));
+  }
+  return out;
+}
+
+template <typename Runner>
+DirectSpinHeatCurrentReference finite_difference_spin_heat_current_reference(
+    Runner& runner,
+    const CaseData& test_case,
+    const std::vector<double>& spin_rates) {
+  if (!test_case.is_spin() || spin_rates.size() != test_case.spins.size()) {
+    throw std::runtime_error("invalid random spin-rate shape");
+  }
+  constexpr double h = 2.0e-4;
+  DirectSpinHeatCurrentReference out;
+  for (int center = 0; center < test_case.atom_count(); ++center) {
+    for (int neighbor = 0; neighbor < test_case.atom_count(); ++neighbor) {
+      if (neighbor == center) {
+        continue;
+      }
+      for (int spin_component = 0; spin_component < 3; ++spin_component) {
+        CaseData em2_case = displaced_case(
+            test_case, true,
+            3 * static_cast<std::size_t>(neighbor) + spin_component,
+            -2.0 * h);
+        CaseData em1_case = displaced_case(
+            test_case, true,
+            3 * static_cast<std::size_t>(neighbor) + spin_component,
+            -h);
+        CaseData ep1_case = displaced_case(
+            test_case, true,
+            3 * static_cast<std::size_t>(neighbor) + spin_component,
+            h);
+        CaseData ep2_case = displaced_case(
+            test_case, true,
+            3 * static_cast<std::size_t>(neighbor) + spin_component,
+            2.0 * h);
+        const double em2 = evaluate_batch(runner, em2_case, false, false).potential[center];
+        const double em1 = evaluate_batch(runner, em1_case, false, false).potential[center];
+        const double ep1 = evaluate_batch(runner, ep1_case, false, false).potential[center];
+        const double ep2 = evaluate_batch(runner, ep2_case, false, false).potential[center];
+        const double grad_sj =
+            (em2 - 8.0 * em1 + 8.0 * ep1 - ep2) / (12.0 * h);
+        for (int spatial = 0; spatial < 3; ++spatial) {
+          const double rij =
+              test_case.positions[3 * static_cast<std::size_t>(neighbor) + spatial] -
+              test_case.positions[3 * static_cast<std::size_t>(center) + spatial];
+          out.neighbor_owned[spatial] -=
+              rij * grad_sj *
+              spin_rates[3 * static_cast<std::size_t>(neighbor) + spin_component];
+          out.center_owned[spatial] -=
+              rij * grad_sj *
+              spin_rates[3 * static_cast<std::size_t>(center) + spin_component];
+        }
+      }
+    }
+  }
+  return out;
+}
+
+std::vector<double> make_tangent_random_spin_rates(const CaseData& test_case) {
+  std::mt19937_64 generator(0x415f6a5f7370696eULL);
+  std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+  std::vector<double> rates(test_case.spins.size(), 0.0);
+  for (int atom = 0; atom < test_case.atom_count(); ++atom) {
+    double dot = 0.0;
+    double norm2 = 0.0;
+    for (int component = 0; component < 3; ++component) {
+      const std::size_t index = 3 * static_cast<std::size_t>(atom) + component;
+      rates[index] = distribution(generator);
+      dot += rates[index] * test_case.spins[index];
+      norm2 += test_case.spins[index] * test_case.spins[index];
+    }
+    if (norm2 > 0.0) {
+      for (int component = 0; component < 3; ++component) {
+        const std::size_t index = 3 * static_cast<std::size_t>(atom) + component;
+        rates[index] -= dot / norm2 * test_case.spins[index];
+      }
+    }
+  }
+  return rates;
+}
+
+bool report_spin_heat_current(
+    const std::string& backend,
+    const std::string& path,
+    const std::array<double, 3>& candidate,
+    const DirectSpinHeatCurrentReference& reference,
+    const double tolerance) {
+  const double error = max_abs_diff3(candidate, reference.neighbor_owned);
+  const double wrong_owner_gap =
+      max_abs_diff3(reference.center_owned, reference.neighbor_owned);
+  const bool ok = error <= tolerance && wrong_owner_gap > tolerance;
+  std::cout << std::scientific << std::setprecision(9)
+            << "SPIN_HEAT_CURRENT backend=" << backend
+            << " path=" << path
+            << " random_seed=0x415f6a5f7370696e"
+            << " direct_x=" << reference.neighbor_owned[0]
+            << " direct_y=" << reference.neighbor_owned[1]
+            << " direct_z=" << reference.neighbor_owned[2]
+            << " tensor_x=" << candidate[0]
+            << " tensor_y=" << candidate[1]
+            << " tensor_z=" << candidate[2]
+            << " max_abs=" << error
+            << " wrong_center_gap=" << wrong_owner_gap
+            << " tolerance=" << tolerance
+            << " status=" << (ok ? "pass" : "fail") << '\n';
+  return ok;
+}
+
+template <typename BackendRunner, typename DirectRunner>
+bool validate_spin_heat_current_host_paths(
+    const std::string& backend_name,
+    BackendRunner& backend,
+    DirectRunner& direct_runner,
+    const CaseData& test_case,
+    const double tolerance) {
+  const std::vector<double> spin_rates = make_tangent_random_spin_rates(test_case);
+  const DirectSpinHeatCurrentReference reference =
+      finite_difference_spin_heat_current_reference(
+          direct_runner, test_case, spin_rates);
+  const Prediction batch = evaluate_batch(backend, test_case, false);
+  LammpsStorage storage(test_case, model_cutoff_max(backend));
+  const LammpsPrediction lammps = evaluate_lammps(backend, test_case, storage);
+  bool ok = report_spin_heat_current(
+      backend_name, "batch",
+      spin_heat_current_from_transfer(batch.spin_transfer, spin_rates),
+      reference, tolerance);
+  ok = report_spin_heat_current(
+           backend_name, "host_neighbors",
+           spin_heat_current_from_transfer(lammps.spin_transfer, spin_rates),
+           reference, tolerance) && ok;
+  return ok;
+}
+
+#if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
+bool validate_spin_heat_current_device_path(
+    ApiRunner& backend,
+    OracleRunner& direct_runner,
+    const CaseData& test_case) {
+  const std::vector<double> spin_rates = make_tangent_random_spin_rates(test_case);
+  const DirectSpinHeatCurrentReference reference =
+      finite_difference_spin_heat_current_reference(
+          direct_runner, test_case, spin_rates);
+  const LammpsPrediction device = evaluate_lammps_device(backend, test_case);
+  return report_spin_heat_current(
+      "cuda", "device_neighbors",
+      spin_heat_current_from_transfer(device.spin_transfer, spin_rates),
+      reference, 2.0e-4);
 }
 #endif
 
@@ -1498,9 +1711,13 @@ bool validate_oracle_lammps(
   const double mforce_diff = test_case.is_spin()
       ? max_abs_diff(batch.mforce, lammps.mforce)
       : 0.0;
+  const double spin_transfer_diff = test_case.is_spin()
+      ? max_abs_diff(batch.spin_transfer, lammps.spin_transfer)
+      : 0.0;
   const bool ok = energy_diff <= 2.0e-10 && potential_diff <= 2.0e-10 &&
                   force_diff <= 2.0e-10 && virial_diff <= 2.0e-10 &&
-                  atom_virial_diff <= 2.0e-10 && mforce_diff <= 2.0e-10;
+                  atom_virial_diff <= 2.0e-10 && mforce_diff <= 2.0e-10 &&
+                  spin_transfer_diff <= 2.0e-10;
   std::cout << std::scientific << std::setprecision(9)
             << "FP64_ORACLE_LAMMPS_SELF_CHECK case=" << test_case.name
             << " energy=" << energy_diff
@@ -1509,6 +1726,7 @@ bool validate_oracle_lammps(
             << " virial=" << virial_diff
             << " atom_virial=" << atom_virial_diff
             << " mforce=" << mforce_diff
+            << " spin_transfer=" << spin_transfer_diff
             << " status=" << (ok ? "pass" : "fail") << '\n';
   return ok;
 }
@@ -1545,6 +1763,10 @@ bool compare_lammps_prediction(
     ok = report_field(
              backend, test_case.name + "_lammps", "mforce",
              candidate.mforce, oracle.mforce, budgets.mforce) && ok;
+    ok = report_field(
+             backend, test_case.name + "_lammps", "spin_transfer",
+             candidate.spin_transfer, oracle.spin_transfer,
+             budgets.mforce) && ok;
   }
   return ok;
 }
@@ -1672,6 +1894,10 @@ bool run_device_spin_lammps_case(
            "cuda_device", test_case.name + "_lammps", "mforce",
            candidate.mforce, oracle_lammps.mforce, budgets.mforce) && ok;
   ok = report_field(
+           "cuda_device", test_case.name + "_lammps", "spin_transfer",
+           candidate.spin_transfer, oracle_lammps.spin_transfer,
+           budgets.mforce) && ok;
+  ok = report_field(
            "cuda_device",
            test_case.name + "_lammps",
            "atom_virial9_sum",
@@ -1756,6 +1982,9 @@ int main() {
              cpu_spin,
              spin_oracle,
              spin_isolated_periodic) && ok;
+    ok = validate_spin_heat_current_host_paths(
+             "cpu", cpu_spin, spin_oracle, spin_isolated_periodic,
+             2.0e-7) && ok;
 
 #if defined(NEP_ADAPTERS_FP64_COMPARE_CUDA)
     ok = run_backend_batch_cases(
@@ -1784,6 +2013,11 @@ int main() {
              nonmag_oracle,
              dense_nonmag_lammps) && ok;
     ApiRunner cuda_spin("cuda", spin_isolated_periodic.model_path);
+    ok = validate_spin_heat_current_host_paths(
+             "cuda", cuda_spin, spin_oracle, spin_isolated_periodic,
+             2.0e-4) && ok;
+    ok = validate_spin_heat_current_device_path(
+             cuda_spin, spin_oracle, spin_isolated_periodic) && ok;
     ok = validate_cuda_n2_heat_current(
              cuda_spin, spin_oracle, spin_isolated_periodic) && ok;
     ok = run_lammps_case(

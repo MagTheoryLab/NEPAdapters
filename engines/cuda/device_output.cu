@@ -53,15 +53,21 @@ __device__ __forceinline__ double lammps_voigt_component(
 __global__ void write_lammps_atom_outputs(
     int potential_atom_count,
     int virial_atom_count,
+    int spin_transfer_atom_count,
     int atom_stride,
     const double* potential,
     const float* per_atom_virial_float_soa9,
+    const float* spin_transfer_soa9,
     double* potential_per_atom,
     double* virials_per_atom9,
     int virial_atom_stride,
-    int virial_component_stride) {
+    int virial_component_stride,
+    double* spin_transfer_per_atom_row_major9,
+    int spin_transfer_atom_stride,
+    int spin_transfer_component_stride) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= potential_atom_count && atom >= virial_atom_count) {
+  if (atom >= potential_atom_count && atom >= virial_atom_count &&
+      atom >= spin_transfer_atom_count) {
     return;
   }
 
@@ -75,6 +81,16 @@ __global__ void write_lammps_atom_outputs(
           atom * virial_atom_stride + component * virial_component_stride] =
           static_cast<double>(
               per_atom_virial_float_soa9[component * atom_stride + atom]);
+    }
+  }
+  if (spin_transfer_per_atom_row_major9 != nullptr &&
+      atom < spin_transfer_atom_count) {
+    for (int component = 0; component < 9; ++component) {
+      spin_transfer_per_atom_row_major9[
+          atom * spin_transfer_atom_stride +
+          component * spin_transfer_component_stride] =
+          static_cast<double>(
+              spin_transfer_soa9[component * atom_stride + atom]);
     }
   }
 }
@@ -354,6 +370,12 @@ void write_lammps_device_outputs(
     require(result.virial_atom_stride > 0, "invalid virial atom stride");
     require(result.virial_component_stride > 0, "invalid virial component stride");
   }
+  if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+    require(result.spin_transfer_atom_stride > 0,
+            "invalid spin-transfer atom stride");
+    require(result.spin_transfer_component_stride > 0,
+            "invalid spin-transfer component stride");
+  }
 
   const DeviceWorkspaceView view = workspace.view();
   require(static_cast<std::size_t>(input.nall) <= view.atom_capacity,
@@ -367,6 +389,10 @@ void write_lammps_device_outputs(
   if (result.virials_per_atom9 != nullptr) {
     require(view.per_atom_virial_float_soa9 != nullptr,
             "workspace missing per-atom virial sink");
+  }
+  if (result.spin_transfer_per_atom_row_major9 != nullptr) {
+    require(view.spin_transfer_soa9 != nullptr,
+            "workspace missing spin-transfer output");
   }
   if (write_totals) {
     require(view.lammps_partial_sums != nullptr,
@@ -397,22 +423,34 @@ void write_lammps_device_outputs(
 
   const int virial_output_atom_count =
       result.virials_per_atom9 != nullptr ? input.nall : 0;
+  const int spin_transfer_output_atom_count =
+      result.spin_transfer_per_atom_row_major9 != nullptr ? input.nall : 0;
   const int atom_output_count =
-      std::max(input.nlocal, virial_output_atom_count);
+      std::max(
+          input.nlocal,
+          std::max(
+              virial_output_atom_count,
+              spin_transfer_output_atom_count));
   const int atom_blocks = (atom_output_count + kThreads - 1) / kThreads;
   if (atom_blocks > 0 &&
       (result.potential_per_atom != nullptr ||
-       result.virials_per_atom9 != nullptr)) {
+       result.virials_per_atom9 != nullptr ||
+       result.spin_transfer_per_atom_row_major9 != nullptr)) {
     write_lammps_atom_outputs<<<atom_blocks, kThreads>>>(
         input.nlocal,
         virial_output_atom_count,
+        spin_transfer_output_atom_count,
         static_cast<int>(view.atom_capacity),
         view.potential,
         view.per_atom_virial_float_soa9,
+        view.spin_transfer_soa9,
         result.potential_per_atom,
         result.virials_per_atom9,
         result.virial_atom_stride,
-        result.virial_component_stride);
+        result.virial_component_stride,
+        result.spin_transfer_per_atom_row_major9,
+        result.spin_transfer_atom_stride,
+        result.spin_transfer_component_stride);
     check_cuda(cudaGetLastError(), "write device LAMMPS atom outputs");
   }
 

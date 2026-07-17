@@ -30,8 +30,12 @@ struct Case {
   std::vector<double*> spin_rows;
   std::vector<double> forces;
   std::vector<double> mforces;
+  std::vector<double> spin_transfer;
+  std::vector<double> virials;
   std::vector<double*> force_rows;
   std::vector<double*> mforce_rows;
+  std::vector<double*> spin_transfer_rows;
+  std::vector<double*> virial_rows;
 };
 
 int parse_int(const char* value, const char* name)
@@ -124,8 +128,12 @@ Case make_case(
   c.spin_rows.resize(static_cast<std::size_t>(c.nall));
   c.forces.assign(static_cast<std::size_t>(c.nall) * 3, 0.0);
   c.mforces.assign(static_cast<std::size_t>(c.nall) * 3, 0.0);
+  c.spin_transfer.assign(static_cast<std::size_t>(c.nall) * 9, 0.0);
+  c.virials.assign(static_cast<std::size_t>(c.nall) * 9, 0.0);
   c.force_rows.resize(static_cast<std::size_t>(c.nall));
   c.mforce_rows.resize(static_cast<std::size_t>(c.nall));
+  c.spin_transfer_rows.resize(static_cast<std::size_t>(c.nall));
+  c.virial_rows.resize(static_cast<std::size_t>(c.nall));
   for (int atom = 0; atom < c.nall; ++atom) {
     c.position_rows[static_cast<std::size_t>(atom)] =
       c.positions.data() + static_cast<std::size_t>(3) * atom;
@@ -135,6 +143,10 @@ Case make_case(
       c.forces.data() + static_cast<std::size_t>(3) * atom;
     c.mforce_rows[static_cast<std::size_t>(atom)] =
       c.mforces.data() + static_cast<std::size_t>(3) * atom;
+    c.spin_transfer_rows[static_cast<std::size_t>(atom)] =
+      c.spin_transfer.data() + static_cast<std::size_t>(9) * atom;
+    c.virial_rows[static_cast<std::size_t>(atom)] =
+      c.virials.data() + static_cast<std::size_t>(9) * atom;
   }
   return c;
 }
@@ -143,11 +155,19 @@ bool run_once(
   NepaModel* model,
   Case& c,
   const bool use_spins,
+  const bool write_per_atom_virial,
+  const bool write_spin_transfer,
   double& total_potential,
   double total_virial[6])
 {
   std::fill(c.forces.begin(), c.forces.end(), 0.0);
   std::fill(c.mforces.begin(), c.mforces.end(), 0.0);
+  if (write_spin_transfer) {
+    std::fill(c.spin_transfer.begin(), c.spin_transfer.end(), 0.0);
+  }
+  if (write_per_atom_virial) {
+    std::fill(c.virials.begin(), c.virials.end(), 0.0);
+  }
   total_potential = 0.0;
   std::fill(total_virial, total_virial + 6, 0.0);
 
@@ -167,6 +187,10 @@ bool run_once(
   result.total_virial6 = total_virial;
   result.forces = c.force_rows.data();
   result.mforces = c.mforce_rows.data();
+  result.virials_per_atom9 =
+    write_per_atom_virial ? c.virial_rows.data() : nullptr;
+  result.spin_transfer_per_atom_row_major9 =
+    write_spin_transfer ? c.spin_transfer_rows.data() : nullptr;
   return nepa_find_force_lammps_neighbors(model, &input, &result) == NEPA_STATUS_OK;
 }
 
@@ -177,6 +201,8 @@ int main(int argc, char** argv)
   std::string model_path = NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE;
   const char* model_name = "spin_chiral_fixture";
   bool use_spins = true;
+  bool write_spin_transfer = false;
+  bool write_per_atom_virial = false;
   int nx = 16;
   int ny = 16;
   int nz = 16;
@@ -215,6 +241,10 @@ int main(int argc, char** argv)
       iterations = parse_int(next("--iterations"), "--iterations");
     } else if (std::strcmp(argv[arg], "--warmup") == 0) {
       warmup = parse_int(next("--warmup"), "--warmup");
+    } else if (std::strcmp(argv[arg], "--spin-transfer") == 0) {
+      write_spin_transfer = true;
+    } else if (std::strcmp(argv[arg], "--per-atom") == 0) {
+      write_per_atom_virial = true;
     } else {
       throw std::runtime_error(std::string("unknown argument: ") + argv[arg]);
     }
@@ -235,7 +265,9 @@ int main(int argc, char** argv)
   double total_potential = 0.0;
   double total_virial[6] = {};
   for (int i = 0; i < warmup; ++i) {
-    if (!run_once(model, c, use_spins, total_potential, total_virial)) {
+    if (!run_once(
+          model, c, use_spins, write_per_atom_virial, write_spin_transfer,
+          total_potential, total_virial)) {
       std::cerr << "warmup failed\n";
       nepa_free_model(model);
       return 1;
@@ -244,7 +276,9 @@ int main(int argc, char** argv)
 
   const auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < iterations; ++i) {
-    if (!run_once(model, c, use_spins, total_potential, total_virial)) {
+    if (!run_once(
+          model, c, use_spins, write_per_atom_virial, write_spin_transfer,
+          total_potential, total_virial)) {
       std::cerr << "benchmark iteration failed\n";
       nepa_free_model(model);
       return 1;
@@ -264,6 +298,8 @@ int main(int argc, char** argv)
             << "\"iterations\":" << iterations << ','
             << "\"warmup\":" << warmup << ','
             << "\"openmp\":" << NEP_ADAPTERS_BENCH_OPENMP_ENABLED << ','
+            << "\"per_atom_virial\":" << (write_per_atom_virial ? 1 : 0) << ','
+            << "\"spin_transfer\":" << (write_spin_transfer ? 1 : 0) << ','
             << "\"seconds\":" << seconds << ','
             << "\"evals_per_second\":" << (iterations / seconds) << ','
             << "\"atom_steps_per_second\":" << (atom_steps / seconds) << ','

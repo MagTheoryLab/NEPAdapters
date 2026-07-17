@@ -117,12 +117,14 @@ nep_adapters::cuda_backend::ForceEvaluationRequest make_force_evaluation_request
     nep_adapters::cuda_backend::ForceNeighborTopology topology,
     bool store_potential,
     bool total_virial_requested,
-    bool per_atom_virial_requested) {
+    bool per_atom_virial_requested,
+    bool spin_transfer_requested = false) {
   nep_adapters::cuda_backend::ForceEvaluationRequest request;
   request.topology = topology;
   request.virial = select_virial_output_mode(
       total_virial_requested, per_atom_virial_requested);
   request.store_potential = store_potential;
+  request.spin_transfer_per_atom = spin_transfer_requested;
   return request;
 }
 
@@ -427,6 +429,20 @@ void copy_prepared_batch_results_to_host(
             9 * static_cast<std::size_t>(structure_offset),
         "failed to copy CUDA structure virials");
   }
+  if (spin_model && result.spin_transfer_per_atom_row_major9 != nullptr) {
+    const std::vector<float> spin_transfer_soa = copy_device_floats(
+        view.spin_transfer_soa9,
+        view.atom_capacity * 9);
+    for (int atom = 0; atom < atom_count; ++atom) {
+      for (int component = 0; component < 9; ++component) {
+        result.spin_transfer_per_atom_row_major9[
+            9 * static_cast<std::size_t>(atom_offset + atom) + component] =
+            spin_transfer_soa[
+                static_cast<std::size_t>(component) * view.atom_capacity +
+                atom];
+      }
+    }
+  }
   if (charge_model && result.charge_per_atom != nullptr) {
     copy_device_doubles_to_host(
         view.charge,
@@ -487,6 +503,8 @@ class CudaModel : public nep_adapters::Model {
     out.capabilities = nep_adapters::to_mask(nep_adapters::Capability::device_input);
     if (protocol_.spin_mode > 0) {
       out.capabilities |= nep_adapters::to_mask(nep_adapters::Capability::spin);
+      out.capabilities |= nep_adapters::to_mask(
+          nep_adapters::Capability::spin_energy_transfer);
     }
     if (supports_cuda_force_protocol(protocol_)) {
       out.capabilities |=
@@ -532,6 +550,10 @@ class CudaModel : public nep_adapters::Model {
       if (protocol_.spin_mode != 0 && batch.spins_aos3 == nullptr) {
         return NEPA_STATUS_INVALID_ARGUMENT;
       }
+      if (result.spin_transfer_per_atom_row_major9 != nullptr &&
+          protocol_.spin_mode == 0) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
       if (protocol_.charge_mode > 0 && batch.num_structures != 1) {
         return NEPA_STATUS_UNSUPPORTED;
       }
@@ -548,7 +570,8 @@ class CudaModel : public nep_adapters::Model {
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
           batch_workspace(
               workspace_atom_capacity,
-              workspace_structure_capacity);
+              workspace_structure_capacity,
+              result.spin_transfer_per_atom_row_major9 != nullptr);
 
       if (multi_box_execution) {
         nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
@@ -621,7 +644,8 @@ class CudaModel : public nep_adapters::Model {
                   ForceNeighborTopology::single_box_symmetric,
               true,
               true,
-              result.virials_per_atom_row_major9 != nullptr);
+              result.virials_per_atom_row_major9 != nullptr,
+              result.spin_transfer_per_atom_row_major9 != nullptr);
           nep_adapters::cuda_backend::run_force_pipeline(
               protocol_,
               force_request,
@@ -723,7 +747,7 @@ class CudaModel : public nep_adapters::Model {
         return NEPA_STATUS_UNSUPPORTED;
       }
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
-          batch_workspace(max_structure_atom_count(batch), 1);
+          batch_workspace(max_structure_atom_count(batch), 1, false);
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
         const StructureBatchView single(batch, structure);
         nep_adapters::cuda_backend::SimulationBox box;
@@ -794,6 +818,10 @@ class CudaModel : public nep_adapters::Model {
       if (!supports_cuda_force_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
       }
+      if (result.spin_transfer_per_atom_row_major9 != nullptr &&
+          protocol_.spin_mode == 0) {
+        return NEPA_STATUS_UNSUPPORTED;
+      }
       const int atom_capacity = lammps_atom_capacity(input);
       if (atom_capacity <= 0) {
         return NEPA_STATUS_INVALID_ARGUMENT;
@@ -802,7 +830,9 @@ class CudaModel : public nep_adapters::Model {
           nep_adapters::cuda_backend::make_external_neighbor_workspace_plan(
               protocol_,
               static_cast<std::size_t>(atom_capacity),
-              static_cast<std::size_t>(input.inum)));
+              static_cast<std::size_t>(input.inum),
+              false,
+              result.spin_transfer_per_atom_row_major9 != nullptr));
       nep_adapters::cuda_backend::stage_lammps_external_neighbors_on_device(
           input,
           protocol_,
@@ -826,7 +856,8 @@ class CudaModel : public nep_adapters::Model {
               ForceNeighborTopology::single_box_symmetric,
           true,
           result.total_virial6 != nullptr,
-          result.virials_per_atom9 != nullptr);
+          result.virials_per_atom9 != nullptr,
+          result.spin_transfer_per_atom_row_major9 != nullptr);
       nep_adapters::cuda_backend::run_force_pipeline(
           protocol_,
           force_request,
@@ -845,6 +876,11 @@ class CudaModel : public nep_adapters::Model {
               : std::vector<double>{};
       const std::vector<double> virial_soa =
           copy_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+      const std::vector<float> spin_transfer_soa =
+          result.spin_transfer_per_atom_row_major9 != nullptr
+              ? copy_device_floats(
+                    view.spin_transfer_soa9, view.atom_capacity * 9)
+              : std::vector<float>{};
 
       double total_potential = 0.0;
       double total_raw9[9] = {};
@@ -878,6 +914,16 @@ class CudaModel : public nep_adapters::Model {
                                view.atom_capacity +
                            static_cast<std::size_t>(atom)];
             result.virials_per_atom9[atom][component] = value;
+          }
+        }
+        if (result.spin_transfer_per_atom_row_major9 != nullptr &&
+            result.spin_transfer_per_atom_row_major9[atom] != nullptr) {
+          for (int component = 0; component < 9; ++component) {
+            result.spin_transfer_per_atom_row_major9[atom][component] =
+                spin_transfer_soa[
+                    static_cast<std::size_t>(component) *
+                        view.atom_capacity +
+                    atom];
           }
         }
       }
@@ -948,6 +994,15 @@ class CudaModel : public nep_adapters::Model {
         (result.mforce_atom_stride <= 0 || result.mforce_component_stride <= 0)) {
       return invalid_argument("invalid device LAMMPS mforce layout");
     }
+    if (result.spin_transfer_per_atom_row_major9 != nullptr &&
+        (result.spin_transfer_atom_stride <= 0 ||
+         result.spin_transfer_component_stride <= 0)) {
+      return invalid_argument("invalid device spin-transfer layout");
+    }
+    if (result.spin_transfer_per_atom_row_major9 != nullptr &&
+        protocol_.spin_mode == 0) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
 
     try {
       if (!supports_cuda_force_protocol(protocol_)) {
@@ -989,6 +1044,8 @@ class CudaModel : public nep_adapters::Model {
       const bool needs_per_atom_virial_sink =
           external_protocol.charge_mode == 0 &&
           result.virials_per_atom9 != nullptr;
+      const bool needs_spin_transfer =
+          result.spin_transfer_per_atom_row_major9 != nullptr;
       const bool rebuild_workspace =
           lammps_device_workspace_ == nullptr ||
           atom_capacity > lammps_device_atom_capacity_ ||
@@ -998,7 +1055,9 @@ class CudaModel : public nep_adapters::Model {
           external_protocol.neighbor_capacity_angular >
               lammps_device_angular_capacity_ ||
           (needs_per_atom_virial_sink &&
-           !lammps_device_has_per_atom_virial_sink_);
+           !lammps_device_has_per_atom_virial_sink_) ||
+          (needs_spin_transfer &&
+           !lammps_device_has_spin_transfer_);
       LammpsDevicePairProfiler profiler(input.nlocal, rebuild_workspace);
       float stage_ms = 0.0f;
       float clear_ms = 0.0f;
@@ -1015,7 +1074,8 @@ class CudaModel : public nep_adapters::Model {
               external_protocol,
               atom_capacity,
               active_atom_capacity,
-              needs_per_atom_virial_sink);
+              needs_per_atom_virial_sink,
+              needs_spin_transfer);
       // ponytail: GPUMD uses fixed model MN; per-step compact counts add a
       // device-to-host sync in the Pair hot path.
       nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
@@ -1047,7 +1107,8 @@ class CudaModel : public nep_adapters::Model {
           nep_adapters::cuda_backend::ForceNeighborTopology::external_full,
           store_potential,
           result.total_virial6 != nullptr,
-          result.virials_per_atom9 != nullptr);
+          result.virials_per_atom9 != nullptr,
+          needs_spin_transfer);
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
       nep_adapters::cuda_backend::run_force_pipeline(
           external_protocol,
@@ -1092,21 +1153,27 @@ class CudaModel : public nep_adapters::Model {
  private:
   nep_adapters::cuda_backend::DeviceWorkspace& batch_workspace(
       std::size_t atom_capacity,
-      std::size_t structure_capacity) {
+      std::size_t structure_capacity,
+      bool needs_spin_transfer) {
     const bool same_execution_shape =
         (structure_capacity == 1) == (batch_structure_capacity_ == 1);
     if (batch_workspace_ != nullptr && same_execution_shape &&
         atom_capacity <= batch_atom_capacity_ &&
-        structure_capacity <= batch_structure_capacity_) {
+        structure_capacity <= batch_structure_capacity_ &&
+        (!needs_spin_transfer || batch_has_spin_transfer_)) {
       return *batch_workspace_;
     }
 
     batch_workspace_ =
         std::make_unique<nep_adapters::cuda_backend::DeviceWorkspace>(
             nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
-                protocol_, atom_capacity, structure_capacity));
+                protocol_,
+                atom_capacity,
+                structure_capacity,
+                needs_spin_transfer));
     batch_atom_capacity_ = atom_capacity;
     batch_structure_capacity_ = structure_capacity;
+    batch_has_spin_transfer_ = needs_spin_transfer;
     return *batch_workspace_;
   }
 
@@ -1114,14 +1181,16 @@ class CudaModel : public nep_adapters::Model {
       const nep_adapters::cuda_backend::ModelProtocol& protocol,
       std::size_t atom_capacity,
       std::size_t active_atom_capacity,
-      bool needs_per_atom_virial_sink) {
+      bool needs_per_atom_virial_sink,
+      bool needs_spin_transfer) {
     if (lammps_device_workspace_ != nullptr &&
         atom_capacity <= lammps_device_atom_capacity_ &&
         active_atom_capacity <= lammps_device_active_atom_capacity_ &&
         protocol.neighbor_capacity_radial <= lammps_device_radial_capacity_ &&
         protocol.neighbor_capacity_angular <= lammps_device_angular_capacity_ &&
         (!needs_per_atom_virial_sink ||
-         lammps_device_has_per_atom_virial_sink_)) {
+         lammps_device_has_per_atom_virial_sink_) &&
+        (!needs_spin_transfer || lammps_device_has_spin_transfer_)) {
       return *lammps_device_workspace_;
     }
 
@@ -1130,13 +1199,15 @@ class CudaModel : public nep_adapters::Model {
             protocol,
             atom_capacity,
             active_atom_capacity,
-            needs_per_atom_virial_sink));
+            needs_per_atom_virial_sink,
+            needs_spin_transfer));
     lammps_device_workspace_ = std::move(workspace);
     lammps_device_atom_capacity_ = atom_capacity;
     lammps_device_active_atom_capacity_ = active_atom_capacity;
     lammps_device_radial_capacity_ = protocol.neighbor_capacity_radial;
     lammps_device_angular_capacity_ = protocol.neighbor_capacity_angular;
     lammps_device_has_per_atom_virial_sink_ = needs_per_atom_virial_sink;
+    lammps_device_has_spin_transfer_ = needs_spin_transfer;
     return *lammps_device_workspace_;
   }
 
@@ -1146,12 +1217,14 @@ class CudaModel : public nep_adapters::Model {
   std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> batch_workspace_;
   std::size_t batch_atom_capacity_ = 0;
   std::size_t batch_structure_capacity_ = 0;
+  bool batch_has_spin_transfer_ = false;
   std::unique_ptr<nep_adapters::cuda_backend::DeviceWorkspace> lammps_device_workspace_;
   std::size_t lammps_device_atom_capacity_ = 0;
   std::size_t lammps_device_active_atom_capacity_ = 0;
   int lammps_device_radial_capacity_ = 0;
   int lammps_device_angular_capacity_ = 0;
   bool lammps_device_has_per_atom_virial_sink_ = false;
+  bool lammps_device_has_spin_transfer_ = false;
 };
 
 class CudaEngine : public nep_adapters::Engine {

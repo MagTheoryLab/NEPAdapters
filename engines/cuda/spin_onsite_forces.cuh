@@ -798,6 +798,7 @@ template <
     int C,
     int LMax,
     SpinVirialMode VirialMode,
+    bool AccumulateSpinTransfer,
     int AtomsPerWarp,
     int EdgesPerAtomBatch>
 __global__ void __launch_bounds__(32, 8)
@@ -828,7 +829,8 @@ accumulate_spin_density_forces_tile_f32(
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
     double* __restrict__ virial_soa9,
-    float* __restrict__ virial_float_soa9) {
+    float* __restrict__ virial_float_soa9,
+    float* __restrict__ spin_transfer_soa9) {
   using Layout = SpinStaticLayout<C, LMax>;
   constexpr bool AccumulateCenterVirial =
       VirialMode == SpinVirialMode::center_owned ||
@@ -1248,6 +1250,16 @@ accumulate_spin_density_forces_tile_f32(
       atomicAdd(mforce_soa3 + d * atom_stride + neighbor,
                 -static_cast<double>(grad_sj[d]));
     }
+    if constexpr (AccumulateSpinTransfer) {
+      atomic_add_spin_transfer_float(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_sj,
+          spin_transfer_soa9);
+    }
     if constexpr (VirialMode == SpinVirialMode::neighbor_owned) {
       atomic_add_per_atom_virial_double(
           atom_stride,
@@ -1481,6 +1493,7 @@ struct SpinChiralForceTileShared {
 template <
     int C,
     SpinVirialMode VirialMode,
+    bool AccumulateSpinTransfer,
     int AtomsPerWarp,
     int EdgesPerAtomBatch>
 __global__ void __launch_bounds__(32, 8)
@@ -1510,7 +1523,8 @@ accumulate_spin_chiral_forces_tile_f32(
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
     double* __restrict__ virial_soa9,
-    float* __restrict__ virial_float_soa9) {
+    float* __restrict__ virial_float_soa9,
+    float* __restrict__ spin_transfer_soa9) {
   constexpr int ChiC = C < 2 ? C : 2;
   constexpr bool AccumulateCenterVirial =
       VirialMode == SpinVirialMode::center_owned ||
@@ -1899,6 +1913,16 @@ accumulate_spin_chiral_forces_tile_f32(
       atomicAdd(
           mforce_soa3 + d * atom_stride + neighbor,
           -static_cast<double>(grad_sj[d]));
+    }
+    if constexpr (AccumulateSpinTransfer) {
+      atomic_add_spin_transfer_float(
+          atom_stride,
+          neighbor,
+          rhat[0] * dist,
+          rhat[1] * dist,
+          rhat[2] * dist,
+          grad_sj,
+          spin_transfer_soa9);
     }
     if constexpr (VirialMode == SpinVirialMode::neighbor_owned) {
       atomic_add_per_atom_virial_double(

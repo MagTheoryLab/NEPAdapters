@@ -14,7 +14,7 @@
 #endif
 
 #define NEP_ADAPTERS_API_VERSION_MAJOR 0
-#define NEP_ADAPTERS_API_VERSION_MINOR 1
+#define NEP_ADAPTERS_API_VERSION_MINOR 2
 #define NEP_ADAPTERS_API_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -36,7 +36,8 @@ typedef enum NepaCapabilityFlags {
   NEPA_CAPABILITY_SPIN = 1u << 3u,
   NEPA_CAPABILITY_CHARGE = 1u << 4u,
   NEPA_CAPABILITY_VIRIAL = 1u << 5u,
-  NEPA_CAPABILITY_DESCRIPTORS = 1u << 6u
+  NEPA_CAPABILITY_DESCRIPTORS = 1u << 6u,
+  NEPA_CAPABILITY_SPIN_ENERGY_TRANSFER = 1u << 7u
 } NepaCapabilityFlags;
 
 typedef struct NepaModel NepaModel;
@@ -84,6 +85,10 @@ typedef struct NepaFindForceResult {
   double* bec_per_atom_row_major9;
   double* mforces_aos3;
   double* tau_aos3;
+  /* Optional per-atom spin-energy-transfer tensor A_j with
+     A[j,a,alpha] = -sum_i r_ij[a] * dU_i/ds_j[alpha].
+     Row-major order is xSx, xSy, xSz, ySx, ySy, ySz, zSx, zSy, zSz. */
+  double* spin_transfer_per_atom_row_major9;
 } NepaFindForceResult;
 
 typedef struct NepaFindDescriptorResult {
@@ -115,6 +120,9 @@ typedef struct NepaLammpsNeighborResult {
   /* Per-atom 9 components in NEP compute_for_lammps() order:
      xx, yy, zz, xy, xz, yz, yx, zx, zy. */
   double** virials_per_atom9;
+  /* Same row-major A_j order as NepaFindForceResult; unlike virial this is
+     not reordered into the LAMMPS stress-tensor convention. */
+  double** spin_transfer_per_atom_row_major9;
 } NepaLammpsNeighborResult;
 
 typedef struct NepaLammpsDeviceNeighborInput {
@@ -166,6 +174,10 @@ typedef struct NepaLammpsDeviceNeighborResult {
   double* virials_per_atom9;
   int virial_atom_stride;
   int virial_component_stride;
+  /* Device per-atom A_j in fixed row-major spatial-by-spin order. */
+  double* spin_transfer_per_atom_row_major9;
+  int spin_transfer_atom_stride;
+  int spin_transfer_component_stride;
 } NepaLammpsDeviceNeighborResult;
 
 NEP_ADAPTERS_API int nepa_api_version(void);

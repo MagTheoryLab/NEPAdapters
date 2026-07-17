@@ -38,6 +38,7 @@ struct Options {
   bool cycle_model_types = false;
   bool write_totals = false;
   bool write_per_atom = false;
+  bool write_spin_transfer = false;
   bool breakdown = false;
   bool split_pipeline = false;
   bool strip_spin_model = false;
@@ -145,6 +146,8 @@ Options parse_options(int argc, char** argv) {
       options.write_totals = true;
     } else if (arg == "--per-atom") {
       options.write_per_atom = true;
+    } else if (arg == "--spin-transfer") {
+      options.write_spin_transfer = true;
     } else if (arg == "--breakdown") {
       options.breakdown = true;
     } else if (arg == "--split-pipeline") {
@@ -161,7 +164,7 @@ Options parse_options(int argc, char** argv) {
                 << " [--mn-radial N] [--mn-angular N] [--spacing X]"
                 << " [--skin X]"
                 << " [--radial-cutoff X] [--angular-cutoff X]"
-                << " [--totals] [--per-atom] [--breakdown]"
+                << " [--totals] [--per-atom] [--spin-transfer] [--breakdown]"
                 << " [--strip-spin-model]"
                 << " [--split-pipeline]\n";
       std::exit(EXIT_FAILURE);
@@ -408,6 +411,7 @@ struct LayoutStorage {
   double* forces = nullptr;
   double* mforces = nullptr;
   double* virials = nullptr;
+  double* spin_transfer = nullptr;
 };
 
 struct ReplayHeader {
@@ -741,6 +745,12 @@ LayoutStorage make_layout(
                  reinterpret_cast<void**>(&storage.potential_per_atom),
                  static_cast<std::size_t>(system.atom_count) * sizeof(double)),
              "allocate per-atom potential");
+  if (spin_model) {
+    check_cuda(cudaMalloc(
+                   reinterpret_cast<void**>(&storage.spin_transfer),
+                   9 * static_cast<std::size_t>(system.atom_count) * sizeof(double)),
+               "allocate spin-transfer output");
+  }
   return storage;
 }
 
@@ -876,6 +886,7 @@ void free_layout(LayoutStorage& storage) {
   cudaFree(storage.forces);
   cudaFree(storage.mforces);
   cudaFree(storage.virials);
+  cudaFree(storage.spin_transfer);
 }
 
 void run_once(
@@ -898,6 +909,10 @@ void run_once(
   result.virials_per_atom9 = options.write_per_atom ? storage.virials : nullptr;
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
+  result.spin_transfer_per_atom_row_major9 =
+      options.write_spin_transfer ? storage.spin_transfer : nullptr;
+  result.spin_transfer_atom_stride = 9;
+  result.spin_transfer_component_stride = 1;
 
   const NepaStatus status =
       nepa_find_force_lammps_device_neighbors(model, &input, &result);
@@ -1330,6 +1345,7 @@ int main(int argc, char** argv) {
                 << "layout=replay\n"
                 << "totals=" << (options.write_totals ? 1 : 0) << '\n'
                 << "per_atom=" << (options.write_per_atom ? 1 : 0) << '\n'
+                << "spin_transfer=" << (options.write_spin_transfer ? 1 : 0) << '\n'
                 << "breakdown=" << (options.breakdown ? 1 : 0) << '\n'
                 << "split_pipeline=" << (options.split_pipeline ? 1 : 0)
                 << '\n';
@@ -1405,6 +1421,7 @@ int main(int argc, char** argv) {
               << (options.cycle_model_types ? 1 : 0) << '\n'
               << "totals=" << (options.write_totals ? 1 : 0) << '\n'
               << "per_atom=" << (options.write_per_atom ? 1 : 0) << '\n'
+              << "spin_transfer=" << (options.write_spin_transfer ? 1 : 0) << '\n'
               << "breakdown=" << (options.breakdown ? 1 : 0) << '\n'
               << "split_pipeline=" << (options.split_pipeline ? 1 : 0)
               << '\n';
