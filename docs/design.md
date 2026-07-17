@@ -1,196 +1,144 @@
-# NEPAdapters Design
+# NEPAdapters 架构设计
 
-## Positioning
+## 项目定位
 
-NEPAdapters is the current working name for a NEP compute framework. Its value is
-not "wrapping" one implementation. Its value is keeping runtime semantics,
-multiple engines, frontends, packaging, and parity tests aligned.
+NEPAdapters 的价值不是包装某一个实现，而是让运行时语义、多个计算引擎、前端、打包策略和一致性测试保持统一。
 
-The design has three layers:
+项目分为 3 层：
 
-- `core`: model/runtime semantics, data views, capability reporting, error
-  handling, and dispatch.
-- `engines`: the supported `cpu` and `cuda` compute implementations.
-- `frontends`: Python bindings, LAMMPS pair/plugin code, and future software
-  integrations.
+- `core`：模型与运行时语义、数据 view、capability、错误处理和调度；
+- `engines`：受支持的 `cpu` 与 `cuda` 实现；
+- `frontends`：Python、LAMMPS 以及未来的软件集成。
 
-## Non-Negotiable Boundaries
+## 必须保持的边界
 
-- LAMMPS is a frontend, not an engine.
-- Python is a frontend, not the runtime.
-- The core target must not include or link Python or LAMMPS.
-- Engines implement the core engine SPI and must not depend on frontends.
-- Frontends consume the public runtime API and must not include engine internals.
-- ASE must remain an optional Python adapter, not a dependency of the core
-  calculator package.
+- LAMMPS 是 frontend，不是 engine。
+- Python 是 frontend，不是 runtime。
+- core target 不包含或链接 Python、LAMMPS。
+- engine 实现核心 engine SPI，不依赖 frontend。
+- frontend 只使用公共 runtime API，不包含 engine 内部头文件。
+- ASE 只能作为可选 Python adapter，不能成为核心 calculator 的依赖。
 
-## Engine Strategy
+## 计算引擎策略
 
-`cpu` is the only supported CPU engine. Correctness is gated by committed
-golden fixtures, the strict FP64 oracle target, finite-difference checks, and
-CPU/CUDA parity. The removed legacy CPU shim is not retained as a runtime or
-test fallback.
+`cpu` 是唯一受支持的 CPU engine。正确性由固定 golden fixture、严格 FP64 oracle、有限差分和 CPU/CUDA parity 共同约束。已经删除的旧 CPU shim 不作为 runtime、测试或兼容 fallback 保留。
 
-The CUDA engine should be built normal-NEP first. Its protocol source of truth is
-the current `torchnep/src/force` NEP implementation, while performance choices
-should reuse the measured high-performance CUDA work only after the protocol
-boundary is clear. Spin support should layer on top only after the non-spin
-dataflow is stable: model parsing, owned-neighbor construction, host/device
-staging, descriptor/ANN execution, force scatter, and virial reduction should be
-ordinary NEP concepts first, with spin-specific buffers and kernels added later
-instead of defining the base shape.
+CUDA 基础数据流应先保持为普通 NEP 概念：模型解析、自有邻居表、host/device staging、descriptor 与 ANN、force scatter 和 virial reduction。spin 与 charge 在这一数据流上增加明确的 buffer 和 kernel，不能反过来定义所有模型的基础形状。
 
-CUDA implementation files should keep human-facing boundaries explicit:
-`model_protocol` parses the model and computes parameter counts, `workspace_plan`
-names and sizes device buffers, and later `.cu` files should implement kernels
-against those contracts. Avoid recreating a single large bridge file that mixes
-text parsing, LAMMPS conventions, staging, kernels, and diagnostics.
+CUDA 实现要保留可读的内部边界：
 
-CUDA-facing tests should keep caller shapes separate from the start: ordinary
-batch API, LAMMPS host-neighbor simulation, and LAMMPS Kokkos/device-staging
-simulation are different contracts. The Kokkos path should not be forced through
-host pointer APIs; it needs an explicit device-input contract before kernels are
-advertised as supported.
+- `model_protocol`：解析模型协议并计算参数数量；
+- `workspace_plan`：命名并计算 device buffer；
+- 各 `.cu` 文件：针对这些契约实现 kernel；
+- `force_pipeline`：组织完整计算流程，不暴露成新的公共 API。
 
-The CUDA force path has two first-class input modes:
+不要重新形成一个同时混合文本解析、LAMMPS 约定、staging、kernel 和诊断的大型 bridge 文件。
 
-- direct coordinates: the caller provides atom types, positions, boxes, PBC
-  flags, and per-structure ranges. The CUDA engine owns neighbor construction
-  and therefore keeps structure, box, and PBC metadata in its internal-neighbor
-  workspace.
-- external neighbors: the caller provides an already-built neighbor topology.
-  Host callers use the host-neighbor API; the LAMMPS GPU frontend uses the
-  explicit Kokkos device-input API. The CUDA engine converts or aliases either
-  topology into its slot-major execution layout without making this path depend
-  on batch boxes.
+CUDA 测试必须区分调用形状：
 
-Both modes should converge before descriptor and ANN kernels on the same
-slot-major neighbor arrays and SoA atom/output buffers. That shared execution
-layout is the performance-critical boundary; the staging code on either side may
-remain caller-specific.
+- 普通 batch API；
+- LAMMPS host-neighbor simulation；
+- LAMMPS Kokkos/device input。
 
-Internal CUDA neighbor generation should use a large-system cell-list algorithm,
-not an all-pairs builder. The current CUDA scaffold starts with CSR-style cells:
-count atoms per cell, prefix-scan offsets, scatter atom ids into cell-contiguous
-storage, then traverse neighboring cells to fill radial and angular slot-major
-neighbor arrays. That layout leaves room for later sorted-cell ordering and
-Kokkos device-view input without changing descriptor kernels.
+Kokkos 路径不能强行经过 host pointer API。只有定义并验证 device-input 契约后，才能把相应 kernel 标记为受支持。
 
-LAMMPS Kokkos is a third frontend shape, not the same thing as the host-neighbor
-API. In the local LAMMPS checkout, Kokkos coordinates are
-`X_FLOAT*[3]` views accessed as `x(i,0..2)`, while neighbor data is held in
-Kokkos `int**` views and sometimes a transpose view. The device-input path keeps
-these views on device, while the CUDA engine still owns the final execution
-layout for NEP kernels instead of inheriting the LAMMPS view layout as core ABI.
+### CUDA 的 2 种输入模式
 
-## Frontend Strategy
+**直接坐标模式：** 调用方传入原子类型、坐标、盒子、PBC 和结构范围。CUDA engine 自己构建邻居表，因此 internal-neighbor workspace 持有结构、盒子和 PBC metadata。
 
-Python and LAMMPS have different shapes and should not force each other into the
-same call pattern.
+**外部邻居模式：** 调用方已经提供邻居拓扑。host 调用使用 host-neighbor API；LAMMPS GPU frontend 使用显式 Kokkos device-input API。CUDA engine 将拓扑转换或 alias 到 slot-major 执行布局，不依赖 batch box。
 
-- Python primarily wants model loading, batch prediction, optional descriptors,
-  automatic or explicit engine selection, and direct
-  NumPy arrays.
-- LAMMPS primarily wants a pair/plugin frontend that translates LAMMPS atom,
-  box, type-map, neighbor-list, energy, force, and virial conventions into core
-  views.
+两种模式进入 descriptor 和 ANN kernel 前，应汇合到同一套 slot-major 邻居数组和 SoA 原子/输出 buffer。这是性能关键边界；两侧 staging 可以保留调用方特定实现。
 
-LAMMPS pair styles should live under `frontends/lammps/`. They may support a
-runtime plugin and/or a source package, but both are frontends over the same core
-runtime and engines. The CPU LAMMPS pair enters through the LAMMPS-shaped
-external-neighbor contract and the `cpu` engine forwards that path to the
-underlying NEP CPU `compute_for_lammps` implementation. The Python frontend must
-continue to use the regular batch `compute` path and should not inherit LAMMPS
-neighbor-list or ghost-atom conventions.
+内部 CUDA 邻居生成必须使用适合大体系的 cell-list，不能使用 all-pairs 生产实现。当前路径采用 CSR 风格：
 
-LAMMPS pair-style names are user-facing and should not expose the internal
-adapter framework name. The convention is:
+1. 统计每个 cell 的原子数；
+2. prefix scan 得到 offset；
+3. 将 atom id scatter 到 cell-contiguous 存储；
+4. 遍历相邻 cell，填充 radial 和 angular slot-major 邻居数组。
 
-- `nep/cpu`: ordinary NEP through the CPU backend.
-- `nep/gpu`: ordinary NEP through the GPU backend.
-- `nep/spin/cpu`: spin NEP through the CPU backend.
-- `nep/spin/gpu`: spin NEP through the GPU backend.
+all-pairs 只允许作为小体系正确性 oracle。
 
-## Public API vs Engine SPI
+### LAMMPS Kokkos 边界
 
-Public API is what Python, NepTrainKit, LAMMPS integrations, and C/C++ users can
-see. It should change slowly and follow semver once v1 exists. In the current
-M0 skeleton, the public vocabulary is split across `api.h`, `views.hpp`, and
-`capability.hpp`.
+LAMMPS Kokkos 是第 3 种 frontend 输入形状，不等同于 host-neighbor API。本地 LAMMPS 中，坐标是按 `x(i,0..2)` 访问的 `X_FLOAT*[3]` view，邻居数据是 Kokkos `int**` view，有时还包含 transpose view。
 
-Engine SPI is what engine authors implement. It lives in `engine.hpp` and may
-change during v0 while CPU implementations are still being shaped.
+device-input 路径保持这些数据在 GPU 上，但最终 NEP kernel 的执行布局仍由 CUDA engine 决定。核心 ABI 不应直接继承 LAMMPS view 布局。
 
-For v0, the existing C API in `include/nep_adapters/api.h` is experimental. Do
-not freeze ABI until spin, charge, descriptors, external-neighbor input,
-owned-neighbor construction, and device input have clear data-view contracts.
+## 前端策略
 
-## Packaging Strategy
+Python 和 LAMMPS 的数据形状不同，不能要求它们使用相同调用方式。
 
-The default Python package should be CPU-only:
+- Python 需要模型加载、batch prediction、descriptor、显式 engine 选择和直接 NumPy 数组；
+- LAMMPS 需要 pair/plugin，把 atom、box、type map、neighbor list、energy、force 和 virial 约定转换为核心 view。
 
-- build core + `cpu`;
-- not include LAMMPS.
+LAMMPS pair style 放在 `frontends/lammps/`。runtime plugin 和 source integration 都必须复用同一套 core 与 engine。
 
-LAMMPS integration should be buildable by users who download this repository:
+CPU LAMMPS pair 通过 LAMMPS 形状的 external-neighbor 契约进入 `cpu`，底层转发到 NEP CPU 的 `compute_for_lammps`。Python 始终使用普通 batch `compute`，不能继承 LAMMPS neighbor list 或 ghost atom 语义。
 
-- runtime plugin is preferred where practical;
-- source integration is a separate build form for LAMMPS builds that cannot load plugins;
-- it should link the runtime/engine libraries but never depend on Python.
+用户可见的 pair style 不暴露内部 framework 名称。当前实际注册：
 
-## CPU Baseline Plan
+- `nep/cpu`：CPU NEP；
+- `nep/gpu`、`nep/gpu/kk`、`nep/gpu/kk/device`：CUDA Kokkos NEP。
 
-1. Keep core buildable without CUDA, Python, and LAMMPS.
-2. Keep `cpu` as the sole CPU production boundary.
-3. Expose Python through pybind11 with NumPy arrays and no Python-side shape
-   conversions after native return.
-4. Expose a CPU LAMMPS pair/plugin through `compute_for_lammps` and external
-   neighbor lists.
-5. Record correctness, parity, LAMMPS MPI smoke, and OpenMP atom scaling in a
-   generated report.
-6. Keep small golden-label fixtures in `tests/fixtures/`; they are repository
-   test data and must not be packaged into Python wheels.
+pair 内部已经能够识别 spin capability，并要求 LAMMPS `atom_style spin` 提供 `sp` 和 `fm`。但在真实 LAMMPS spin 端到端门禁完成前，这条路径只算集成中的能力，不属于生产 frontend 声明。不要虚构未注册的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。
 
-## Test And Benchmark Strategy
+## 公共 API 与 engine SPI
 
-Testing has two separate jobs:
+公共 API 面向 Python、NepTrainKit、LAMMPS 和 C/C++ 用户，应保持窄而稳定。v1 后按 semver 演进。当前公共词汇位于 `api.h`、`views.hpp` 和 `capability.hpp`。
 
-- correctness: API/SPI contracts, golden-label tests, strict FP64 checks, and
-  frontend integration tests. The default CPU/Python/LAMMPS correctness tests
-  must also compare against committed golden labels in
-  `tests/fixtures/cpu_baseline/`;
-- performance: throughput, scaling, and profiler-backed bottleneck evidence.
+engine SPI 面向 engine 实现者，位于 `engine.hpp`。在 v0 阶段仍可随实现边界调整。
 
-CTest is the top-level dispatcher for native tests and benchmarks. Tests must
-use labels such as `contract`, `smoke`, `parity`, `frontend`, `engine`,
-`python`, `lammps`, `bench`, and `performance` so CI and local runs can
-select the right slice without inventing new runners.
+`include/nep_adapters/api.h` 的 C API 当前仍是实验接口。只有 spin、charge、descriptor、外部邻居、自有邻居和 device input 都形成明确 data-view 契约后，才能冻结 ABI。
 
-Python-specific tests should use the `mysci` conda environment and the pybind11
-frontend should exchange NumPy arrays directly with native code. The default
-calculator facade should not import ASE; the optional `nep_adapters.ase` module
-owns ASE `Calculator` and `SinglePointCalculator` integration. Python
-performance work should use `pytest-benchmark` once broader Python APIs exist.
-LAMMPS performance work should run real LAMMPS input decks under
-`benchmarks/lammps/`; the repository should not grow a duplicate MD driver. The
-current CPU report includes LAMMPS compile/plugin smoke plus local
-`mpirun -np 1/2/4` correctness smoke.
+## 打包策略
 
-Multi-rank LAMMPS correctness should start from a backend-neutral C++ domain
-decomposition contract: full-system reference, rank-local owned atoms, ghost
-atoms, compact external-neighbor lists, ghost-force foldback, and virial
-reduction. Engines can each provide runners for that same contract.
+默认 Python 包为 CPU-only：
 
-## Red Lines
+- 构建 core 与 `cpu`；
+- 不包含 LAMMPS；
+- 不加载 CUDA。
 
-- Do not make LAMMPS neighbor-list shape define the Python batch API.
-- Do not make a base Python wheel depend on CUDA libraries.
-- Do not mix Python or LAMMPS headers into core.
-- Do not rewrite the CPU reference engine if the official/existing NEP CPU class
-  can serve as the oracle.
-- Do not add a second CPU backend or compatibility fallback without a concrete
-  supported use case.
-- Do not expose engine SPI types through the public API.
-- Do not mix correctness pass/fail thresholds with machine-specific benchmark
-  baselines. Record throughput first; add regression gates only with explicit
-  per-machine baselines.
+GPU wheel 包含独立的 `nep_cpu` 和 `nep_gpu` 扩展。只有显式选择 `backend="cuda"` 才加载 GPU 模块。CUDA 加载或模型能力失败时直接报错，不允许切换到 CPU。
+
+LAMMPS integration 由源码仓库单独构建：
+
+- 条件允许时优先 runtime plugin；
+- 无法加载 plugin 的 LAMMPS 构建可使用独立 source integration；
+- LAMMPS 只链接 runtime/engine，不依赖 Python。
+
+CUDA wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。
+
+## CPU 基准
+
+1. core 可在没有 CUDA、Python 和 LAMMPS 时独立构建；
+2. `cpu` 是唯一 CPU 生产边界；
+3. pybind11 直接交换 NumPy 数组，不在 Python 侧做 native 返回后的形状重算；
+4. CPU LAMMPS pair 通过 `compute_for_lammps` 和外部邻居表工作；
+5. 生成报告记录 correctness、LAMMPS MPI smoke 和 OpenMP 原子扩展性；
+6. 小型 golden fixture 放在 `tests/fixtures/`，绝不打进 Python wheel。
+
+## 测试与性能策略
+
+测试分为 2 类：
+
+- **正确性：** API/SPI 契约、golden label、严格 FP64、有限差分和 frontend integration。默认 CPU、Python 和 LAMMPS 测试都与 `tests/fixtures/cpu_baseline/` 的固定标签比较；
+- **性能：** 吞吐、扩展性和 profiler 证据。
+
+CTest 是 native test 和 benchmark 的统一调度器。使用 `contract`、`smoke`、`parity`、`frontend`、`engine`、`python`、`lammps`、`bench`、`performance` 等标签选择测试范围，不另外维护重复 runner。
+
+Python 开发使用 `mysci` 环境。默认 calculator 不导入 ASE，`nep_adapters.ase` 单独负责 ASE `Calculator` 和 `SinglePointCalculator` 集成。
+
+LAMMPS 性能只使用 `benchmarks/lammps/` 中的真实输入，不在仓库中增加重复 MD driver。当前 CPU 报告包含 LAMMPS compile/plugin smoke 和本地 `mpirun -np 1/2/4` 正确性检查。
+
+多 rank LAMMPS 正确性从 backend-neutral C++ domain decomposition 契约开始：完整体系参考、rank-local owned atom、ghost atom、紧凑外部邻居表、ghost force foldback 和 virial reduction。不同 engine 可以为同一契约提供 runner。
+
+## 红线
+
+- 不允许 LAMMPS neighbor-list 形状定义 Python batch API。
+- 不允许基础 Python wheel 依赖 CUDA 动态库。
+- 不允许 core 包含 Python 或 LAMMPS 头文件。
+- 不增加第 2 个 CPU backend 或兼容 fallback，除非出现明确且受支持的真实用例。
+- 不通过 fallback 掩盖不支持的模型、缺失 GPU、未启用 PPPM 或动态库问题。
+- 不通过公共 API 暴露 engine SPI 类型。
+- 不把机器相关 benchmark baseline 混入 correctness pass/fail 阈值。先记录吞吐；只有存在明确的逐机器 baseline 时才增加性能回归门禁。

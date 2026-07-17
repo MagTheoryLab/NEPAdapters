@@ -1,19 +1,12 @@
-# Fixtures
+# 测试数据
 
-Keep fixtures small and intentional.
+fixture 应保持小而明确。
 
-Current committed fixtures:
+当前固定数据：
 
-- `cpu_baseline/`: small Te/Pb model plus one fixed labelled structure.
-  The labels are generated from the trusted NEP CPU implementation and are
-  treated as golden model-output labels for repository correctness tests.
-- `nep_cpu_reference/`: self-contained 250-atom ordinary NEP and qNEP cases
-  copied from the NEP_CPU test suite, including force, raw9 virial, and
-  descriptor references.
+- `cpu_baseline/`：小型 Te/Pb 模型、一个固定结构和 golden label。标签来自可信 CPU 实现，用于仓库正确性门禁；
+- `nep_cpu_reference/`：从 NEP_CPU 测试套件复制的 250 原子普通 NEP 与 qNEP case，包含力、每原子 raw9 virial 和 descriptor 参考值。
 
-Useful future fixtures:
+未来 fixture 只有在覆盖真实缺口时才添加，例如最小 spin 结构或用于协议兼容检查的裁剪模型。
 
-- Tiny spin structure.
-- Model files trimmed to the minimum needed for compatibility checks.
-
-Do not commit generated benchmark outputs or large training artifacts here.
+不要在这里提交 benchmark 输出、大型训练数据或临时计算产物。

@@ -1,14 +1,9 @@
-# CPU Baseline Fixture
+# CPU baseline 测试数据
 
-This fixture is committed test data, not Python package data.
+本目录是仓库测试数据，不会打进 Python 包。
 
-- `nep.txt` is the small Te/Pb NEP model used by the CPU baseline tests.
-- `train.xyz` contains one fixed labelled structure. The `energy`, `force`,
-  and `virial` fields are golden labels generated from the current trusted
-  trusted NEP CPU implementation. CPU/Python/LAMMPS tests compare
-  against these values instead of only comparing two live code paths.
-- `descriptor.txt` contains the per-atom descriptor matrix for the same
-  structure, stored as row-major `(natoms, descriptor_dim)` test data.
+- `nep.txt`：CPU baseline 使用的小型 Te/Pb NEP 模型；
+- `train.xyz`：一个固定带标签结构，其中 `energy`、`force` 和 `virial` 是由可信 NEP CPU 实现生成的 golden label。CPU、Python 和 LAMMPS 测试直接与这些值比较，不只比较两条实时实现；
+- `descriptor.txt`：同一结构的每原子 descriptor 矩阵，按 `(natoms, descriptor_dim)` row-major 保存。
 
-Regenerate this fixture only when the baseline physics contract is intentionally
-changed and the new values have been reviewed.
+只有在物理契约有意变化、且新参考值已经审查时，才能重新生成本 fixture。

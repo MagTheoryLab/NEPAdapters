@@ -1,7 +1,7 @@
-# cpu Engine
+# CPU 引擎
 
-This directory contains the supported CPU engine.
+本目录包含唯一受支持的 CPU 引擎。
 
-It may use OpenMP, SIMD, cache-friendly layouts, and algorithmic restructuring.
-Every supported feature must pass the committed golden fixtures and strict FP64
-oracle before it is treated as production-ready.
+实现可以使用 OpenMP、SIMD、缓存友好布局和算法重构，但每项生产功能都必须通过固定 golden fixture、严格 FP64 oracle、有限差分和适用的 CPU/CUDA 一致性测试。
+
+项目不保留旧 CPU 后端或兼容 fallback。

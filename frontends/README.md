@@ -1,11 +1,10 @@
-# Frontends
+# 前端
 
-Frontends translate host software conventions into the public core API. They are
-not engines.
+前端负责把上层软件的数据约定转换为公共核心 API，它们不是计算引擎。
 
-Planned frontends:
+当前前端：
 
-- `python`: Python package and pybind11 bindings.
-- `lammps`: LAMMPS pair style, runtime plugin, or source package.
+- `python`：Python 包、pybind11 绑定、NumPy 高层接口和可选 ASE 适配；
+- `lammps`：LAMMPS pair style 与 runtime plugin。
 
-Frontends should not include engine internals.
+前端只能依赖公共 API，不应包含 CPU 或 CUDA 引擎内部头文件，也不能复制后端算法。

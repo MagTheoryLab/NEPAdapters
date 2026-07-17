@@ -1,88 +1,74 @@
-# cpu Performance Maintenance
+# CPU 性能维护
 
-`cpu` is the only supported CPU engine. It must keep passing committed
-golden labels, the strict FP64 oracle, finite-difference gates, and CPU/CUDA
-parity where CUDA is available.
+`cpu` 是唯一受支持的 CPU engine。它必须持续通过固定 golden label、严格 FP64 oracle、有限差分，以及可用时的 CPU/CUDA parity。
 
-## Default Path
+## 默认保留的优化
 
-Keep these optimizations in the default `cpu` path:
+当前 `cpu` 默认路径保留：
 
-- symbol-isolated `cpu` engine built from the optimized NEP CPU source;
-- OpenMP force paths with thread-local force/virial reduction;
-- LAMMPS external-neighbor workspace reuse, including edge caches and persistent
-  force/virial scratch;
-- contracted angular force layout;
-- CBLAS/Accelerate-backed batch ANN when available, with the portable scalar
-  implementation retained for systems without a CBLAS provider;
-- radial tables, defaulting to ON on Apple builds and available as an explicit
-  build option elsewhere.
+- 基于优化 NEP CPU 源码构建、符号隔离的 `cpu` engine；
+- 使用 thread-local force/virial reduction 的 OpenMP force 路径；
+- LAMMPS 外部邻居 workspace 复用，包括 edge cache 和持久 force/virial scratch；
+- 收缩后的 angular force 布局；
+- 有 CBLAS provider 时使用 CBLAS/Accelerate batch ANN，无 provider 时保留 portable scalar 实现；
+- radial table：Apple 默认开启，其他平台可通过显式构建选项启用。
 
-These are the current user-facing performance wins. Avoid adding new public
-switches unless a benchmark shows a stable, meaningful gain across the intended
-platforms.
+这些是当前用户可见的稳定收益。除非 benchmark 证明在目标平台上存在稳定且有意义的提升，否则不要增加新的公共开关。
 
-## Removed Experiment Class
+## 不应恢复的实验路径
 
-Do not keep or reintroduce these as default or user-facing fallback paths unless
-new evidence clears a higher bar:
+没有更强新证据时，不要重新引入：
 
-- AVX512 prefer paths;
-- ANN q-block caches;
-- portable ANN micro-kernels;
-- shape-only L4/N5 angular dispatch;
-- short edge-tiled SIMD helpers;
-- table-index or interpolation micro-optimizations that move less than noise.
+- AVX512 prefer 路径；
+- ANN q-block cache；
+- portable ANN micro-kernel；
+- 只按 shape 分派的 L4/N5 angular 路径；
+- 短 edge-tiled SIMD helper；
+- 收益小于噪声的 table index 或 interpolation 微优化。
 
-Small gains below roughly 3 percent are not worth a new branch, CMake option, or
-platform-specific code path unless they also simplify the implementation.
+低于约 3% 的小收益不值得新增 branch、CMake option 或平台专用实现，除非改动同时显著简化代码。
 
-## Benchmark Gates
+## 性能门禁
 
-Use `.build/<name>` build trees. A minimal correctness gate is:
+构建目录统一放在 `.build/<name>`：
 
 ```sh
-cmake -S . -B .build/cpu-opt-clean \
+cmake -S . -B .build/cpu-clean \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEP_ADAPTERS_ENABLE_CPU=ON \
   -DNEP_ADAPTERS_BUILD_TESTS=ON \
   -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON
-cmake --build .build/cpu-opt-clean -j8
+cmake --build .build/cpu-clean -j8
 OMP_NUM_THREADS=4 VECLIB_MAXIMUM_THREADS=1 \
-  ctest --test-dir .build/cpu-opt-clean -LE bench --output-on-failure
+  ctest --test-dir .build/cpu-clean -LE bench --output-on-failure
 ```
 
-On Apple builds, add the local libomp flags from `AGENTS.md` if CMake does not
-find OpenMP automatically.
+Apple 构建如果没有自动找到 OpenMP，再按 `AGENTS.md` 添加本地 libomp 参数。
 
-Then run benchmark smoke tests:
+正确性通过后运行 benchmark smoke：
 
 ```sh
 OMP_NUM_THREADS=4 VECLIB_MAXIMUM_THREADS=1 \
-  ctest --test-dir .build/cpu-opt-clean -L bench --output-on-failure
+  ctest --test-dir .build/cpu-clean -L bench --output-on-failure
 ```
 
-For performance readout, use the NEP89 benchmark in both batch and LAMMPS modes:
+NEP89 性能读取应同时覆盖 batch 与 LAMMPS。LAMMPS 示例：
 
 ```sh
 OMP_NUM_THREADS=4 VECLIB_MAXIMUM_THREADS=1 \
-  .build/cpu-opt-clean/benchmarks/nep_adapters_bench_cpu_nep89 \
+  .build/cpu-clean/benchmarks/nep_adapters_bench_cpu_nep89 \
   --engine cpu --mode lammps --replicate 4x4x2 --rank-grid 2x1x1 \
   --iterations 1000 --warmup 20 --phase-timer
 ```
 
-Record durable conclusions in docs. Keep raw profiles, job scripts, temporary
-plans, and machine-local reports out of git history.
+长期结论写入文档。raw profile、job script、临时 plan 和机器本地报告不进入 Git。
 
-## Future Work Bar
+## 后续工作的门槛
 
-The next CPU work should be cleanup or benchmark hardening unless a profile
-shows a first-tier hotspot with a clear path to a stable gain. Reasonable future
-directions are:
+如果 profiler 没有显示一线 hotspot 和清晰的稳定收益路径，下一轮 CPU 工作应以清理或强化 benchmark 为主。可能的方向：
 
-- small-box neighbor-list redesign with strict parity coverage;
-- coarser OpenMP regions after the current default path is stable;
-- all-platform radial-table validation before making it globally default.
+- 带严格 parity 的 small-box 邻居表重构；
+- 默认路径稳定后的更粗粒度 OpenMP region；
+- 把 radial table 设为全平台默认前，先完成跨平台验证。
 
-Spin, CUDA, and LAMMPS MPI work should build on the backend/frontend boundary
-without adding a compatibility CPU backend or more experimental switches.
+spin、CUDA 和 LAMMPS MPI 都应继续复用 backend/frontend 边界，不增加兼容 CPU backend 或更多实验开关。

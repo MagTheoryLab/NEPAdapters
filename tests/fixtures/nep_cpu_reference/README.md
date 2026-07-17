@@ -1,14 +1,7 @@
-# NEP_CPU numerical reference fixtures
+# NEP_CPU 数值参考数据
 
-These fixtures are the minimal ordinary NEP and qNEP numerical tests copied
-from the sibling NEP_CPU repository at commit
-`9977dab39ae7ec23d64a73a1788815002824ace4`. The source fixture directories
-were clean when copied.
+本目录保存从相邻 NEP_CPU 仓库 commit `9977dab39ae7ec23d64a73a1788815002824ace4` 复制的最小普通 NEP 和 qNEP 数值测试。复制时源 fixture 目录保持干净。
 
-Each case contains only the model, periodic `xyz.in` structure, and committed
-force, per-atom raw9 virial, and descriptor references. Generated outputs,
-finite-difference data, GPU outputs, source code, and build files are excluded.
+每个 case 只保留模型、周期性 `xyz.in` 结构，以及固定的力、每原子 raw9 virial 和 descriptor 参考值。生成输出、有限差分数据、GPU 输出、源码和构建文件均未复制。
 
-The `nep` case is a 250-atom ordinary NEP3 model. The `qnep` case is a
-250-atom `nep4_charge1` model. Both are exercised through the public `cpu`
-backend; CUDA tests reuse the qNEP fixture when CUDA is enabled.
+`nep` 是 250 原子的普通 NEP3 模型，`qnep` 是 250 原子的 `nep4_charge1` 模型。两者都通过公共 `cpu` 后端测试；启用 CUDA 后，qNEP 测试复用相同 fixture。CUDA 明确不支持 NEP3，不会回退到 CPU。

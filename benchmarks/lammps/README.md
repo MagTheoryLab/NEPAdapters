@@ -1,8 +1,8 @@
-# LAMMPS Benchmarks
+# LAMMPS 性能测试
 
-LAMMPS benchmarks should be real LAMMPS input decks, not a separate simulator.
+LAMMPS benchmark 必须使用真实 LAMMPS 输入，不要维护另一套模拟器。
 
-Recommended layout:
+推荐目录结构：
 
 ```text
 benchmarks/lammps/
@@ -13,18 +13,13 @@ benchmarks/lammps/
       README.md
 ```
 
-Each case should document:
+每个 case 应说明：
 
-- atom count and chemistry;
-- model file expected by the case;
-- LAMMPS build assumptions;
-- pair style name being tested;
-- MD steps and thermo output cadence;
-- CPU/GPU/MPI command lines used for timing.
+- 原子数和元素组成；
+- 使用的模型文件；
+- LAMMPS 构建条件；
+- 测试的 pair style；
+- MD 步数和 thermo 输出频率；
+- CPU、GPU 和 MPI 计时命令。
 
-CTest labels for future LAMMPS runs should include
-`bench;performance;frontend;lammps`.
-
-The current CPU milestone only compiles the `nep/cpu` pair/plugin. A
-real MD benchmark should be added here once a local LAMMPS executable with
-`PLUGIN` is part of the test environment.
+LAMMPS 性能测试使用 `bench;performance;frontend;lammps` 标签。CPU 使用 `nep/cpu`，CUDA Kokkos 使用 `nep/gpu`。性能结果必须来自真实 MD 运行，并同时记录硬件、线程或 rank、模型和输入规模。

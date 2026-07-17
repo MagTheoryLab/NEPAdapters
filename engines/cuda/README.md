@@ -1,144 +1,124 @@
-# CUDA Engine
+# CUDA 引擎
 
-This directory contains the CUDA engine implementation.
+本目录包含 CUDA engine。CUDA 依赖只能存在于该 engine 和显式启用 CUDA 的包中；core 与 CPU-only Python wheel 必须能在没有 CUDA 时构建。
 
-CUDA dependencies must stay scoped to this engine and CUDA-enabled packages.
-The core runtime and CPU-only Python package must remain buildable without CUDA.
+## 支持范围
 
-The CUDA model protocol supports ordinary/spin NEP4 and ordinary NEP5, plus
-the implemented NEP4 charge modes. NEP3 is not accepted by this engine and
-returns `NEPA_STATUS_UNSUPPORTED`; callers are never redirected to CPU.
-qNEP exposes both calculation and structural-descriptor output.
+CUDA 模型协议支持：
 
-qNEP uses the direct reciprocal-space implementation by default. The
-experimental single-node PPPM path is excluded from compilation unless
-`NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON`; only that build links cuFFT. Requesting
-`NEP_ADAPTERS_QNEP_KSPACE=pppm` from a build without PPPM fails explicitly.
-This keeps the default package boundary free of cuFFT while the PPPM design is
-not yet suitable for multi-node production use.
+- 普通与 spin NEP4；
+- 普通 NEP5；
+- 已实现的 NEP4 charge 模式；
+- qNEP calculation 和结构 descriptor 输出。
 
-The directory is organized around a small orchestration interface and separate
-CUDA compilation units:
+CUDA 不接受 NEP3，返回 `NEPA_STATUS_UNSUPPORTED`，调用方不会被重定向到 CPU。
 
-- `cuda_engine.cpp` owns the engine interface and caller-specific staging.
-- `force_pipeline.*` owns the complete force dataflow behind one model-driven
-  interface. Callers provide topology and requested outputs; ordinary/spin
-  selection, ZBL composition, and virial placement stay inside the module.
-- `device_operations.hpp` is the single private interface for device staging,
-  neighbor construction, descriptors, ANN evaluation, forces, and output.
-  Individual `.cu` files remain separate CUDA compilation units; they are not
-  separate public modules.
-- `spin_onsite.cu` owns spin orchestration, with descriptor and force device
-  implementation kept in two private `.cuh` fragments.
-- The ordinary NEP4/NEP5 `nep.txt` protocol follows
-  `/Users/superbing/Desktop/Workspace/torchnep/src/force/nep.cu`; in particular,
-  descriptor dimension is computed from `n_max` plus the newer `l_max ...
-  has_q_*` body-channel flags rather than inferred from the `ANN` line.
-- `model_protocol.*` owns protocol parsing and parameter counts.
-  `device_model.hpp` groups the model interface; `model_parameters.cpp` and
-  `device_model.cu` implement its host-packing and device-upload halves.
-  `device_workspace.hpp` groups planning, allocation, and view interfaces;
-  `workspace_plan.cpp` and `device_workspace.cu` implement those two halves.
-  Kernel code should depend on these internal contracts instead of re-parsing
-  text or duplicating size math.
-- Parameters are split for future cache locality: `ann_type_major` keeps each
-  element type's W0/B0/W1 block contiguous, descriptor coefficients keep radial
-  and angular coefficient regions contiguous, and `q_scaler` is uploaded as its
-  own linear array.
-- `device_model.cu` is part of every `NEP_ADAPTERS_ENABLE_CUDA=ON` build; it
-  uploads these packed arrays to
-  CUDA device memory and exposes stable device pointers for later kernels.
-- `device_workspace.cu` owns per-call device memory. It
-  allocates typed device arrays from `WorkspacePlan` and exposes a plain
-  `DeviceWorkspaceView` so kernels can receive model parameters and execution
-  buffers without knowing about allocation ownership.
-- The CUDA engine has two caller shapes. `find_force_batch` accepts coordinates,
-  boxes, and structure metadata, then uses an internal-neighbor workspace that
-  owns neighbor construction. `find_force_lammps_neighbors` accepts a LAMMPS-style
-  external neighbor list, stages active atoms, and reuses the caller's neighbor
-  topology.
-- Batch boxes use the NEP/GPUMD 3x3 order `ax,bx,cx, ay,by,cy, az,bz,cz`; the
-  CUDA triclinic path uses this matrix directly for fractional-to-Cartesian
-  conversion.
-- Host staging lives in `host_staging.*`: direct batch input is converted from
-  AoS positions to SoA positions plus per-structure metadata; LAMMPS host
-  neighbors are converted from `ilist`/`numneigh`/`firstneigh` into active atom
-  indices and slot-major neighbor arrays.
-- Device staging lives in `device_staging.cu`: direct batch input can copy raw
-  host arrays and run CUDA kernels for AoS-to-SoA positions and
-  `atom_to_structure`; LAMMPS host-neighbor input still has to gather
-  `double**`/`int**` rows on the host, then CUDA kernels map types and pack dense
-  neighbor rows into slot-major execution arrays.
-- Internal neighbor construction starts in `internal_neighbor_builder.cu`. It is
-  a large-system cell-list path, not an all-pairs prototype: atoms are binned by
-  cell counts, a prefix scan builds CSR cell offsets, atoms are scattered into
-  cell-contiguous storage, then each center atom traverses neighboring cells to
-  fill radial and angular slot-major neighbor lists.
-- Both caller shapes stage the execution neighbor lists as slot-major
-  (`center + atom_capacity * slot`) to match the current NEP CUDA kernels and
-  keep per-slot center threads contiguous.
-- The internal-neighbor builder supports orthorhombic and triclinic boxes with
-  PBC. It bins atoms in fractional coordinates, keeps the production path
-  cell-list based, and leaves pair geometry to the descriptor core so neighbor
-  construction does not materialize data that the next stage would overwrite.
-- Neighbor-list correctness is checked against a self-contained brute-force
-  PBC oracle in the CUDA device test, including a tilted triclinic box. The
-  production builder stays cell-list based; the all-pairs path is only a
-  small-test oracle so descriptor and force work does not inherit an unvalidated
-  neighbor contract.
-- `angular_descriptor.cu` owns the shared structural descriptor core. It reads
-  positions and slot-major neighbor lists directly, forms radial basis sums in
-  per-block scratch, and accumulates angular tiles without global radial or
-  angular basis-cache arrays. The same core serves ordinary, spin, and charge
-  orchestration; model-specific descriptor additions and ANN evaluation remain
-  explicit following stages.
-- The descriptor core writes `descriptors` as
-  `atom + atom_capacity * descriptor_index`. For angular models it also keeps
-  only the state needed by force backpropagation: minimum-image pair vectors,
-  distances, and `sum_fxyz`. Supported channels are ordinary 3-body terms
-  through `L=4` plus `q222`, `q1111`, `q112`, `q123`, `q233`, and `q134`.
-- ANN energy evaluation starts in `ann_energy.cu`. The kernel handles packed
-  NEP4/NEP5 one-hidden-layer layouts, writes per-atom `potential`, and stages
-  descriptor derivatives in `fp` so force backpropagation can be added without
-  changing the descriptor layout.
-- Radial force accumulation starts in `radial_force.cu`. The public
-  `find_force_batch` path now runs a real single-structure NEP4
-  pipeline for orthorhombic and triclinic boxes: device staging, internal
-  cell-list neighbors,
-  descriptors, ANN energy, force accumulation, and host output copyback.
-- Universal non-flexible ZBL accumulation lives in `zbl_force.cu`. It reuses the
-  radial neighbor list when `zbl_outer <= cutoff_radial`, adds per-atom ZBL
-  potential/force/virial after ANN force backpropagation, and is covered by a
-  finite-difference force gate. Flexible ZBL and typewise ZBL cutoffs still
-  return `NEPA_STATUS_UNSUPPORTED`.
-- Angular force accumulation starts in `angular_force.cu`. The public force
-  gates support regular angular channels through `L=4` plus
-  `q222/q1111/q112/q123/q233/q134`; these paths are checked by
-  finite-difference energy/force tests. The direct batch path runs these
-  angular and high-body force channels through the same batched workspace used
-  by radial/ZBL execution.
-- Device result preparation lives in `device_output.cu`. It keeps both batched
-  and LAMMPS reductions/layout conversion on the GPU: per-atom forces are
-  packed from SoA to the public layout, virial order is converted at the output
-  seam, and requested totals are reduced before copyback.
-- The local LAMMPS Kokkos source uses `X_FLOAT*[3]` coordinate views accessed as
-  `x(i,0..2)` and Kokkos neighbor views accessed as `neighbors(i,j)`, with layout
-  controlled by Kokkos/LAMMPS build macros. A future Kokkos frontend can pass
-  device views more directly, but the host-neighbor API should continue to stage
-  into this engine-owned execution layout.
-- Ordinary and spin execution share the one `force_pipeline` interface while
-  keeping their implementation stages private. Charge-specific device
-  operations remain isolated in `qnep_charge.cu`; a future charge integration
-  can compose the same structural and short-range stages without changing the
-  caller interface.
-- `find_force_batch` validates the host batch contract and supports the
-  device path described above. Other ordinary NEP shapes still return
-  `NEPA_STATUS_UNSUPPORTED` until their force paths are verified.
-- Tests are split by caller shape: ordinary batch, LAMMPS host-neighbor
-  simulation, and LAMMPS Kokkos-style device staging. The Kokkos simulation is
-  intentionally a workspace/layout contract until the public device-input ABI is
-  defined.
+qNEP 默认使用 direct reciprocal-space。实验性单节点 PPPM 只有在 `NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=ON` 时才参与编译，也只有该构建链接 cuFFT。默认构建收到 `NEP_ADAPTERS_QNEP_KSPACE=pppm` 时会直接报错。
 
-The maintained NEP_GPU code path should be mined for kernels and measured
-optimizations, but this engine should own its staging and batch/neighbor
-contracts inside NEPAdapters rather than exposing the old LAMMPS bridge shape.
+这一边界保证默认包不依赖 cuFFT，也避免在 PPPM 尚不适合多节点生产时静默切换算法。
+
+## 代码边界
+
+- `cuda_engine.cpp`：engine 接口和调用方特定 staging；
+- `force_pipeline.*`：模型驱动的完整 force dataflow。调用方提供 topology 与输出请求；普通/spin 选择、ZBL 组合和 virial 放置都留在模块内部；
+- `device_operations.hpp`：device staging、邻居构建、descriptor、ANN、force 和输出的唯一私有接口。各 `.cu` 文件是独立 CUDA 编译单元，不是公共模块；
+- `spin_onsite.cu`：spin orchestration，descriptor 与 force device 实现放在 2 个私有 `.cuh` 中；
+- `model_protocol.*`：模型协议解析与参数数量；
+- `device_model.hpp`：device model 接口；`model_parameters.cpp` 和 `device_model.cu` 分别实现 host packing 与 device upload；
+- `device_workspace.hpp`：workspace plan、allocation 与 view；`workspace_plan.cpp` 和 `device_workspace.cu` 实现规划和分配。
+
+kernel 应依赖这些内部契约，不得重复解析模型文本或复制 buffer 尺寸计算。
+
+普通 NEP4/NEP5 的 `nep.txt` 协议以 `torchnep/src/force/nep.cu` 为参考。descriptor dimension 根据 `n_max` 与 `l_max ... has_q_*` body-channel flag 计算，不能从 `ANN` 行反推。
+
+参数布局为后续缓存局部性保留明确边界：
+
+- `ann_type_major`：每个元素类型的 W0/B0/W1 连续存放；
+- descriptor coefficient：radial 与 angular 区域分别连续；
+- `q_scaler`：独立线性数组。
+
+`device_model.cu` 参与每个 `NEP_ADAPTERS_ENABLE_CUDA=ON` 构建，负责上传参数并提供稳定 device pointer。`device_workspace.cu` 持有每次调用的 device memory，通过普通 `DeviceWorkspaceView` 暴露 buffer，kernel 不接触 allocation ownership。
+
+## 调用模式
+
+CUDA engine 有 2 种输入模式：
+
+1. `find_force_batch` 接受坐标、盒子和结构 metadata，由 internal-neighbor workspace 构建邻居表；
+2. `find_force_lammps_neighbors` 接受 LAMMPS 风格外部邻居表，stage active atom，并复用调用方 topology。
+
+batch box 使用 NEP/GPUMD 3×3 顺序：`ax,bx,cx, ay,by,cy, az,bz,cz`。Triclinic 路径直接使用该矩阵完成 fractional-to-Cartesian 转换。
+
+### Host 数据准备
+
+`host_staging.*` 负责：
+
+- 将 batch AoS position 转为 SoA position 和 per-structure metadata；
+- 将 LAMMPS 的 `ilist`、`numneigh`、`firstneigh` 转为 active atom index 和 slot-major 邻居数组。
+
+### Device 数据准备
+
+`device_staging.cu` 负责：
+
+- direct batch：复制 raw host array，在 GPU 上执行 AoS-to-SoA 和 `atom_to_structure`；
+- LAMMPS host-neighbor：host 侧先 gather `double**`/`int**` 行，再由 CUDA kernel 完成 type map 与 dense slot-major 邻居打包。
+
+## 邻居表
+
+`internal_neighbor_builder.cu` 使用面向大体系的 cell-list，不是 all-pairs 原型：
+
+1. 统计每个 cell 的原子数；
+2. prefix scan 构造 CSR cell offset；
+3. scatter 原子到 cell-contiguous 存储；
+4. 每个中心原子遍历相邻 cell，填充 radial 和 angular 邻居表。
+
+两种调用模式都使用 `center + atom_capacity * slot` 的 slot-major 布局，使同一 slot 的 center thread 连续。
+
+internal-neighbor builder 支持正交和 triclinic 全周期盒子。它在 fractional coordinate 中分 bin，保持生产路径为 cell-list；pair geometry 留给 descriptor core，避免邻居阶段生成下一阶段会覆盖的数据。
+
+正确性测试使用独立 brute-force PBC oracle，包含倾斜 triclinic 盒子。all-pairs 只能作为小测试 oracle，不能进入生产 descriptor/force dataflow。
+
+## Descriptor、ANN 与力
+
+`angular_descriptor.cu` 提供普通、spin 和 charge 共用的结构 descriptor core：
+
+- 直接读取 position 和 slot-major neighbor list；
+- 在 per-block scratch 中计算 radial basis sum；
+- 不使用 global radial/angular basis cache，直接累加 angular tile；
+- descriptor 布局为 `atom + atom_capacity * descriptor_index`；
+- force backprop 只保留 minimum-image pair vector、distance 和 `sum_fxyz`。
+
+支持的 angular channel 包括普通 3-body `L=1..4`，以及 `q222`、`q1111`、`q112`、`q123`、`q233` 和 `q134`。
+
+`ann_energy.cu` 处理打包后的 NEP4/NEP5 单隐藏层布局，写入每原子 `potential`，并把 descriptor derivative 放入 `fp`。
+
+`radial_force.cu` 完成 radial force。公共 `find_force_batch` 对正交和 triclinic 单结构 NEP4 执行完整 device pipeline：staging、internal cell-list、descriptor、ANN、force 和 host copyback。
+
+`zbl_force.cu` 实现 universal non-flexible ZBL。当 `zbl_outer <= cutoff_radial` 时复用 radial 邻居表，在 ANN backprop 后累加每原子 ZBL 势能、力和 virial，并通过有限差分门禁。Flexible ZBL 与 typewise ZBL cutoff 返回 `NEPA_STATUS_UNSUPPORTED`。
+
+`angular_force.cu` 实现 angular force。公共门禁覆盖常规 `L=1..4` 和全部已支持 high-body channel，并使用有限差分检查 energy/force。direct batch 与其他路径复用同一 batched workspace。
+
+`device_output.cu` 在 GPU 上完成 batch 与 LAMMPS reduction/layout conversion：
+
+- force 从 SoA 打包为公共布局；
+- virial 在输出边界转换为对应公共顺序；
+- total 在 copyback 前完成 reduction。
+
+## LAMMPS Kokkos
+
+本地 LAMMPS Kokkos 坐标使用 `X_FLOAT*[3]` view，通过 `x(i,0..2)` 访问；邻居使用 `neighbors(i,j)`。具体 layout 由 Kokkos/LAMMPS build macro 控制。
+
+Kokkos frontend 可直接传 device view，但 host-neighbor API 仍应 stage 到 engine 自有执行布局。LAMMPS view 不能成为 core ABI。
+
+普通与 spin 共用 `force_pipeline`，具体阶段保持私有。charge device operation 隔离在 `qnep_charge.cu`，后续 charge integration 应组合现有结构和 short-range 阶段，不修改调用方接口。
+
+## 测试边界
+
+测试按调用形状拆分：
+
+- 普通 batch；
+- LAMMPS host-neighbor simulation；
+- LAMMPS Kokkos-style device staging。
+
+Kokkos simulation 在公共 device-input ABI 冻结前只作为 workspace/layout 契约。未验证的普通 NEP 形状必须返回 `NEPA_STATUS_UNSUPPORTED`，不能使用隐藏 fallback。
+
+可以从维护中的 NEP_GPU 路径复用经过测量的 kernel 思路，但 staging、batch 和 neighbor 契约必须由 NEPAdapters 自己拥有，不能重新暴露旧 LAMMPS bridge 形状。

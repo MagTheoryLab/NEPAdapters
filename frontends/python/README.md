@@ -1,66 +1,82 @@
-# Python Frontend
+# Python 前端
 
-This directory contains the minimal Python frontend.
+本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。
 
-The default package should be CPU-only and should not import or link CUDA unless
-the user explicitly builds or installs a CUDA-enabled package.
+默认 wheel 只构建 CPU，不导入也不链接 CUDA。只有显式构建 GPU wheel 并选择 `backend="cuda"` 时，Python 才会按需加载 `nep_gpu`。
 
-M2 uses a small pybind11 binding over the public C ABI. Python owns user-facing
-NumPy shapes, while CMake-built native libraries own runtime and engine
-implementation. The `Model.calculate()` method follows NepTrainKit's native
-calculator shape and returns three NumPy arrays directly:
+## 返回数据
 
-- per-atom potential, shape `(natoms,)`;
-- forces, shape `(natoms, 3)`;
-- per-atom virial, shape `(natoms, 9)`.
+底层 `Model` 直接返回 NumPy 数组，不在 Python 中复制后端算法。
 
-`Model.descriptors()` returns per-atom descriptors directly as a NumPy array
-with shape `(natoms, descriptor_dim)`. `Model.model_info()` returns cutoff,
-capability, and `descriptor_dim` metadata without running a calculation.
+普通模型的 `Model.calculate()` 返回：
 
-Spin models use explicit methods so ordinary callers cannot accidentally omit
-spin input. `Model.calculate_spin()` takes a `(natoms, 3)` spin array and
-returns potential, force, per-atom virial, magnetic force, and torque arrays.
-`Model.descriptors_spin()` returns the spin-model descriptor matrix. Torque is
-defined as `spin x magnetic_force`.
+| 返回值 | 形状 | 含义 |
+|---|---|---|
+| `potential` | `(natoms,)` | 每原子势能 |
+| `forces` | `(natoms, 3)` | 每原子力 |
+| `virials` | `(natoms, 9)` | 每原子 raw9 virial |
 
-The higher-level `NEPCalculator` facade is also NumPy-first and does not require
-ASE. It accepts duck-typed structures with `get_chemical_symbols()` or `symbols`,
-plus `positions`, `cell`, and optional `pbc`, then returns a `Prediction`
-dataclass:
+`Model.descriptors()` 返回 `(natoms, descriptor_dim)` 的 descriptor 矩阵。`Model.model_info()` 不执行计算，直接返回 cutoff、能力标志和 `descriptor_dim` 等模型信息。
 
-`pbc` defaults to `(1, 1, 1)` in both the native NumPy methods and the
-high-level calculator. Structures without a `pbc` attribute are also treated
-as fully periodic. Explicit values other than full periodicity are rejected;
-explicit `None` is also rejected. NEPAdapters does not provide a non-periodic
-or legacy-sentinel fallback.
+spin 模型必须使用显式接口，避免普通调用遗漏 spin 输入：
 
-- `energy`, shape `(nstructures,)`;
-- `potential`, shape `(natoms,)`;
-- `forces`, shape `(natoms, 3)`;
-- `virials`, shape `(natoms, 9)`;
-- `structure_virials`, shape `(nstructures, 9)`, using NepTrainKit-style mean
-  per-atom virials.
+- `Model.calculate_spin()` 接受 `(natoms, 3)` 的 spin 数组，返回势能、力、每原子 virial、磁力和 torque；
+- `Model.descriptors_spin()` 返回 spin 模型的 descriptor 矩阵；
+- torque 定义为 `spin × magnetic_force`。
 
-`NEPCalculator.calculate(structures)` returns `(energy, force_blocks,
-virial_blocks)` for NepTrainKit-style callers. Empty batches return empty arrays
-and empty block lists.
+## 使用 `NEPCalculator`
 
-`NEPCalculator.get_descriptor(structure)` returns per-atom descriptors for one
-structure. `get_structures_descriptor(structures, mean_descriptor=True)` mirrors
-NepTrainKit's descriptor helper: with `mean_descriptor=True` it returns one mean
-descriptor per structure, otherwise it returns the concatenated per-atom matrix.
+`NEPCalculator` 以 NumPy 为核心，不依赖 ASE。结构对象需要提供：
 
-The matching high-level spin surface is `predict_spin_arrays()`,
-`predict_spin_structures()`, `predict_spin_descriptors_arrays()`,
-`predict_spin_descriptors()`, `calculate_spin()`, `get_spin_descriptor()`, and
-`get_spin_structures_descriptor()`. A structure can provide spins through a
-`(natoms, 3)` `spins` attribute or `arrays["spins"]`; callers may instead pass
-the concatenated spin array explicitly.
+- `get_chemical_symbols()` 或 `symbols`；
+- `positions`；
+- `cell`；
+- 可选的 `pbc`。
 
-ASE support is optional and lives in `nep_adapters.ase`. Importing
-`nep_adapters` does not import ASE. Users who want an ASE calculator can install
-the optional extra and import the adapter explicitly:
+`pbc` 在底层 NumPy 方法和高层 calculator 中都默认取 `(1, 1, 1)`。没有 `pbc` 属性的结构同样按全周期处理。显式非全周期值和显式 `None` 都会报错；项目不提供非周期或旧哨兵值 fallback。
+
+`predict_structures()` 返回 `Prediction`：
+
+| 字段 | 形状 | 含义 |
+|---|---|---|
+| `energy` | `(nstructures,)` | 每个结构的总能量 |
+| `potential` | `(natoms,)` | 拼接后的每原子势能 |
+| `forces` | `(natoms, 3)` | 拼接后的每原子力 |
+| `virials` | `(natoms, 9)` | 拼接后的每原子 virial |
+| `structure_virials` | `(nstructures, 9)` | 每个结构的平均每原子 virial |
+
+NepTrainKit 风格调用：
+
+```python
+from nep_adapters import NEPCalculator
+
+calculator = NEPCalculator("nep.txt", backend="cpu")
+energy, force_blocks, virial_blocks = calculator.calculate(structures)
+```
+
+空 batch 返回空数组和空 block 列表。
+
+descriptor 接口：
+
+- `get_descriptor(structure)`：返回单个结构的每原子 descriptor；
+- `get_structures_descriptor(structures, mean_descriptor=True)`：每个结构返回一个平均 descriptor；
+- `mean_descriptor=False`：返回拼接后的每原子 descriptor 矩阵。
+
+spin 高层接口包括：
+
+- `predict_spin_arrays()`；
+- `predict_spin_structures()`；
+- `predict_spin_descriptors_arrays()`；
+- `predict_spin_descriptors()`；
+- `calculate_spin()`；
+- `get_spin_descriptor()`；
+- `get_spin_structures_descriptor()`。
+
+结构可以通过 `(natoms, 3)` 的 `spins` 属性或 `arrays["spins"]` 提供 spin；调用方也可以显式传入拼接后的 spin 数组。
+
+## 可选 ASE 接口
+
+安装 `ase` extra 后显式导入适配器：
 
 ```python
 from nep_adapters.ase import NepAseCalculator
@@ -70,7 +86,9 @@ energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
 ```
 
-Local smoke test:
+普通 `import nep_adapters` 不会导入 ASE。
+
+## 本地测试
 
 ```sh
 cmake -S . -B .build/python \
@@ -82,40 +100,28 @@ cmake --build .build/python -j2
 ctest --test-dir .build/python -L python --output-on-failure
 ```
 
-Wheel build:
+## 构建 wheel
+
+CPU wheel：
 
 ```sh
 python -m build --wheel
 ```
 
-The wheel configuration explicitly disables CUDA, qNEP PPPM/cuFFT, OpenMP,
-and C/C++ development-file installation. The base wheel contains the Python
-package and the ABI-qualified `nep_cpu` extension; standalone CMake installs
-keep development libraries, headers, OpenMP, and package metadata enabled by
-default.
+wheel 配置默认关闭 CUDA、qNEP PPPM/cuFFT、OpenMP 和 C/C++ 开发文件安装。基础 wheel 包含 Python 包和 ABI 匹配的 `nep_cpu` 扩展。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
 
-A CUDA-enabled wheel can be built on a CUDA host without changing the base
-wheel defaults:
+GPU wheel：
 
 ```sh
 python -m build --wheel \
   -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
 ```
 
-That wheel contains separate ABI-qualified `nep_cpu` and `nep_gpu` extensions.
-Importing `nep_adapters` or selecting `cpu` loads only `nep_cpu`; `nep_gpu`
-is imported lazily after an explicit `backend="cuda"` request. CUDA loading
-failures never switch to CPU. qNEP PPPM stays disabled, so the default CUDA
-wheel does not link cuFFT.
+GPU wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或选择 `cpu` 时只加载 `nep_cpu`；只有显式选择 `backend="cuda"` 才按需导入 `nep_gpu`。CUDA 加载失败不会切换到 CPU。
 
-CUDA accepts the implemented NEP4/NEP5 protocol surface. A NEP3 model passed
-to `backend="cuda"` fails explicitly as unsupported and is not rerouted to
-`cpu`. qNEP direct-mode models support both `calculate()` and
-`descriptors()` through `nep_gpu`.
+CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型可以通过 `nep_gpu` 执行 `calculate()` 和 `descriptors()`。
 
-The repository default CUDA architecture is `sm_89`, intended for a local
-RTX 4090 build. A broader precompiled wheel can embed SASS for V100, T4, A100,
-A10/RTX 30, and RTX 4090 plus `compute_89` PTX for forward JIT:
+仓库默认 CUDA 架构为 `sm_89`，用于本地 RTX 4090。发布 wheel 可同时嵌入 V100、T4、A100、A10/RTX 30 和 RTX 4090 的 SASS，并保留 `compute_89` PTX：
 
 ```sh
 CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual' \
@@ -123,26 +129,16 @@ python -m build --wheel \
   -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
 ```
 
-Release wheels must be compiled inside the chosen manylinux build image. An
-`auditwheel repair` pass can add tags or vendor allowed libraries, but it cannot
-remove GLIBC/GLIBCXX symbols introduced by a newer host toolchain.
+发布 wheel 必须在目标 manylinux 构建镜像中编译。`auditwheel repair` 可以补充平台 tag 或允许的动态库，但不能降低较新宿主编译器引入的 GLIBC/GLIBCXX 符号版本。
 
-## Wheel dependency boundary
+## wheel 依赖边界
 
-The wheel does not copy the active Python environment into the package.
-Specifically:
+wheel 不会复制当前 Python 环境：
 
-- NumPy is declared as a runtime dependency and installed separately; it is not
-  embedded in the wheel.
-- ASE is an optional dependency and is not embedded.
-- pybind11, CMake, scikit-build-core, and the compiler toolchain are build-time
-  dependencies only.
-- The default Linux CUDA build does not vendor `libcuda`, `libcudart`, or
-  `libcufft`; the CUDA runtime is linked statically into `nep_gpu`, and the
-  NVIDIA driver remains a host requirement.
-- glibc, libstdc++, libm, and libgcc remain external system libraries. Their
-  required symbol versions are fixed by the manylinux build environment.
+- NumPy 是运行时依赖，由包管理器单独安装；
+- ASE 是可选依赖，不嵌入 wheel；
+- pybind11、CMake、scikit-build-core 和编译器只用于构建；
+- 默认 Linux GPU wheel 不携带 `libcuda`、`libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
+- glibc、libstdc++、libm 和 libgcc 使用系统库，其最低符号版本由 manylinux 构建环境决定。
 
-`auditwheel show` and an archive-content inspection are release gates. If a
-future build links another non-system shared library, it must be reviewed
-explicitly instead of being accepted as an accidental vendored dependency.
+发布门禁必须执行 `auditwheel show` 和归档内容检查。未来如果增加新的非系统动态库，应显式审查，不允许把意外 vendoring 当成正常结果。

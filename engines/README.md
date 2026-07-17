@@ -1,11 +1,10 @@
-# Engines
+# 计算引擎
 
-Engines implement the core engine SPI. They do the numerical work and should not
-depend on Python or LAMMPS frontends.
+计算引擎实现核心 engine SPI，负责数值计算，不依赖 Python 或 LAMMPS 前端。
 
-Supported engines:
+当前支持：
 
-- `cpu`: CPU engine for ordinary, spin, and charge NEP models.
-- `cuda`: CUDA engine; the LAMMPS frontend requires CUDA-enabled Kokkos.
-Only tests should compare engines with each other. Production code should select
-engines through core capabilities and registry behavior.
+- `cpu`：普通、spin 和 charge NEP 模型的 CPU 引擎；
+- `cuda`：CUDA 引擎；LAMMPS 路径要求启用 CUDA 的 Kokkos。
+
+生产代码通过核心能力和 registry 选择引擎。只有测试代码应直接比较不同引擎。
