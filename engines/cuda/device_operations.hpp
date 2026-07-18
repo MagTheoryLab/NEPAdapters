@@ -278,6 +278,21 @@ void add_charge_chain_to_fp_on_device(
     int atom_count,
     DeviceWorkspace& workspace);
 
+void accumulate_qnep_radial_bec_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
+void compute_qnep_bec_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    float sqrt_epsilon_inf,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace);
+
 void accumulate_radial_forces_on_device(
     const ModelProtocol& protocol,
     int atom_count,

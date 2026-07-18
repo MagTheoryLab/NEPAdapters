@@ -133,7 +133,9 @@ int main(int argc, char** argv) {
   NepaFindDescriptorResult descriptor_result{};
   descriptor_result.descriptors = descriptors.data();
 
-  const NepaStatus force_status = nepa_find_force_batch(model, &batch, &result);
+  const NepaStatus force_status = is_charge_model
+      ? nepa_find_charge_batch(model, &batch, &result)
+      : nepa_find_force_batch(model, &batch, &result);
   const NepaStatus descriptor_status =
       nepa_find_descriptors(model, &batch, &descriptor_result);
   nepa_free_model(model);

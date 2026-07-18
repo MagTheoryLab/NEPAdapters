@@ -45,7 +45,7 @@ class FakeEngine : public nep_adapters::Engine {
 }  // namespace
 
 int main() {
-  if (nepa_api_version() != 200) {
+  if (nepa_api_version() != 300) {
     return EXIT_FAILURE;
   }
 

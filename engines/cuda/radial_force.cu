@@ -405,6 +405,106 @@ __global__ void accumulate_radial_forces(
   virial_soa9[8 * atom_stride + atom] += static_cast<double>(s_szy);
 }
 
+__device__ __forceinline__ void add_bec_edge(
+    int atom,
+    int neighbor,
+    int atom_stride,
+    float x12,
+    float y12,
+    float z12,
+    float fx,
+    float fy,
+    float fz,
+    double* bec_soa9) {
+  const double values[9] = {
+      0.5 * static_cast<double>(x12 * fx),
+      0.5 * static_cast<double>(x12 * fy),
+      0.5 * static_cast<double>(x12 * fz),
+      0.5 * static_cast<double>(y12 * fx),
+      0.5 * static_cast<double>(y12 * fy),
+      0.5 * static_cast<double>(y12 * fz),
+      0.5 * static_cast<double>(z12 * fx),
+      0.5 * static_cast<double>(z12 * fy),
+      0.5 * static_cast<double>(z12 * fz)};
+#pragma unroll
+  for (int component = 0; component < 9; ++component) {
+    atomicAdd(&bec_soa9[component * atom_stride + atom], values[component]);
+    atomicAdd(&bec_soa9[component * atom_stride + neighbor], -values[component]);
+  }
+}
+
+__global__ void accumulate_qnep_radial_bec(
+    int atom_count,
+    int atom_stride,
+    int num_types,
+    int n_max_radial,
+    int basis_size_radial,
+    float cutoff_radial,
+    SimulationBox box,
+    const int* __restrict__ types,
+    const double* __restrict__ positions_soa3,
+    const int* __restrict__ nn_radial,
+    const int* __restrict__ nl_radial,
+    const float* __restrict__ charge_derivative,
+    const float* __restrict__ descriptor_coefficients,
+    double* __restrict__ bec_soa9) {
+  const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+  if (atom >= atom_count) {
+    return;
+  }
+  const int type1 = types[atom];
+  const double x1 = positions_soa3[atom];
+  const double y1 = positions_soa3[atom_stride + atom];
+  const double z1 = positions_soa3[2 * atom_stride + atom];
+  const float rcinv = 1.0f / cutoff_radial;
+  const int radial_basis_count =
+      (n_max_radial + 1) * (basis_size_radial + 1);
+  for (int slot = 0; slot < nn_radial[atom]; ++slot) {
+    const int neighbor = nl_radial[atom + atom_stride * slot];
+    const int type2 = types[neighbor];
+    float x12 = 0.0f;
+    float y12 = 0.0f;
+    float z12 = 0.0f;
+    minimum_image_delta(
+        box,
+        positions_soa3[neighbor] - x1,
+        positions_soa3[atom_stride + neighbor] - y1,
+        positions_soa3[2 * atom_stride + neighbor] - z1,
+        x12,
+        y12,
+        z12);
+    const float r = sqrtf(x12 * x12 + y12 * y12 + z12 * z12);
+    if (r <= 0.0f) {
+      continue;
+    }
+    float fc = 0.0f;
+    float fcp = 0.0f;
+    find_fc_and_fcp(cutoff_radial, rcinv, r, fc, fcp);
+    const float rinv = 1.0f / r;
+    float fx = 0.0f;
+    float fy = 0.0f;
+    float fz = 0.0f;
+    for (int n = 0; n <= n_max_radial; ++n) {
+      float gnp = 0.0f;
+      for (int k = 0; k <= basis_size_radial; ++k) {
+        float fn = 0.0f;
+        float fnp = 0.0f;
+        find_fn_and_fnp(k, rcinv, r, fc, fcp, fn, fnp);
+        const int coefficient = n * (basis_size_radial + 1) + k;
+        gnp += fnp * descriptor_coefficients[
+            (type1 * num_types + type2) * radial_basis_count + coefficient];
+      }
+      const float scale =
+          charge_derivative[atom + atom_stride * n] * gnp * rinv;
+      fx += scale * x12;
+      fy += scale * y12;
+      fz += scale * z12;
+    }
+    add_bec_edge(
+        atom, neighbor, atom_stride, x12, y12, z12, fx, fy, fz, bec_soa9);
+  }
+}
+
 template <
     bool IncludeZbl,
     bool AccumulateZblEnergy,
@@ -989,6 +1089,42 @@ void accumulate_radial_forces_on_device(
     }
   }
   check_cuda(cudaGetLastError(), "accumulate radial forces kernel launch failed");
+}
+
+void accumulate_qnep_radial_bec_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace) {
+  require(protocol.charge_mode > 0, "qNEP BEC requires a charge model");
+  const DeviceModelView model_view = model.view();
+  const DeviceWorkspaceView view = workspace.view();
+  require(view.bec_soa9 != nullptr, "workspace missing BEC output");
+  require(view.charge_derivative != nullptr,
+          "workspace missing charge derivative cache");
+  require(model_view.descriptor_coefficients_type_pair_major != nullptr,
+          "model missing type-pair-major descriptor coefficients");
+  const int threads = 32;
+  const int blocks = (atom_count + threads - 1) / threads;
+  if (blocks > 0) {
+    accumulate_qnep_radial_bec<<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.num_types,
+        protocol.n_max_radial,
+        protocol.basis_size_radial,
+        static_cast<float>(protocol.cutoff_radial),
+        box,
+        view.types,
+        view.positions_soa3,
+        view.nn_radial,
+        view.nl_radial_slot_major,
+        view.charge_derivative,
+        model_view.descriptor_coefficients_type_pair_major,
+        view.bec_soa9);
+  }
+  check_cuda(cudaGetLastError(), "accumulate qNEP radial BEC kernel failed");
 }
 
 void accumulate_lammps_radial_forces_on_device(

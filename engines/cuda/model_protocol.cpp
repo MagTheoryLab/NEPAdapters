@@ -87,8 +87,12 @@ bool flag_from_token(const std::string& token) {
 
 void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
   if (tag.find("_dipole") != std::string::npos ||
-      tag.find("_polarizability") != std::string::npos ||
-      tag.find("_temperature") != std::string::npos) {
+      tag.find("_polarizability") != std::string::npos) {
+    throw UnsupportedModelProtocol(
+        "dipole and polarizability models are unsupported by the CUDA backend; "
+        "CPU fallback is disabled");
+  }
+  if (tag.find("_temperature") != std::string::npos) {
     throw UnsupportedModelProtocol(
         "CUDA engine only accepts supported NEP potential models");
   }

@@ -9,10 +9,11 @@ from .runtime import (
     register_cpu,
     register_cuda,
 )
-from .calculator import NEPCalculator, Prediction, SpinPrediction
+from .calculator import ChargePrediction, NEPCalculator, Prediction, SpinPrediction
 
 __all__ = [
     "BackendInfo",
+    "ChargePrediction",
     "Model",
     "NEPCalculator",
     "Prediction",

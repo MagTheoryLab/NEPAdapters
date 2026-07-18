@@ -1134,6 +1134,64 @@ __global__ void zero_mean_d_real_kernel(
   }
 }
 
+__global__ void initialize_qnep_bec(
+    int atom_count,
+    int atom_stride,
+    const double* __restrict__ charge,
+    double* __restrict__ bec_soa9) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = atom_count * 9;
+  if (index >= total) {
+    return;
+  }
+  const int component = index / atom_count;
+  const int atom = index - component * atom_count;
+  const bool diagonal = component == 0 || component == 4 || component == 8;
+  bec_soa9[component * atom_stride + atom] = diagonal ? charge[atom] : 0.0;
+}
+
+__global__ void copy_charge_derivative_to_fp(
+    int total,
+    const float* __restrict__ charge_derivative,
+    float* __restrict__ fp) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < total) {
+    fp[index] = charge_derivative[index];
+  }
+}
+
+__global__ void add_internal_virial_to_raw_bec(
+    int atom_count,
+    int atom_stride,
+    double scale,
+    const double* __restrict__ virial_soa9,
+    double* __restrict__ bec_soa9) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = atom_count * 9;
+  if (index >= total) {
+    return;
+  }
+  const int raw_component = index / atom_count;
+  const int atom = index - raw_component * atom_count;
+  const int internal_component =
+      raw_component == 0 ? 0 : raw_component == 1 ? 3 :
+      raw_component == 2 ? 4 : raw_component == 3 ? 6 :
+      raw_component == 4 ? 1 : raw_component == 5 ? 5 :
+      raw_component == 6 ? 7 : raw_component == 7 ? 8 : 2;
+  bec_soa9[raw_component * atom_stride + atom] +=
+      scale * virial_soa9[internal_component * atom_stride + atom];
+}
+
+__global__ void scale_qnep_bec(
+    int total,
+    double scale,
+    double* __restrict__ bec_soa9) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < total) {
+    bec_soa9[index] *= scale;
+  }
+}
+
 }  // namespace
 
 void apply_qnep_charge_terms_on_device(
@@ -1248,6 +1306,79 @@ void apply_qnep_charge_terms_on_device(
   zero_mean_d_real_kernel<<<1, 256, 256 * sizeof(float)>>>(atom_count, view.d_real);
   check_cuda(cudaGetLastError(), "qNEP zero-mean D_real launch failed");
   check_cuda(cudaDeviceSynchronize(), "qNEP charge terms failed");
+}
+
+void compute_qnep_bec_on_device(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    float sqrt_epsilon_inf,
+    const DeviceModel& model,
+    DeviceWorkspace& workspace) {
+  require(atom_count > 0, "qNEP BEC atom count must be positive");
+  require(protocol.charge_mode > 0, "qNEP BEC requires a charge model");
+  const DeviceWorkspaceView view = workspace.view();
+  require(view.charge != nullptr, "workspace missing charge output");
+  require(view.bec_soa9 != nullptr, "workspace missing BEC output");
+  require(view.charge_derivative != nullptr,
+          "workspace missing charge derivative cache");
+  require(view.fp != nullptr, "workspace missing descriptor derivative cache");
+  require(view.force_soa3 != nullptr, "workspace missing force scratch");
+  require(view.virial_soa9 != nullptr, "workspace missing virial scratch");
+
+  constexpr int threads = 256;
+  const int bec_total = atom_count * 9;
+  const int bec_blocks = (bec_total + threads - 1) / threads;
+  initialize_qnep_bec<<<bec_blocks, threads>>>(
+      atom_count,
+      static_cast<int>(view.atom_capacity),
+      view.charge,
+      view.bec_soa9);
+  const int derivative_total =
+      static_cast<int>(view.atom_capacity) * protocol.descriptor_dim;
+  const int derivative_blocks = (derivative_total + threads - 1) / threads;
+  copy_charge_derivative_to_fp<<<derivative_blocks, threads>>>(
+      derivative_total, view.charge_derivative, view.fp);
+  check_cuda(cudaGetLastError(), "initialize qNEP BEC failed");
+
+  accumulate_qnep_radial_bec_on_device(
+      protocol, atom_count, box, model, workspace);
+  if (protocol.body_channels.channel_count() > 0) {
+    check_cuda(
+        cudaMemset(view.force_soa3, 0, view.atom_capacity * 3 * sizeof(double)),
+        "clear qNEP BEC force scratch");
+    check_cuda(
+        cudaMemset(view.virial_soa9, 0, view.atom_capacity * 9 * sizeof(double)),
+        "clear qNEP BEC virial scratch");
+    accumulate_l2_angular_forces_on_device(
+        protocol, atom_count, model, workspace, VirialTarget::center_atom);
+    add_internal_virial_to_raw_bec<<<bec_blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        -0.5,
+        view.virial_soa9,
+        view.bec_soa9);
+    check_cuda(
+        cudaMemset(view.force_soa3, 0, view.atom_capacity * 3 * sizeof(double)),
+        "clear qNEP BEC force scratch");
+    check_cuda(
+        cudaMemset(view.virial_soa9, 0, view.atom_capacity * 9 * sizeof(double)),
+        "clear qNEP BEC virial scratch");
+    accumulate_l2_angular_forces_on_device(
+        protocol, atom_count, model, workspace, VirialTarget::neighbor_atom);
+    add_internal_virial_to_raw_bec<<<bec_blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        0.5,
+        view.virial_soa9,
+        view.bec_soa9);
+  }
+  const int storage_total = static_cast<int>(view.atom_capacity) * 9;
+  const int storage_blocks = (storage_total + threads - 1) / threads;
+  scale_qnep_bec<<<storage_blocks, threads>>>(
+      storage_total, static_cast<double>(sqrt_epsilon_inf), view.bec_soa9);
+  check_cuda(cudaGetLastError(), "finalize qNEP BEC failed");
+  check_cuda(cudaDeviceSynchronize(), "qNEP BEC kernels failed");
 }
 
 }  // namespace nep_adapters::cuda_backend

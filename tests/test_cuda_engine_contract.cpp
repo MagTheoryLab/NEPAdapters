@@ -75,6 +75,8 @@ int main() {
   int pbc[] = {1, 1, 1};
   double energy[] = {0.0};
   double forces[] = {0.0, 0.0, 0.0};
+  double charges[] = {0.0};
+  double becs[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
   NepaStructureBatch batch{};
   batch.num_structures = 1;
@@ -89,6 +91,8 @@ int main() {
   NepaFindForceResult result{};
   result.energy_per_structure = energy;
   result.forces_aos3 = forces;
+  result.charge_per_atom = charges;
+  result.bec_per_atom_row_major9 = becs;
   if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK ||
       !std::isfinite(energy[0]) ||
       !std::isfinite(forces[0]) ||
@@ -462,7 +466,7 @@ int main() {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }
-  const NepaStatus qnep_force_status = nepa_find_force_batch(model, &batch, &result);
+  const NepaStatus qnep_force_status = nepa_find_charge_batch(model, &batch, &result);
   if (qnep_force_status != NEPA_STATUS_OK) {
     std::cerr << "qNEP CUDA force failed status=" << qnep_force_status
               << " error=" << nepa_last_error_message() << '\n';

@@ -132,6 +132,20 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
   )
 
   add_test(
+    NAME nep_adapters_python_production_api_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_production_api.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_production_api_test
+    PROPERTIES
+      LABELS "production;contract;oracle;frontend;python;cpu;qnep;dftd3;dipole;polarizability;cancellation"
+      ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_QNEP_TEST_DATA_DIR=${NEP_ADAPTERS_QNEP_TEST_DATA_DIR};NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR=${PROJECT_SOURCE_DIR}/tests/fixtures/production_api"
+  )
+
+  add_test(
     NAME nep_adapters_python_ase_calculator_test
     COMMAND
       "${Python3_EXECUTABLE}"
@@ -194,7 +208,7 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
       PROPERTIES
         LABELS "parity;frontend;python;cuda;qnep"
         ENVIRONMENT
-          "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_QNEP_TEST_DATA_DIR=${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}"
+          "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_QNEP_TEST_DATA_DIR=${NEP_ADAPTERS_QNEP_TEST_DATA_DIR};NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR=${PROJECT_SOURCE_DIR}/tests/fixtures/production_api"
     )
   endif()
 endif()

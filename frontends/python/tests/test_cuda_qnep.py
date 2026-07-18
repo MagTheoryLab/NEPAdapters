@@ -9,6 +9,14 @@ import nep_adapters
 from baseline_utils import read_type_map
 
 
+def numeric_tokens(path):
+    values = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            values.extend(float(value) for value in line.split())
+    return np.asarray(values, dtype=np.float64)
+
+
 def read_xyz_input(path, type_map):
     fields = Path(path).read_text(encoding="utf-8").split()
     atom_count = int(fields[0])
@@ -65,6 +73,9 @@ def require_within_budget(label, actual, expected, atol, rtol):
 
 def main():
     data_dir = Path(os.environ["NEP_ADAPTERS_QNEP_TEST_DATA_DIR"])
+    production_fixture_dir = Path(
+        os.environ["NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR"]
+    )
     model_path = data_dir / "nep.txt"
     types, positions, box = read_xyz_input(
         data_dir / "xyz.in",
@@ -85,13 +96,20 @@ def main():
     ).reshape(len(types), -1)
 
     with nep_adapters.load_model("cuda", str(model_path)) as model:
-        potentials, forces, virials = model.calculate(
+        with np.testing.assert_raises_regex(
+            (ValueError, RuntimeError), "calculate_charge"
+        ):
+            model.calculate(types, box, positions, atom_counts)
+        potentials, forces, virials, charges, becs = model.calculate_charge(
             types,
             box,
             positions,
             atom_counts,
         )
-        if not all(np.all(np.isfinite(values)) for values in (potentials, forces, virials)):
+        if not all(
+            np.all(np.isfinite(values))
+            for values in (potentials, forces, virials, charges, becs)
+        ):
             raise AssertionError("qNEP CUDA output contains non-finite values")
         descriptors = model.descriptors(types, box, positions, atom_counts)
         force_stats = require_within_budget(
@@ -108,9 +126,51 @@ def main():
             2.0e-6,
         )
 
+        with nep_adapters.load_model("cpu", str(model_path)) as cpu_model:
+            cpu_outputs = cpu_model.calculate_charge(
+                types, box, positions, atom_counts
+            )
+        potential_stats = require_within_budget(
+            "qNEP potential", potentials, cpu_outputs[0], 2.0e-4, 2.0e-6
+        )
+        energy_golden = numeric_tokens(
+            production_fixture_dir / "qnep_charge_bec_golden.txt"
+        )[85]
+        if not np.isclose(
+            potentials.sum(), energy_golden, atol=2.0e-4, rtol=2.0e-6
+        ):
+            raise AssertionError(
+                f"qNEP energy mismatch: {potentials.sum()} vs {energy_golden}"
+            )
+        charge_stats = require_within_budget(
+            "qNEP charge", charges, cpu_outputs[3], 2.0e-5, 2.0e-6
+        )
+        bec_stats = require_within_budget(
+            "qNEP BEC", becs, cpu_outputs[4], 3.0e-3, 2.0e-5
+        )
+
+        with nep_adapters.NEPCalculator(model_path, backend="cuda") as calculator:
+            prediction = calculator.predict_charge_arrays(
+                np.tile(types, 2),
+                np.tile(positions, (2, 1)),
+                np.tile(box, (2, 1)),
+                np.asarray([len(types), len(types)], dtype=np.int32),
+            )
+        if prediction.charges.shape != (2 * len(types),) or prediction.becs.shape != (
+            2 * len(types),
+            9,
+        ):
+            raise AssertionError("qNEP CUDA high-level batch shape mismatch")
+        require_within_budget(
+            "qNEP batch charge 0", prediction.charges[: len(types)], charges, 2.0e-5, 2.0e-6
+        )
+        require_within_budget(
+            "qNEP batch BEC 1", prediction.becs[len(types) :], becs, 3.0e-3, 2.0e-5
+        )
+
         os.environ["NEP_ADAPTERS_QNEP_KSPACE"] = "pppm"
         try:
-            model.calculate(types, box, positions, atom_counts)
+            model.calculate_charge(types, box, positions, atom_counts)
         except RuntimeError as error:
             if "PPPM support is disabled" not in str(error):
                 raise
@@ -131,6 +191,9 @@ def main():
         f"descriptor_max_abs={descriptor_stats['max_abs']:.12g}",
         f"descriptor_rms={descriptor_stats['rms']:.12g}",
         f"descriptor_worst={descriptor_stats['index']}",
+        f"potential_max_abs={potential_stats['max_abs']:.12g}",
+        f"charge_max_abs={charge_stats['max_abs']:.12g}",
+        f"bec_max_abs={bec_stats['max_abs']:.12g}",
         "pppm=disabled-fail-closed",
     )
     return 0

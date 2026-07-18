@@ -5,6 +5,7 @@
 #include "nep_adapters/views.hpp"
 
 #include <memory>
+#include <atomic>
 #include <string>
 
 namespace nep_adapters {
@@ -24,9 +25,21 @@ class Model {
     return NEPA_STATUS_UNSUPPORTED;
   }
 
+  virtual NepaModelKind model_kind() const {
+    return NEPA_MODEL_KIND_ORDINARY;
+  }
+
   virtual NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) = 0;
+
+  virtual NepaStatus find_charge_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
+    (void)batch;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
 
   virtual NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
@@ -34,6 +47,40 @@ class Model {
     (void)batch;
     (void)result;
     return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  virtual NepaStatus find_dipoles(
+      const NepaStructureBatch& batch,
+      NepaDipoleResult& result) {
+    (void)batch;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  virtual NepaStatus find_polarizabilities(
+      const NepaStructureBatch& batch,
+      NepaPolarizabilityResult& result) {
+    (void)batch;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  virtual NepaStatus compute_dftd3_batch(
+      const NepaStructureBatch& batch,
+      const NepaDftd3Parameters& parameters,
+      NepaDftd3Result& result,
+      bool include_nep) {
+    (void)batch;
+    (void)parameters;
+    (void)result;
+    (void)include_nep;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  void cancel() noexcept { cancelled_.store(true, std::memory_order_release); }
+  void reset_cancel() noexcept { cancelled_.store(false, std::memory_order_release); }
+  bool is_cancelled() const noexcept {
+    return cancelled_.load(std::memory_order_acquire);
   }
 
   virtual NepaStatus find_force_lammps_neighbors(
@@ -51,6 +98,9 @@ class Model {
     (void)result;
     return NEPA_STATUS_UNSUPPORTED;
   }
+
+ private:
+  std::atomic<bool> cancelled_{false};
 };
 
 class Engine {

@@ -30,6 +30,24 @@ class CpuModel final : public Model {
  public:
   explicit CpuModel(const std::string& model_path) : nep_(model_path) {}
 
+  NepaModelKind model_kind() const override {
+    if (nep_.paramb.model_type == 1) {
+      return NEPA_MODEL_KIND_DIPOLE;
+    }
+    if (nep_.paramb.model_type == 2) {
+      return NEPA_MODEL_KIND_POLARIZABILITY;
+    }
+    if constexpr (HasSpin<NativeNep>::value) {
+      if (nep_.paramb.spin_mode > 0) {
+        return NEPA_MODEL_KIND_SPIN;
+      }
+    }
+    if (nep_.paramb.charge_mode > 0) {
+      return NEPA_MODEL_KIND_CHARGE;
+    }
+    return NEPA_MODEL_KIND_ORDINARY;
+  }
+
   NepaStatus model_info(NepaModelInfo& out) const override {
     out = {};
     out.cutoff_radial = nep_.paramb.rc_radial_max;
@@ -38,17 +56,23 @@ class CpuModel final : public Model {
     if (nep_.zbl.enabled) {
       out.cutoff_max = std::max(out.cutoff_max, nep_.zbl.rc_outer);
     }
-    out.capabilities = to_mask(Capability::batch_find_force) |
-                       to_mask(Capability::external_neighbors) |
-                       to_mask(Capability::virial) |
-                       to_mask(Capability::descriptors);
-    if (nep_.paramb.charge_mode > 0) {
-      out.capabilities |= to_mask(Capability::charge);
-    }
-    if constexpr (HasSpin<NativeNep>::value) {
-      if (nep_.paramb.spin_mode > 0) {
+    const NepaModelKind kind = model_kind();
+    if (kind == NEPA_MODEL_KIND_DIPOLE) {
+      out.capabilities = to_mask(Capability::dipole);
+    } else if (kind == NEPA_MODEL_KIND_POLARIZABILITY) {
+      out.capabilities = to_mask(Capability::polarizability);
+    } else {
+      out.capabilities = to_mask(Capability::batch_find_force) |
+                         to_mask(Capability::external_neighbors) |
+                         to_mask(Capability::virial) |
+                         to_mask(Capability::descriptors);
+      if (kind == NEPA_MODEL_KIND_CHARGE) {
+        out.capabilities |= to_mask(Capability::charge);
+      } else if (kind == NEPA_MODEL_KIND_SPIN) {
         out.capabilities |= to_mask(Capability::spin);
         out.capabilities |= to_mask(Capability::spin_energy_transfer);
+      } else {
+        out.capabilities |= to_mask(Capability::dftd3);
       }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
@@ -59,9 +83,35 @@ class CpuModel final : public Model {
   NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_ORDINARY &&
+        model_kind() != NEPA_MODEL_KIND_SPIN) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    return find_force_batch_impl(batch, result);
+  }
+
+  NepaStatus find_charge_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_CHARGE) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (result.charge_per_atom == nullptr ||
+        result.bec_per_atom_row_major9 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    return find_force_batch_impl(batch, result);
+  }
+
+  NepaStatus find_force_batch_impl(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
     if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
     }
 
     if constexpr (HasSpin<NativeNep>::value) {
@@ -87,6 +137,9 @@ class CpuModel final : public Model {
     auto process_structure = [&](
         NativeNep& native,
         const std::int32_t structure) -> NepaStatus {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
         const std::int32_t atom_count = batch.atom_counts[structure];
         const std::int32_t atom_offset = batch.atom_offsets[structure];
 
@@ -237,7 +290,7 @@ class CpuModel final : public Model {
             }
           }
         }
-        return NEPA_STATUS_OK;
+        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     };
 
 #if defined(_OPENMP)
@@ -281,13 +334,16 @@ class CpuModel final : public Model {
 #endif
       } else {
         for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+          if (is_cancelled()) {
+            return NEPA_STATUS_CANCELLED;
+          }
           const NepaStatus status = process_structure(nep_, structure);
           if (status != NEPA_STATUS_OK) {
             return status;
           }
         }
       }
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception&) {
       return NEPA_STATUS_RUNTIME_ERROR;
     }
@@ -299,6 +355,13 @@ class CpuModel final : public Model {
     if (!valid_batch(batch) || result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
+    if (model_kind() == NEPA_MODEL_KIND_DIPOLE ||
+        model_kind() == NEPA_MODEL_KIND_POLARIZABILITY) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
+    }
 
     const std::int32_t descriptor_dim =
         static_cast<std::int32_t>(nep_.annmb.dim);
@@ -308,6 +371,9 @@ class CpuModel final : public Model {
 
     try {
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
         const std::int32_t atom_count = batch.atom_counts[structure];
         const std::int32_t atom_offset = batch.atom_offsets[structure];
         if (atom_count <= 0 || atom_offset < 0 ||
@@ -370,8 +436,182 @@ class CpuModel final : public Model {
         }
       }
 
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+    } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+
+  NepaStatus find_dipoles(
+      const NepaStructureBatch& batch,
+      NepaDipoleResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_DIPOLE) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (!valid_batch(batch) || result.dipoles_row_major3 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        std::vector<int> types;
+        std::vector<double> positions_soa;
+        std::vector<double> box;
+        const NepaStatus status = prepare_native_structure(
+            batch, structure, types, positions_soa, box);
+        if (status != NEPA_STATUS_OK) {
+          return status;
+        }
+        std::vector<double> dipole(3, 0.0);
+        nep_.find_dipole(types, box, positions_soa, dipole);
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        std::copy_n(
+            dipole.data(),
+            3,
+            result.dipoles_row_major3 + static_cast<std::size_t>(structure) * 3);
+      }
       return NEPA_STATUS_OK;
     } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+
+  NepaStatus find_polarizabilities(
+      const NepaStructureBatch& batch,
+      NepaPolarizabilityResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_POLARIZABILITY) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (!valid_batch(batch) || result.polarizabilities_row_major6 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        std::vector<int> types;
+        std::vector<double> positions_soa;
+        std::vector<double> box;
+        const NepaStatus status = prepare_native_structure(
+            batch, structure, types, positions_soa, box);
+        if (status != NEPA_STATUS_OK) {
+          return status;
+        }
+        std::vector<double> polarizability(6, 0.0);
+        nep_.find_polarizability(types, box, positions_soa, polarizability);
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        std::copy_n(
+            polarizability.data(),
+            6,
+            result.polarizabilities_row_major6 +
+                static_cast<std::size_t>(structure) * 6);
+      }
+      return NEPA_STATUS_OK;
+    } catch (const std::exception&) {
+      return NEPA_STATUS_RUNTIME_ERROR;
+    }
+  }
+
+  NepaStatus compute_dftd3_batch(
+      const NepaStructureBatch& batch,
+      const NepaDftd3Parameters& parameters,
+      NepaDftd3Result& result,
+      bool include_nep) override {
+    if (model_kind() != NEPA_MODEL_KIND_ORDINARY) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (!valid_batch(batch) || parameters.functional == nullptr ||
+        parameters.functional[0] == '\0' || parameters.cutoff <= 0.0 ||
+        parameters.cutoff_cn <= 0.0 || result.energy_per_structure == nullptr ||
+        result.forces_aos3 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        std::vector<int> types;
+        std::vector<double> positions_soa;
+        std::vector<double> box;
+        const NepaStatus status = prepare_native_structure(
+            batch, structure, types, positions_soa, box);
+        if (status != NEPA_STATUS_OK) {
+          return status;
+        }
+        const std::int32_t atom_count = batch.atom_counts[structure];
+        const std::int32_t atom_offset = batch.atom_offsets[structure];
+        std::vector<double> potential(static_cast<std::size_t>(atom_count), 0.0);
+        std::vector<double> force_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
+        std::vector<double> virial_soa(static_cast<std::size_t>(atom_count) * 9, 0.0);
+        if (include_nep) {
+          nep_.compute_with_dftd3(
+              parameters.functional,
+              parameters.cutoff,
+              parameters.cutoff_cn,
+              types,
+              box,
+              positions_soa,
+              potential,
+              force_soa,
+              virial_soa);
+        } else {
+          nep_.compute_dftd3(
+              parameters.functional,
+              parameters.cutoff,
+              parameters.cutoff_cn,
+              types,
+              box,
+              positions_soa,
+              potential,
+              force_soa,
+              virial_soa);
+        }
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
+        result.energy_per_structure[structure] =
+            std::accumulate(potential.begin(), potential.end(), 0.0);
+        double* structure_virial =
+            result.virials_row_major9 == nullptr
+                ? nullptr
+                : result.virials_row_major9 +
+                      static_cast<std::size_t>(structure) * 9;
+        if (structure_virial != nullptr) {
+          std::fill_n(structure_virial, 9, 0.0);
+        }
+        for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+          const std::int32_t global_atom = atom_offset + atom;
+          if (result.potential_per_atom != nullptr) {
+            result.potential_per_atom[global_atom] = potential[atom];
+          }
+          for (std::int32_t component = 0; component < 3; ++component) {
+            result.forces_aos3[3 * static_cast<std::size_t>(global_atom) + component] =
+                force_soa[static_cast<std::size_t>(component) * atom_count + atom];
+          }
+          for (std::int32_t component = 0; component < 9; ++component) {
+            const double value =
+                virial_soa[static_cast<std::size_t>(component) * atom_count + atom];
+            if (result.virials_per_atom_row_major9 != nullptr) {
+              result.virials_per_atom_row_major9[
+                  9 * static_cast<std::size_t>(global_atom) + component] = value;
+            }
+            if (structure_virial != nullptr) {
+              structure_virial[component] += value;
+            }
+          }
+        }
+      }
+      return NEPA_STATUS_OK;
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
@@ -379,6 +619,13 @@ class CpuModel final : public Model {
   NepaStatus find_force_lammps_neighbors(
       const NepaLammpsNeighborInput& input,
       NepaLammpsNeighborResult& result) override {
+    if (model_kind() == NEPA_MODEL_KIND_DIPOLE ||
+        model_kind() == NEPA_MODEL_KIND_POLARIZABILITY) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
+    }
     if (input.nlocal < 0 || input.inum < 0 || input.ilist == nullptr ||
         input.numneigh == nullptr || input.firstneigh == nullptr ||
         input.types == nullptr || input.type_map == nullptr ||
@@ -454,13 +701,47 @@ class CpuModel final : public Model {
 
       *result.total_potential = total_potential;
       std::copy(total_virial, total_virial + 6, result.total_virial6);
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception&) {
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
 
  private:
+  static NepaStatus prepare_native_structure(
+      const NepaStructureBatch& batch,
+      std::int32_t structure,
+      std::vector<int>& types,
+      std::vector<double>& positions_soa,
+      std::vector<double>& box) {
+    if (structure < 0 || structure >= batch.num_structures) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    const std::int32_t atom_count = batch.atom_counts[structure];
+    const std::int32_t atom_offset = batch.atom_offsets[structure];
+    if (atom_count <= 0 || atom_offset < 0 ||
+        atom_offset + atom_count > batch.total_atoms) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    types.resize(static_cast<std::size_t>(atom_count));
+    positions_soa.resize(static_cast<std::size_t>(atom_count) * 3);
+    box.resize(9);
+    for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+      const std::int32_t global_atom = atom_offset + atom;
+      types[atom] = batch.types[global_atom];
+      for (std::int32_t component = 0; component < 3; ++component) {
+        positions_soa[static_cast<std::size_t>(component) * atom_count + atom] =
+            batch.positions_aos3[
+                3 * static_cast<std::size_t>(global_atom) + component];
+      }
+    }
+    std::copy_n(
+        batch.boxes_row_major9 + static_cast<std::size_t>(structure) * 9,
+        9,
+        box.data());
+    return NEPA_STATUS_OK;
+  }
+
   static bool valid_batch(const NepaStructureBatch& batch) {
     if (batch.num_structures <= 0 || batch.total_atoms <= 0 ||
         batch.atom_counts == nullptr || batch.atom_offsets == nullptr ||
@@ -487,13 +768,20 @@ class CpuEngine final : public Engine {
   explicit CpuEngine(const char* name) : name_(name) {}
 
   EngineInfo info() const override {
-    return {
-        name_,
-        "external",
+    CapabilityMask capabilities =
         to_mask(Capability::batch_find_force) |
-            to_mask(Capability::external_neighbors) |
-            to_mask(Capability::virial) |
-            to_mask(Capability::descriptors)};
+        to_mask(Capability::external_neighbors) |
+        to_mask(Capability::virial) |
+        to_mask(Capability::descriptors) |
+        to_mask(Capability::charge) |
+        to_mask(Capability::dipole) |
+        to_mask(Capability::polarizability) |
+        to_mask(Capability::dftd3);
+    if constexpr (HasSpin<NativeNep>::value) {
+      capabilities |= to_mask(Capability::spin) |
+                      to_mask(Capability::spin_energy_transfer);
+    }
+    return {name_, "external", capabilities};
   }
 
   NepaStatus load_model(

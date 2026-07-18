@@ -146,6 +146,23 @@ if(TARGET NEPAdapters::cpu AND
 endif()
 
 if(TARGET NEPAdapters::cpu)
+  add_executable(nep_adapters_cpu_production_api_test
+    test_cpu_production_api.cpp)
+  target_link_libraries(
+    nep_adapters_cpu_production_api_test
+    PRIVATE
+      NEPAdapters::cpu)
+  target_compile_definitions(
+    nep_adapters_cpu_production_api_test
+    PRIVATE
+      NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/tests/fixtures/production_api")
+  add_test(
+    NAME nep_adapters_cpu_production_api_test
+    COMMAND nep_adapters_cpu_production_api_test)
+  set_tests_properties(
+    nep_adapters_cpu_production_api_test
+    PROPERTIES LABELS "production;contract;oracle;engine;cpu;dftd3;dipole;polarizability;cancellation")
+
   set(_nep_cpu_reference_target_added OFF)
   foreach(_reference_dir IN ITEMS
       "${NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR}"

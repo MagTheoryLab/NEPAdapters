@@ -14,7 +14,7 @@
 #endif
 
 #define NEP_ADAPTERS_API_VERSION_MAJOR 0
-#define NEP_ADAPTERS_API_VERSION_MINOR 2
+#define NEP_ADAPTERS_API_VERSION_MINOR 3
 #define NEP_ADAPTERS_API_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -26,7 +26,8 @@ typedef enum NepaStatus {
   NEPA_STATUS_INVALID_ARGUMENT = 1,
   NEPA_STATUS_UNSUPPORTED = 2,
   NEPA_STATUS_BACKEND_UNAVAILABLE = 3,
-  NEPA_STATUS_RUNTIME_ERROR = 4
+  NEPA_STATUS_RUNTIME_ERROR = 4,
+  NEPA_STATUS_CANCELLED = 5
 } NepaStatus;
 
 typedef enum NepaCapabilityFlags {
@@ -37,8 +38,19 @@ typedef enum NepaCapabilityFlags {
   NEPA_CAPABILITY_CHARGE = 1u << 4u,
   NEPA_CAPABILITY_VIRIAL = 1u << 5u,
   NEPA_CAPABILITY_DESCRIPTORS = 1u << 6u,
-  NEPA_CAPABILITY_SPIN_ENERGY_TRANSFER = 1u << 7u
+  NEPA_CAPABILITY_SPIN_ENERGY_TRANSFER = 1u << 7u,
+  NEPA_CAPABILITY_DIPOLE = 1u << 8u,
+  NEPA_CAPABILITY_POLARIZABILITY = 1u << 9u,
+  NEPA_CAPABILITY_DFTD3 = 1u << 10u
 } NepaCapabilityFlags;
+
+typedef enum NepaModelKind {
+  NEPA_MODEL_KIND_ORDINARY = 0,
+  NEPA_MODEL_KIND_SPIN = 1,
+  NEPA_MODEL_KIND_CHARGE = 2,
+  NEPA_MODEL_KIND_DIPOLE = 3,
+  NEPA_MODEL_KIND_POLARIZABILITY = 4
+} NepaModelKind;
 
 typedef struct NepaModel NepaModel;
 
@@ -94,6 +106,31 @@ typedef struct NepaFindDescriptorResult {
   /* Row-major per-atom descriptors with shape (total_atoms, descriptor_dim). */
   double* descriptors;
 } NepaFindDescriptorResult;
+
+typedef struct NepaDipoleResult {
+  /* Row-major values with shape (num_structures, 3). */
+  double* dipoles_row_major3;
+} NepaDipoleResult;
+
+typedef struct NepaPolarizabilityResult {
+  /* Row-major values with shape (num_structures, 6): xx, yy, zz, xy, yz, zx. */
+  double* polarizabilities_row_major6;
+} NepaPolarizabilityResult;
+
+typedef struct NepaDftd3Parameters {
+  const char* functional;
+  double cutoff;
+  double cutoff_cn;
+} NepaDftd3Parameters;
+
+typedef struct NepaDftd3Result {
+  double* energy_per_structure;
+  double* potential_per_atom;
+  double* forces_aos3;
+  /* Structure and per-atom raw9 order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  double* virials_row_major9;
+  double* virials_per_atom_row_major9;
+} NepaDftd3Result;
 
 typedef struct NepaLammpsNeighborInput {
   int nlocal;
@@ -189,7 +226,14 @@ NEP_ADAPTERS_API NepaStatus nepa_load_model(
 NEP_ADAPTERS_API NepaStatus nepa_model_info(
     NepaModel* model,
     NepaModelInfo* out);
+NEP_ADAPTERS_API NepaStatus nepa_model_kind(
+    NepaModel* model,
+    NepaModelKind* out);
 NEP_ADAPTERS_API NepaStatus nepa_find_force_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaFindForceResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_charge_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindForceResult* result);
@@ -197,6 +241,24 @@ NEP_ADAPTERS_API NepaStatus nepa_find_descriptors(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindDescriptorResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_dipoles(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaDipoleResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_find_polarizabilities(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaPolarizabilityResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_compute_dftd3_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    const NepaDftd3Parameters* parameters,
+    NepaDftd3Result* result);
+NEP_ADAPTERS_API NepaStatus nepa_compute_with_dftd3_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    const NepaDftd3Parameters* parameters,
+    NepaDftd3Result* result);
 NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_neighbors(
     NepaModel* model,
     const NepaLammpsNeighborInput* input,
@@ -205,6 +267,8 @@ NEP_ADAPTERS_API NepaStatus nepa_find_force_lammps_device_neighbors(
     NepaModel* model,
     const NepaLammpsDeviceNeighborInput* input,
     NepaLammpsDeviceNeighborResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_cancel_model(NepaModel* model);
+NEP_ADAPTERS_API NepaStatus nepa_reset_cancel(NepaModel* model);
 NEP_ADAPTERS_API void nepa_free_model(NepaModel* model);
 NEP_ADAPTERS_API const char* nepa_status_message(NepaStatus status);
 NEP_ADAPTERS_API const char* nepa_last_error_message(void);

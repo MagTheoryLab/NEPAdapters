@@ -18,10 +18,33 @@
 
 `Model.descriptors()` 返回 `(natoms, descriptor_dim)` 的 descriptor 矩阵。`Model.model_info()` 不执行计算，直接返回 cutoff、能力标志和 `descriptor_dim` 等模型信息。
 
+qNEP 使用 `Model.calculate_charge()`，固定返回：
+
+| 返回值 | 形状 | 含义 |
+|---|---|---|
+| `potential` | `(natoms,)` | 每原子势能 |
+| `forces` | `(natoms, 3)` | 每原子力 |
+| `virials` | `(natoms, 9)` | 每原子 raw9 virial |
+| `charges` | `(natoms,)` | 每原子电荷 |
+| `becs` | `(natoms, 9)` | 每原子 Born effective charge tensor |
+
+charge 模型调用普通 `Model.calculate()` 会报错。非 charge 模型调用
+`calculate_charge()` 也会报错；接口不会根据模型类型静默改变 tuple 长度。
+
 spin 模型必须使用显式接口，避免普通调用遗漏 spin 输入：
 
 - `Model.calculate_spin()` 接受 `(natoms, 3)` 的 spin 数组，返回势能、力、每原子 virial 和磁力；
 - `Model.descriptors_spin()` 返回 spin 模型的 descriptor 矩阵；
+
+其他正式底层接口：
+
+- `Model.dipoles()`：返回 `(nstructures, 3)`；
+- `Model.polarizabilities()`：返回 `(nstructures, 6)`，顺序为 `xx, yy, zz, xy, yz, zx`；
+- `Model.calculate_dftd3()`：只计算 DFT-D3 修正；
+- `Model.calculate_with_dftd3()`：计算普通 NEP 与 DFT-D3 之和；
+- `Model.cancel()` / `Model.reset_cancel()`：设置或复位线程安全的取消状态。
+
+DFT-D3 两个接口都接受 `functional`、`cutoff` 和 `cutoff_cn`，并返回与普通 `calculate()` 相同的三个数组。当前只支持 CPU 上的普通非 spin、非 charge 势模型。dipole、polarizability 和 DFT-D3 在 CUDA 上明确 unsupported，不会切换 CPU。
 
 ## 使用 `NEPCalculator`
 
@@ -44,6 +67,8 @@ spin 模型必须使用显式接口，避免普通调用遗漏 spin 输入：
 | `virials` | `(natoms, 9)` | 拼接后的每原子 virial |
 | `structure_virials` | `(nstructures, 9)` | 每个结构的平均每原子 virial |
 
+所有生产输出为 `float64`。`virials`、`structure_virials` 和 `becs` 使用 raw9 顺序 `xx, xy, xz, yx, yy, yz, zx, zy, zz`。
+
 NepTrainKit 风格调用：
 
 ```python
@@ -54,6 +79,20 @@ energy, force_blocks, virial_blocks = calculator.calculate(structures)
 ```
 
 空 batch 返回空数组和空 block 列表。
+
+qNEP 高层接口为 `predict_charge_arrays()`、`predict_charge_structures()` 和
+`calculate_charge()`。它们返回 `ChargePrediction`，在 `Prediction` 字段之外增加
+`charges`、`becs`、`charge_blocks()` 和 `bec_blocks()`。空 batch 的 charge/BEC
+形状稳定为 `(0,)` 和 `(0, 9)`。
+
+响应和 DFT-D3 高层接口包括：
+
+- `predict_dipoles()` / `get_structures_dipole()`；
+- `predict_polarizabilities()` / `get_structures_polarizability()`；
+- `predict_dftd3_structures()` / `calculate_dftd3()`；
+- `predict_with_dftd3_structures()` / `calculate_with_dftd3()`。
+
+`NEPCalculator.cancel()` 与 `reset_cancel()` 转发到底层模型。native 计算释放 GIL，另一个 Python/UI 线程可以发出取消请求。取消在 CPU/CUDA 结构边界响应；安全的阶段边界也会检查。CUDA 不抢占正在运行的单个 kernel，但 kernel 返回后会停止后续结构或阶段。取消只抛出异常，不返回部分 `Prediction`。
 
 descriptor 接口：
 
@@ -131,7 +170,7 @@ NEP_CUDA=1 pip install .
 
 GPU wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或选择 `cpu` 时只加载 `nep_cpu`；只有显式选择 `backend="cuda"` 才按需导入 `nep_gpu`。CUDA 加载失败不会切换到 CPU。
 
-CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型可以通过 `nep_gpu` 执行 `calculate()` 和 `descriptors()`。
+CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型通过 `nep_gpu` 执行 `calculate_charge()` 和 `descriptors()`；普通 `calculate()` 对 charge 模型保持 fail-closed。
 
 发布 wheel 不使用 `native`，而是同时嵌入 V100、T4、A100、A10/RTX 30 和
 RTX 4090 的 SASS，并保留 `compute_89` PTX：

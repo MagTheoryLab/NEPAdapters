@@ -308,6 +308,11 @@ class OracleRunner {
       NepaFindForceResult& result) {
     return model_.find_force_batch(batch, result);
   }
+  NepaStatus find_charge_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
+    return model_.find_charge_batch(batch, result);
+  }
   NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
       NepaFindDescriptorResult& result) {
@@ -352,6 +357,11 @@ class ApiRunner {
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) {
     return nepa_find_force_batch(model_, &batch, &result);
+  }
+  NepaStatus find_charge_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
+    return nepa_find_charge_batch(model_, &batch, &result);
   }
   NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
@@ -420,6 +430,9 @@ Prediction evaluate_batch(
           info.capabilities, nep_adapters::Capability::charge)) {
     out.charge.assign(atom_count, 0.0);
   }
+  std::vector<double> bec(
+      out.charge.empty() ? 0 : static_cast<std::size_t>(atom_count) * 9,
+      0.0);
 
   NepaFindForceResult result{};
   result.energy_per_structure = &out.energy;
@@ -431,7 +444,12 @@ Prediction evaluate_batch(
   result.spin_transfer_per_atom_row_major9 =
       out.spin_transfer.empty() ? nullptr : out.spin_transfer.data();
   result.charge_per_atom = out.charge.empty() ? nullptr : out.charge.data();
-  require_status(runner.find_force_batch(batch, result), "find_force_batch");
+  result.bec_per_atom_row_major9 = bec.empty() ? nullptr : bec.data();
+  const bool is_charge_model = !out.charge.empty();
+  require_status(
+      is_charge_model ? runner.find_charge_batch(batch, result)
+                      : runner.find_force_batch(batch, result),
+      is_charge_model ? "find_charge_batch" : "find_force_batch");
 
   if (include_descriptors) {
     out.descriptor.assign(

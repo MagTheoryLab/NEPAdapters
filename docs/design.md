@@ -87,6 +87,12 @@ pair 内部能够识别 spin capability，并要求 CPU 路径的 `atom_style sp
 
 公共 API 面向 Python、NepTrainKit、LAMMPS 和 C/C++ 用户，应保持窄而稳定。v1 后按 semver 演进。当前公共词汇位于 `api.h`、`views.hpp` 和 `capability.hpp`。
 
+模型语义在加载后由 `nepa_model_kind()` 与 capability flags 明确表达。普通、charge、spin、dipole 和 polarizability 使用独立入口；`nepa_find_force_batch()` 不会因为加载了 qNEP 而增加输出。qNEP 使用 `nepa_find_charge_batch()`，dipole/polarizability 使用各自的独立 result struct。DFT-D3 使用 `NepaDftd3Parameters` 和 `NepaDftd3Result`，避免把响应量或修正项硬塞进 `NepaFindForceResult`。
+
+DFT-D3 engine SPI 只调用 CPU native 的 `compute_dftd3` 与 `compute_with_dftd3`。它不复制色散算法，也不接受未验证的 spin、charge、dipole 或 polarizability 组合。CUDA 当前没有对应实现，返回 unsupported 且禁止 CPU fallback。
+
+取消状态属于 model，使用原子状态位。C API 为 `nepa_cancel_model()` 和 `nepa_reset_cancel()`；batch engine 至少在每个结构边界检查状态。已启动的 CUDA kernel 不被强制抢占，返回后才停止后续工作。前端只有在整个调用成功时才发布结果；cancelled 状态不会被包装成部分成功。Python 计算持有共享 model 生命周期并释放 GIL，因此 `close()`、`cancel()` 和正在执行的调用不会形成 use-after-free。
+
 engine SPI 面向 engine 实现者，位于 `engine.hpp`。在 v0 阶段仍可随实现边界调整。
 
 `include/nep_adapters/api.h` 的 C API 当前仍是实验接口。只有 spin、charge、descriptor、外部邻居、自有邻居和 device input 都形成明确 data-view 契约后，才能冻结 ABI。

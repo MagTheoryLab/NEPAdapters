@@ -19,6 +19,10 @@ CTest 是 native 测试的统一入口。
 | `domain_decomp` | 多 rank LAMMPS 所需的 local、ghost 和 foldback 语义 |
 | `calculator` | Python calculator 高层接口 |
 | `ase` | 可选 ASE adapter smoke；未安装 ASE 时正常 skip |
+| `production` | charge/BEC、响应模型、DFT-D3 和 cancellation 正式 API |
+| `dftd3` | pure DFT-D3 与 NEP+DFT-D3 |
+| `dipole`、`polarizability` | 响应模型独立入口与 golden |
+| `cancellation` | cancelled 状态、线程取消与 reset 恢复 |
 
 ## CPU 参考与 fixture
 
@@ -38,6 +42,14 @@ CPU 正确性同时使用固定 golden label 和独立编译的严格 FP64 oracl
 
 `tests/fixtures/nep_cpu_reference/` 保存 NEP_CPU 的 250 原子普通 NEP3 和 qNEP 固定 case。CPU 直接核对力、每原子 raw9 virial 和 descriptor，不要求配置另一个仓库。CUDA 复用 qNEP case；NEP3 测试只锁定明确的 unsupported 状态。
 
+`tests/fixtures/production_api/` 保存生产 API 的最小固定 oracle：
+
+- dipole/polarizability 模型、首个 13 原子结构和 golden 来自 NepTrainKit 原固定测试；容差分别为 `rtol=5e-4, atol=1e-5` 与 `rtol=5e-4, atol=2e-4`；
+- DFT-D3 的四原子结构和碳模型来自 `NEP_CPU/test_dftd3`，golden 由其独立 standalone 程序用 PBE、`cutoff=12 A`、`cutoff_cn=10 A` 生成；能量、力和 summed raw9 virial 使用 `atol=1e-10, rtol=2e-11`；
+- qNEP charge/BEC golden 来自 vendored NEP_CPU native 输出，固定选定原子和全局不变量，CPU 容差为 `1e-12`；完整力、virial 和 descriptor 仍使用 `nep_cpu_reference/qnep` 的独立文件。
+
+fixture 运行时不读取外部仓库。raw9 一律为 `xx, xy, xz, yx, yy, yz, zx, zy, zz`。
+
 ## Python 测试
 
 普通模型和 spin 模型使用独立门禁。spin calculator 测试覆盖：
@@ -51,6 +63,8 @@ CPU 正确性同时使用固定 golden label 和独立编译的严格 FP64 oracl
 - 全周期输入契约。
 
 Python/batch 始终使用常规 `compute` API，不继承 LAMMPS 邻居表或 ghost 原子语义。
+
+`nep_adapters_python_production_api_test` 同时覆盖所有新增底层和高层接口、空 batch 的稳定 shape/`float64`、模型类型拒绝、context manager/close，以及在计算线程运行时由另一个线程发出 cancel、收到 cancelled 异常并在 reset 后恢复。取消测试不接受部分数组作为成功结果。
 
 ## LAMMPS 测试
 
@@ -80,7 +94,7 @@ CUDA gate 覆盖：
 - radial、angular、high-body 和 ZBL 力有限差分；
 - CPU/CUDA triclinic parity；
 - LAMMPS/Kokkos strided device-neighbor 输入、输出布局、type map、virial 顺序和邻居容量错误；
-- qNEP direct reciprocal-space 的力、virial 和 descriptor 参考值；
+- qNEP direct reciprocal-space 的力、virial、charge、BEC 和 descriptor 参考值，以及 CPU/CUDA parity；
 - 默认构建的 PPPM fail-closed，或 PPPM 构建的参考值一致性。
 
 LAMMPS `nep/gpu` 只支持启用 CUDA 的 Kokkos。缺少 Kokkos device state 是硬错误，测试不允许依赖 GPU pair style 的 host-neighbor fallback。

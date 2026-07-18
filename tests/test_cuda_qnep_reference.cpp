@@ -131,6 +131,7 @@ int main() {
       static_cast<std::size_t>(atom_count) * 9,
       0.0);
   std::vector<double> charge(static_cast<std::size_t>(atom_count), 0.0);
+  std::vector<double> bec(static_cast<std::size_t>(atom_count) * 9, 0.0);
 
   NepaFindForceResult result{};
   result.energy_per_structure = energy;
@@ -138,8 +139,9 @@ int main() {
   result.virials_row_major9 = total_virial.data();
   result.virials_per_atom_row_major9 = per_atom_virial.data();
   result.charge_per_atom = charge.data();
+  result.bec_per_atom_row_major9 = bec.data();
 
-  const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  const NepaStatus status = nepa_find_charge_batch(model, &batch, &result);
   const std::string error_message = nepa_last_error_message();
   nepa_free_model(model);
   if (std::getenv("NEP_ADAPTERS_TEST_EXPECT_PPPM_DISABLED") != nullptr) {

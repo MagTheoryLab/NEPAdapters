@@ -10307,9 +10307,8 @@ void NEP::set_dftd3_para_all(
   valid = valid || set_dftd3_para_one(functional, "wb97m", 1.0000, 0.5660, 0.3908, 3.1280);
 
   if (!valid) {
-    std::cout << "The " << functional
-              << " functional is not supported for DFT-D3 with BJ damping.\n"
-              << std::endl;
-    exit(1);
+    throw std::invalid_argument(
+      "The " + functional +
+      " functional is not supported for DFT-D3 with BJ damping.");
   }
 };

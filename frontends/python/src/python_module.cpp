@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -178,17 +179,41 @@ void require_spin_model(NepaModel* model) {
   }
 }
 
+const char* model_kind_name(NepaModelKind kind) {
+  switch (kind) {
+    case NEPA_MODEL_KIND_ORDINARY:
+      return "ordinary";
+    case NEPA_MODEL_KIND_SPIN:
+      return "spin";
+    case NEPA_MODEL_KIND_CHARGE:
+      return "charge";
+    case NEPA_MODEL_KIND_DIPOLE:
+      return "dipole";
+    case NEPA_MODEL_KIND_POLARIZABILITY:
+      return "polarizability";
+  }
+  return "unknown";
+}
+
+struct ModelState {
+  explicit ModelState(NepaModel* model)
+      : model(model, nepa_free_model) {}
+
+  std::mutex mutex;
+  std::shared_ptr<NepaModel> model;
+};
+
 class PyModel {
  public:
-  explicit PyModel(NepaModel* model) : model_(model, nepa_free_model) {}
+  explicit PyModel(NepaModel* model) : state_(std::make_shared<ModelState>(model)) {}
 
   py::dict model_info() const {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
-    }
+    const std::shared_ptr<NepaModel> model = snapshot_model();
 
     NepaModelInfo info{};
-    check_status(nepa_model_info(model_.get(), &info));
+    NepaModelKind kind{};
+    check_status(nepa_model_info(model.get(), &info));
+    check_status(nepa_model_kind(model.get(), &kind));
     py::dict out;
     out["cutoff_radial"] = info.cutoff_radial;
     out["cutoff_angular"] = info.cutoff_angular;
@@ -196,6 +221,11 @@ class PyModel {
     out["capabilities"] = info.capabilities;
     out["num_types"] = info.num_types;
     out["descriptor_dim"] = info.descriptor_dim;
+    out["model_type"] = model_kind_name(kind);
+    out["dipole"] = (info.capabilities & NEPA_CAPABILITY_DIPOLE) != 0u;
+    out["polarizability"] =
+        (info.capabilities & NEPA_CAPABILITY_POLARIZABILITY) != 0u;
+    out["dftd3"] = (info.capabilities & NEPA_CAPABILITY_DFTD3) != 0u;
     return out;
   }
 
@@ -205,8 +235,12 @@ class PyModel {
       py::array_t<double, py::array::c_style | py::array::forcecast> positions,
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
       py::object pbc_object) {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    NepaModelKind kind{};
+    check_status(nepa_model_kind(model.get(), &kind));
+    if (kind == NEPA_MODEL_KIND_CHARGE) {
+      throw std::invalid_argument(
+          "charge models require calculate_charge() to return charge and BEC");
     }
 
     PreparedBatch input =
@@ -239,9 +273,149 @@ class PyModel {
 
     {
       py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model_.get(), &batch, &result));
+      check_status(nepa_find_force_batch(model.get(), &batch, &result));
     }
     return py::make_tuple(potentials, forces, virials);
+  }
+
+  py::tuple calculate_charge(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    py::array_t<double> potentials(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
+    py::array_t<double> charges(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> becs({input.total_atoms, static_cast<std::int32_t>(9)});
+    std::vector<double> energies(static_cast<std::size_t>(input.structure_count), 0.0);
+    std::vector<double> structure_virials(
+        static_cast<std::size_t>(input.structure_count) * 9, 0.0);
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+    NepaFindForceResult result{};
+    result.energy_per_structure = energies.data();
+    result.potential_per_atom = static_cast<double*>(potentials.request().ptr);
+    result.forces_aos3 = static_cast<double*>(forces.request().ptr);
+    result.virials_row_major9 = structure_virials.data();
+    result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
+    result.charge_per_atom = static_cast<double*>(charges.request().ptr);
+    result.bec_per_atom_row_major9 = static_cast<double*>(becs.request().ptr);
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_charge_batch(model.get(), &batch, &result));
+    }
+    return py::make_tuple(potentials, forces, virials, charges, becs);
+  }
+
+  py::array_t<double> dipoles(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    py::array_t<double> output({input.structure_count, static_cast<std::int32_t>(3)});
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+    NepaDipoleResult result{};
+    result.dipoles_row_major3 = static_cast<double*>(output.request().ptr);
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_dipoles(model.get(), &batch, &result));
+    }
+    return output;
+  }
+
+  py::array_t<double> polarizabilities(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    py::array_t<double> output({input.structure_count, static_cast<std::int32_t>(6)});
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+    NepaPolarizabilityResult result{};
+    result.polarizabilities_row_major6 =
+        static_cast<double*>(output.request().ptr);
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_find_polarizabilities(model.get(), &batch, &result));
+    }
+    return output;
+  }
+
+  py::tuple calculate_dftd3(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      const std::string& functional,
+      double cutoff,
+      double cutoff_cn,
+      py::object pbc_object) {
+    return calculate_dftd3_impl(
+        std::move(types),
+        std::move(boxes),
+        std::move(positions),
+        std::move(atom_counts),
+        functional,
+        cutoff,
+        cutoff_cn,
+        std::move(pbc_object),
+        false);
+  }
+
+  py::tuple calculate_with_dftd3(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      const std::string& functional,
+      double cutoff,
+      double cutoff_cn,
+      py::object pbc_object) {
+    return calculate_dftd3_impl(
+        std::move(types),
+        std::move(boxes),
+        std::move(positions),
+        std::move(atom_counts),
+        functional,
+        cutoff,
+        cutoff_cn,
+        std::move(pbc_object),
+        true);
   }
 
   py::tuple calculate_spin(
@@ -251,10 +425,8 @@ class PyModel {
       py::array_t<double, py::array::c_style | py::array::forcecast> spins,
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
       py::object pbc_object) {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
-    }
-    require_spin_model(model_.get());
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    require_spin_model(model.get());
 
     PreparedBatch input =
         prepare_batch(types, boxes, positions, atom_counts, pbc_object);
@@ -290,7 +462,7 @@ class PyModel {
 
     {
       py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model_.get(), &batch, &result));
+      check_status(nepa_find_force_batch(model.get(), &batch, &result));
     }
     return py::make_tuple(potentials, forces, virials, mforces);
   }
@@ -301,12 +473,10 @@ class PyModel {
       py::array_t<double, py::array::c_style | py::array::forcecast> positions,
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
       py::object pbc_object) {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
-    }
+    const std::shared_ptr<NepaModel> model = snapshot_model();
 
     NepaModelInfo info{};
-    check_status(nepa_model_info(model_.get(), &info));
+    check_status(nepa_model_info(model.get(), &info));
     if ((info.capabilities & NEPA_CAPABILITY_DESCRIPTORS) == 0u ||
         info.descriptor_dim <= 0) {
       throw std::runtime_error("descriptors are unsupported by this model");
@@ -335,7 +505,7 @@ class PyModel {
 
     {
       py::gil_scoped_release release;
-      check_status(nepa_find_descriptors(model_.get(), &batch, &result));
+      check_status(nepa_find_descriptors(model.get(), &batch, &result));
     }
 
     return descriptors;
@@ -348,13 +518,11 @@ class PyModel {
       py::array_t<double, py::array::c_style | py::array::forcecast> spins,
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
       py::object pbc_object) {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
-    }
-    require_spin_model(model_.get());
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    require_spin_model(model.get());
 
     NepaModelInfo info{};
-    check_status(nepa_model_info(model_.get(), &info));
+    check_status(nepa_model_info(model.get(), &info));
     if ((info.capabilities & NEPA_CAPABILITY_DESCRIPTORS) == 0u ||
         info.descriptor_dim <= 0) {
       throw std::runtime_error("descriptors are unsupported by this model");
@@ -380,7 +548,7 @@ class PyModel {
     result.descriptors = static_cast<double*>(descriptors.request().ptr);
     {
       py::gil_scoped_release release;
-      check_status(nepa_find_descriptors(model_.get(), &batch, &result));
+      check_status(nepa_find_descriptors(model.get(), &batch, &result));
     }
     return descriptors;
   }
@@ -390,9 +558,7 @@ class PyModel {
       py::array_t<double, py::array::c_style | py::array::forcecast> positions,
       py::array_t<double, py::array::c_style | py::array::forcecast> box,
       py::object pbc_object) {
-    if (!model_) {
-      throw std::runtime_error("model is closed");
-    }
+    const std::shared_ptr<NepaModel> model = snapshot_model();
 
     py::buffer_info type_info = types.request();
     py::buffer_info position_info = positions.request();
@@ -452,15 +618,84 @@ class PyModel {
 
     {
       py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model_.get(), &batch, &result));
+      check_status(nepa_find_force_batch(model.get(), &batch, &result));
     }
     return py::make_tuple(energy, forces, virial);
   }
 
-  void close() { model_.reset(); }
+  void cancel() {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    check_status(nepa_cancel_model(model.get()));
+  }
+
+  void reset_cancel() {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    check_status(nepa_reset_cancel(model.get()));
+  }
+
+  void close() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->model.reset();
+  }
 
  private:
-  std::unique_ptr<NepaModel, void (*)(NepaModel*)> model_;
+  py::tuple calculate_dftd3_impl(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      const std::string& functional,
+      double cutoff,
+      double cutoff_cn,
+      py::object pbc_object,
+      bool include_nep) {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    py::array_t<double> potentials(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
+    std::vector<double> energies(static_cast<std::size_t>(input.structure_count), 0.0);
+    std::vector<double> structure_virials(
+        static_cast<std::size_t>(input.structure_count) * 9, 0.0);
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+    NepaDftd3Parameters parameters{};
+    parameters.functional = functional.c_str();
+    parameters.cutoff = cutoff;
+    parameters.cutoff_cn = cutoff_cn;
+    NepaDftd3Result result{};
+    result.energy_per_structure = energies.data();
+    result.potential_per_atom = static_cast<double*>(potentials.request().ptr);
+    result.forces_aos3 = static_cast<double*>(forces.request().ptr);
+    result.virials_row_major9 = structure_virials.data();
+    result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
+    {
+      py::gil_scoped_release release;
+      const NepaStatus status = include_nep
+          ? nepa_compute_with_dftd3_batch(model.get(), &batch, &parameters, &result)
+          : nepa_compute_dftd3_batch(model.get(), &batch, &parameters, &result);
+      check_status(status);
+    }
+    return py::make_tuple(potentials, forces, virials);
+  }
+
+  std::shared_ptr<NepaModel> snapshot_model() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!state_->model) {
+      throw std::runtime_error("model is closed");
+    }
+    return state_->model;
+  }
+
+  std::shared_ptr<ModelState> state_;
 };
 
 }  // namespace
@@ -491,6 +726,52 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("boxes"),
           py::arg("positions"),
           py::arg("atom_counts"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
+          "calculate_charge",
+          &PyModel::calculate_charge,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
+          "dipoles",
+          &PyModel::dipoles,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
+          "polarizabilities",
+          &PyModel::polarizabilities,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
+          "calculate_dftd3",
+          &PyModel::calculate_dftd3,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("functional"),
+          py::arg("cutoff"),
+          py::arg("cutoff_cn"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
+          "calculate_with_dftd3",
+          &PyModel::calculate_with_dftd3,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("functional"),
+          py::arg("cutoff"),
+          py::arg("cutoff_cn"),
           py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
           "find_force",
@@ -525,6 +806,8 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("spins"),
           py::arg("atom_counts"),
           py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def("cancel", &PyModel::cancel)
+      .def("reset_cancel", &PyModel::reset_cancel)
       .def("close", &PyModel::close)
       .def(
           "__enter__",

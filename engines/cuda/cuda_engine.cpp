@@ -460,6 +460,25 @@ void copy_prepared_batch_results_to_host(
       "failed to copy CUDA mforces");
 }
 
+void copy_qnep_bec_to_host(
+    const nep_adapters::cuda_backend::DeviceWorkspaceView& view,
+    int atom_count,
+    int atom_offset,
+    double* bec_per_atom_row_major9) {
+  if (bec_per_atom_row_major9 == nullptr) {
+    return;
+  }
+  const std::vector<double> bec_soa = copy_device_doubles(
+      view.bec_soa9, view.atom_capacity * 9);
+  for (int atom = 0; atom < atom_count; ++atom) {
+    for (int component = 0; component < 9; ++component) {
+      bec_per_atom_row_major9[
+          9 * static_cast<std::size_t>(atom_offset + atom) + component] =
+          bec_soa[static_cast<std::size_t>(component) * view.atom_capacity + atom];
+    }
+  }
+}
+
 
 class CudaModel : public nep_adapters::Model {
  public:
@@ -468,6 +487,16 @@ class CudaModel : public nep_adapters::Model {
         host_(nep_adapters::cuda_backend::load_host_model_parameters(model_path)),
         protocol_(host_.protocol),
         device_(host_) {}
+
+  NepaModelKind model_kind() const override {
+    if (protocol_.spin_mode > 0) {
+      return NEPA_MODEL_KIND_SPIN;
+    }
+    if (protocol_.charge_mode > 0) {
+      return NEPA_MODEL_KIND_CHARGE;
+    }
+    return NEPA_MODEL_KIND_ORDINARY;
+  }
 
   NepaStatus model_info(NepaModelInfo& out) const override {
     out = {};
@@ -503,9 +532,34 @@ class CudaModel : public nep_adapters::Model {
   NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) override {
+    if (model_kind() == NEPA_MODEL_KIND_CHARGE) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    return find_force_batch_impl(batch, result);
+  }
+
+  NepaStatus find_charge_batch(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_CHARGE) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (result.charge_per_atom == nullptr ||
+        result.bec_per_atom_row_major9 == nullptr) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    return find_force_batch_impl(batch, result);
+  }
+
+  NepaStatus find_force_batch_impl(
+      const NepaStructureBatch& batch,
+      NepaFindForceResult& result) {
     if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
     }
 
     for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
@@ -528,11 +582,9 @@ class CudaModel : public nep_adapters::Model {
           protocol_.spin_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
       }
-      if (protocol_.charge_mode > 0 && batch.num_structures != 1) {
-        return NEPA_STATUS_UNSUPPORTED;
-      }
       const bool multi_box_execution =
-          protocol_.charge_mode == 0 && protocol_.spin_mode == 0;
+          protocol_.charge_mode == 0 && protocol_.spin_mode == 0 &&
+          batch.num_structures == 1;
       const std::size_t workspace_atom_capacity =
           multi_box_execution
               ? static_cast<std::size_t>(batch.total_atoms)
@@ -586,10 +638,13 @@ class CudaModel : public nep_adapters::Model {
             false,
             false,
             result);
-        return NEPA_STATUS_OK;
+        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
       }
 
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
         const StructureBatchView single(batch, structure);
 
         nep_adapters::cuda_backend::SimulationBox box;
@@ -611,7 +666,7 @@ class CudaModel : public nep_adapters::Model {
             box,
             workspace);
         const bool has_angular = needs_angular_terms(protocol_);
-        if (protocol_.spin_mode != 0) {
+        if (protocol_.spin_mode != 0 || protocol_.charge_mode == 0) {
           const auto force_request = make_force_evaluation_request(
               nep_adapters::cuda_backend::
                   ForceNeighborTopology::single_box_symmetric,
@@ -696,8 +751,29 @@ class CudaModel : public nep_adapters::Model {
             protocol_.spin_mode != 0,
             protocol_.charge_mode > 0,
             result);
+        if (protocol_.charge_mode > 0 &&
+            result.bec_per_atom_row_major9 != nullptr) {
+          if (host_.sqrt_epsilon_inf_offset >= host_.ann_type_major.size()) {
+            throw std::runtime_error("qNEP model is missing sqrt_epsilon_inf");
+          }
+          nep_adapters::cuda_backend::compute_qnep_bec_on_device(
+              protocol_,
+              single.atom_count,
+              box,
+              host_.ann_type_major[host_.sqrt_epsilon_inf_offset],
+              device_,
+              workspace);
+          copy_qnep_bec_to_host(
+              view,
+              single.atom_count,
+              single.atom_offset,
+              result.bec_per_atom_row_major9);
+        }
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
       }
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
@@ -711,6 +787,9 @@ class CudaModel : public nep_adapters::Model {
     if (!valid_batch(batch) || result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
+    }
     if (protocol_.spin_mode != 0 && batch.spins_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
@@ -721,6 +800,9 @@ class CudaModel : public nep_adapters::Model {
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
           batch_workspace(max_structure_atom_count(batch), 1, false);
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+        if (is_cancelled()) {
+          return NEPA_STATUS_CANCELLED;
+        }
         const StructureBatchView single(batch, structure);
         nep_adapters::cuda_backend::SimulationBox box;
         if (!make_simulation_box(single.batch, box)) {
@@ -768,11 +850,21 @@ class CudaModel : public nep_adapters::Model {
           }
         }
       }
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
+  NepaStatus compute_dftd3_batch(
+      const NepaStructureBatch&,
+      const NepaDftd3Parameters&,
+      NepaDftd3Result&,
+      bool) override {
+    nep_adapters::set_last_error(
+        "DFT-D3 is unsupported by the CUDA backend; CPU fallback is disabled");
     return NEPA_STATUS_UNSUPPORTED;
   }
 
@@ -785,6 +877,9 @@ class CudaModel : public nep_adapters::Model {
         input.positions == nullptr || result.total_potential == nullptr ||
         result.total_virial6 == nullptr || result.forces == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
     }
     try {
       if (!supports_cuda_force_protocol(protocol_)) {
@@ -918,7 +1013,7 @@ class CudaModel : public nep_adapters::Model {
                 total_raw9,
                 component);
       }
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -974,6 +1069,9 @@ class CudaModel : public nep_adapters::Model {
     if (result.spin_transfer_per_atom_row_major9 != nullptr &&
         protocol_.spin_mode == 0) {
       return NEPA_STATUS_UNSUPPORTED;
+    }
+    if (is_cancelled()) {
+      return NEPA_STATUS_CANCELLED;
     }
 
     try {
@@ -1114,7 +1212,7 @@ class CudaModel : public nep_adapters::Model {
           spin_density_ms,
           spin_chiral_ms,
           output_ms);
-      return NEPA_STATUS_OK;
+      return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;

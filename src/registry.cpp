@@ -159,6 +159,20 @@ NepaStatus nepa_model_info(NepaModel* model, NepaModelInfo* out) {
   }
 }
 
+NepaStatus nepa_model_kind(NepaModel* model, NepaModelKind* out) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || out == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  try {
+    *out = model->impl->model_kind();
+    return NEPA_STATUS_OK;
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
 NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
@@ -173,8 +187,46 @@ NepaStatus nepa_find_force_batch(
     return NEPA_STATUS_UNSUPPORTED;
   }
 
+  const NepaModelKind kind = model->impl->model_kind();
+  if (kind == NEPA_MODEL_KIND_CHARGE) {
+    nep_adapters::set_last_error(
+        "charge models require nepa_find_charge_batch");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (kind == NEPA_MODEL_KIND_DIPOLE ||
+      kind == NEPA_MODEL_KIND_POLARIZABILITY) {
+    nep_adapters::set_last_error(
+        "response models require their explicit dipole or polarizability API");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
   try {
     return model->impl->find_force_batch(*batch, *result);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+NepaStatus nepa_find_charge_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaFindForceResult* result) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || batch == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (model->impl->model_kind() != NEPA_MODEL_KIND_CHARGE) {
+    nep_adapters::set_last_error("calculate_charge requires a charge NEP model");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  try {
+    return model->impl->find_charge_batch(*batch, *result);
   } catch (const std::exception& error) {
     nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
@@ -201,6 +253,107 @@ NepaStatus nepa_find_descriptors(
     nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;
   }
+}
+
+NepaStatus nepa_find_dipoles(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaDipoleResult* result) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || batch == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (model->impl->model_kind() != NEPA_MODEL_KIND_DIPOLE) {
+    nep_adapters::set_last_error("dipoles require a dipole NEP model");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  try {
+    return model->impl->find_dipoles(*batch, *result);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+NepaStatus nepa_find_polarizabilities(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaPolarizabilityResult* result) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || batch == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (model->impl->model_kind() != NEPA_MODEL_KIND_POLARIZABILITY) {
+    nep_adapters::set_last_error(
+        "polarizabilities require a polarizability NEP model");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  try {
+    return model->impl->find_polarizabilities(*batch, *result);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+namespace {
+
+NepaStatus compute_dftd3(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    const NepaDftd3Parameters* parameters,
+    NepaDftd3Result* result,
+    bool include_nep) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || batch == nullptr || parameters == nullptr ||
+      result == nullptr || parameters->functional == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (model->impl->model_kind() != NEPA_MODEL_KIND_ORDINARY) {
+    nep_adapters::set_last_error(
+        "DFT-D3 is supported only for ordinary non-spin, non-charge NEP models");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  try {
+    return model->impl->compute_dftd3_batch(
+        *batch, *parameters, *result, include_nep);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+}  // namespace
+
+NepaStatus nepa_compute_dftd3_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    const NepaDftd3Parameters* parameters,
+    NepaDftd3Result* result) {
+  return compute_dftd3(model, batch, parameters, result, false);
+}
+
+NepaStatus nepa_compute_with_dftd3_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    const NepaDftd3Parameters* parameters,
+    NepaDftd3Result* result) {
+  return compute_dftd3(model, batch, parameters, result, true);
 }
 
 NepaStatus nepa_find_force_lammps_neighbors(
@@ -237,6 +390,24 @@ NepaStatus nepa_find_force_lammps_device_neighbors(
   }
 }
 
+NepaStatus nepa_cancel_model(NepaModel* model) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  model->impl->cancel();
+  return NEPA_STATUS_OK;
+}
+
+NepaStatus nepa_reset_cancel(NepaModel* model) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  model->impl->reset_cancel();
+  return NEPA_STATUS_OK;
+}
+
 void nepa_free_model(NepaModel* model) {
   delete model;
 }
@@ -253,6 +424,8 @@ const char* nepa_status_message(NepaStatus status) {
       return "backend unavailable";
     case NEPA_STATUS_RUNTIME_ERROR:
       return "runtime error";
+    case NEPA_STATUS_CANCELLED:
+      return "cancelled";
   }
 
   return "unknown status";

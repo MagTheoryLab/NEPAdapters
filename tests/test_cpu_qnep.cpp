@@ -101,7 +101,7 @@ int main() {
   result.charge_per_atom = charge.data();
   result.bec_per_atom_row_major9 = bec.data();
 
-  const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  const NepaStatus status = nepa_find_charge_batch(model, &batch, &result);
   nepa_free_model(model);
   if (status != NEPA_STATUS_OK || !std::isfinite(energy[0]) ||
       !cpu_test::all_finite(forces) ||

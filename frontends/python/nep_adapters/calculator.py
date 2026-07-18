@@ -46,6 +46,22 @@ class SpinPrediction(Prediction):
         return list(np.split(self.mforces, np.cumsum(self.atom_counts)[:-1]))
 
 
+@dataclass(frozen=True)
+class ChargePrediction(Prediction):
+    charges: np.ndarray
+    becs: np.ndarray
+
+    def charge_blocks(self) -> list[np.ndarray]:
+        if len(self.atom_counts) == 0:
+            return []
+        return list(np.split(self.charges, np.cumsum(self.atom_counts)[:-1]))
+
+    def bec_blocks(self) -> list[np.ndarray]:
+        if len(self.atom_counts) == 0:
+            return []
+        return list(np.split(self.becs, np.cumsum(self.atom_counts)[:-1]))
+
+
 def _read_type_map(model_path: str | Path) -> dict[str, int]:
     fields = Path(model_path).read_text(encoding="utf-8").splitlines()[0].split()
     if len(fields) < 3 or not fields[0].startswith("nep"):
@@ -127,6 +143,48 @@ def _empty_spin_prediction() -> SpinPrediction:
     )
 
 
+def _empty_charge_prediction() -> ChargePrediction:
+    empty = _empty_prediction()
+    return ChargePrediction(
+        energy=empty.energy,
+        potential=empty.potential,
+        forces=empty.forces,
+        virials=empty.virials,
+        structure_virials=empty.structure_virials,
+        atom_counts=empty.atom_counts,
+        charges=np.asarray([], dtype=np.float64),
+        becs=np.empty((0, 9), dtype=np.float64),
+    )
+
+
+def _prediction_from_outputs(
+    potentials,
+    forces,
+    virials,
+    atom_counts: np.ndarray,
+) -> Prediction:
+    potential_array = np.asarray(potentials, dtype=np.float64)
+    force_array = np.asarray(forces, dtype=np.float64)
+    virial_array = np.asarray(virials, dtype=np.float64)
+    offsets = np.r_[0, np.cumsum(atom_counts)]
+    energy = np.asarray(
+        [potential_array[offsets[i] : offsets[i + 1]].sum() for i in range(len(atom_counts))],
+        dtype=np.float64,
+    )
+    structure_virials = np.asarray(
+        [virial_array[offsets[i] : offsets[i + 1]].mean(axis=0) for i in range(len(atom_counts))],
+        dtype=np.float64,
+    )
+    return Prediction(
+        energy=energy,
+        potential=potential_array,
+        forces=force_array,
+        virials=virial_array,
+        structure_virials=structure_virials,
+        atom_counts=atom_counts,
+    )
+
+
 class NEPCalculator:
     def __init__(self, model_file: str | Path = "nep.txt", backend: str = "cpu"):
         self.model_path = Path(model_file)
@@ -140,6 +198,12 @@ class NEPCalculator:
     def close(self) -> None:
         if self.model is not None:
             self.model.close()
+
+    def cancel(self) -> None:
+        self.model.cancel()
+
+    def reset_cancel(self) -> None:
+        self.model.reset_cancel()
 
     def __enter__(self) -> "NEPCalculator":
         return self
@@ -229,22 +293,8 @@ class NEPCalculator:
             atom_counts_array,
             pbc,
         )
-        offsets = np.r_[0, np.cumsum(atom_counts_array)]
-        energy = np.asarray(
-            [potentials[offsets[i] : offsets[i + 1]].sum() for i in range(len(atom_counts_array))],
-            dtype=np.float64,
-        )
-        structure_virials = np.asarray(
-            [virials[offsets[i] : offsets[i + 1]].mean(axis=0) for i in range(len(atom_counts_array))],
-            dtype=np.float64,
-        )
-        return Prediction(
-            energy=energy,
-            potential=np.asarray(potentials, dtype=np.float64),
-            forces=np.asarray(forces, dtype=np.float64),
-            virials=np.asarray(virials, dtype=np.float64),
-            structure_virials=structure_virials,
-            atom_counts=atom_counts_array,
+        return _prediction_from_outputs(
+            potentials, forces, virials, atom_counts_array
         )
 
     def predict_structures(self, structures) -> Prediction:
@@ -254,6 +304,153 @@ class NEPCalculator:
         types, positions, boxes, pbc = self.compose_structures(structure_list)
         atom_counts = np.asarray([len(_structure_symbols(item)) for item in structure_list], dtype=np.int32)
         return self.predict_arrays(types, positions, boxes, atom_counts, pbc)
+
+    def predict_charge_arrays(
+        self,
+        types,
+        positions,
+        boxes,
+        atom_counts=None,
+        pbc=_FULLY_PERIODIC_PBC,
+    ) -> ChargePrediction:
+        types_array = np.ascontiguousarray(types, dtype=np.int32)
+        positions_array = np.ascontiguousarray(positions, dtype=np.float64)
+        atom_counts_array = (
+            np.asarray([len(types_array)], dtype=np.int32)
+            if atom_counts is None
+            else np.ascontiguousarray(atom_counts, dtype=np.int32)
+        )
+        if len(atom_counts_array) == 0:
+            return _empty_charge_prediction()
+        boxes_array = np.ascontiguousarray(boxes, dtype=np.float64)
+        if boxes_array.ndim == 1 and len(atom_counts_array) > 1:
+            boxes_array = np.tile(boxes_array.reshape(1, 9), (len(atom_counts_array), 1))
+        potentials, forces, virials, charges, becs = self.model.calculate_charge(
+            types_array,
+            boxes_array,
+            positions_array,
+            atom_counts_array,
+            pbc,
+        )
+        base = _prediction_from_outputs(
+            potentials, forces, virials, atom_counts_array
+        )
+        return ChargePrediction(
+            energy=base.energy,
+            potential=base.potential,
+            forces=base.forces,
+            virials=base.virials,
+            structure_virials=base.structure_virials,
+            atom_counts=base.atom_counts,
+            charges=np.asarray(charges, dtype=np.float64),
+            becs=np.asarray(becs, dtype=np.float64),
+        )
+
+    def predict_charge_structures(self, structures) -> ChargePrediction:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return _empty_charge_prediction()
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        return self.predict_charge_arrays(
+            types, positions, boxes, atom_counts, pbc
+        )
+
+    def predict_dipoles(self, structures) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, 3), dtype=np.float64)
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        return np.asarray(
+            self.model.dipoles(types, boxes, positions, atom_counts, pbc),
+            dtype=np.float64,
+        )
+
+    def predict_polarizabilities(self, structures) -> np.ndarray:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return np.empty((0, 6), dtype=np.float64)
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        return np.asarray(
+            self.model.polarizabilities(
+                types, boxes, positions, atom_counts, pbc
+            ),
+            dtype=np.float64,
+        )
+
+    def get_structures_dipole(self, structures) -> np.ndarray:
+        return self.predict_dipoles(structures)
+
+    def get_structures_polarizability(self, structures) -> np.ndarray:
+        return self.predict_polarizabilities(structures)
+
+    def _predict_dftd3_structures(
+        self,
+        structures,
+        functional: str,
+        cutoff: float,
+        cutoff_cn: float,
+        include_nep: bool,
+    ) -> Prediction:
+        structure_list = _as_structure_list(structures)
+        if not structure_list:
+            return _empty_prediction()
+        types, positions, boxes, pbc = self.compose_structures(structure_list)
+        atom_counts = np.asarray(
+            [len(_structure_symbols(item)) for item in structure_list],
+            dtype=np.int32,
+        )
+        method = (
+            self.model.calculate_with_dftd3
+            if include_nep
+            else self.model.calculate_dftd3
+        )
+        potentials, forces, virials = method(
+            types,
+            boxes,
+            positions,
+            atom_counts,
+            functional,
+            float(cutoff),
+            float(cutoff_cn),
+            pbc,
+        )
+        return _prediction_from_outputs(
+            potentials, forces, virials, atom_counts
+        )
+
+    def predict_dftd3_structures(
+        self,
+        structures,
+        functional: str,
+        cutoff: float,
+        cutoff_cn: float,
+    ) -> Prediction:
+        return self._predict_dftd3_structures(
+            structures, functional, cutoff, cutoff_cn, False
+        )
+
+    def predict_with_dftd3_structures(
+        self,
+        structures,
+        functional: str,
+        cutoff: float,
+        cutoff_cn: float,
+    ) -> Prediction:
+        return self._predict_dftd3_structures(
+            structures, functional, cutoff, cutoff_cn, True
+        )
 
     def predict_spin_arrays(
         self,
@@ -419,6 +616,50 @@ class NEPCalculator:
 
     def calculate(self, structures, mean_virial: bool = True):
         prediction = self.predict_structures(structures)
+        return (
+            prediction.energy,
+            prediction.force_blocks(),
+            prediction.virial_blocks(mean=mean_virial),
+        )
+
+    def calculate_charge(self, structures, mean_virial: bool = True):
+        prediction = self.predict_charge_structures(structures)
+        return (
+            prediction.energy,
+            prediction.force_blocks(),
+            prediction.virial_blocks(mean=mean_virial),
+            prediction.charge_blocks(),
+            prediction.bec_blocks(),
+        )
+
+    def calculate_dftd3(
+        self,
+        structures,
+        functional: str,
+        cutoff: float,
+        cutoff_cn: float,
+        mean_virial: bool = True,
+    ):
+        prediction = self.predict_dftd3_structures(
+            structures, functional, cutoff, cutoff_cn
+        )
+        return (
+            prediction.energy,
+            prediction.force_blocks(),
+            prediction.virial_blocks(mean=mean_virial),
+        )
+
+    def calculate_with_dftd3(
+        self,
+        structures,
+        functional: str,
+        cutoff: float,
+        cutoff_cn: float,
+        mean_virial: bool = True,
+    ):
+        prediction = self.predict_with_dftd3_structures(
+            structures, functional, cutoff, cutoff_cn
+        )
         return (
             prediction.energy,
             prediction.force_blocks(),
