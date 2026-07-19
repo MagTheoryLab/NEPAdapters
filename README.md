@@ -34,8 +34,8 @@ native engine 和 Python 接口使用按模型语义分开的正式入口：普�
 | 普通 NEP | `calculate()` / `predict_structures()` | 支持 | 支持已实现的 NEP4/NEP5 协议 |
 | qNEP charge/BEC | `calculate_charge()` / `predict_charge_structures()` | 支持 | 支持 direct；PPPM 仅在编译启用时支持 |
 | spin NEP | `calculate_spin()` / `predict_spin_structures()` | 支持 | 支持 |
-| dipole | `dipoles()` / `predict_dipoles()` | 支持 | 不支持，加载时明确报错 |
-| polarizability | `polarizabilities()` / `predict_polarizabilities()` | 支持 | 不支持，加载时明确报错 |
+| dipole | `dipoles()` / `predict_dipoles()`；`descriptors()` | 支持 | 不支持，加载时明确报错 |
+| polarizability | `polarizabilities()` / `predict_polarizabilities()`；`descriptors()` | 支持 | 不支持，加载时明确报错 |
 | DFT-D3 | `calculate_dftd3()` / `calculate_with_dftd3()` | 仅普通非 spin、非 charge 势模型 | 不支持，且不会回退 CPU |
 
 所有接口仍只接受 `pbc=(1,1,1)`。不支持的组合返回明确错误，不会改用另一个后端或第二套算法。
@@ -81,7 +81,7 @@ energy, force_blocks, virial_blocks = calculator.calculate(structures)
 
 结构默认按全周期 `(1, 1, 1)` 处理。显式传入非全周期值或 `None` 会报错；接口没有非周期或旧哨兵值 fallback。
 
-普通模型使用 `calculate()` 和 `descriptors()`。qNEP 必须使用 `calculate_charge()`，返回每原子 potential、force、raw9 virial、charge 和 BEC；普通 `calculate()` 遇到 charge 模型会拒绝调用，避免遗漏 charge/BEC。spin 模型必须使用独立的 `calculate_spin()` 和 `descriptors_spin()`，并提供形状为 `(natoms, 3)` 的 spin 数组。dipole、polarizability 和 DFT-D3 同样使用上表中的独立入口。高层接口还提供单结构、批结构和 descriptor 聚合方法。
+普通、qNEP、dipole 和 polarizability 模型共享无 spin 输入的 `descriptors()`；其返回值均为对应模型自身参数计算出的逐原子描述符，不保证不同模型间数值或维度相同。qNEP 必须使用 `calculate_charge()`，返回每原子 potential、force、raw9 virial、charge 和 BEC；普通 `calculate()` 遇到 charge 模型会拒绝调用，避免遗漏 charge/BEC。spin 模型必须使用独立的 `calculate_spin()` 和 `descriptors_spin()`，并提供形状为 `(natoms, 3)` 的 spin 数组。dipole、polarizability 和 DFT-D3 的响应量或修正量仍使用上表中的独立入口。高层接口还提供单结构、批结构和 descriptor 聚合方法。
 
 计算期间可从另一个 Python/UI 线程调用 `cancel()`。Python native 调用释放 GIL；CPU/CUDA 至少在结构边界检查取消，CUDA 单个已启动 kernel 不做强制抢占。取消返回 `cancelled` 异常且不交付部分数组；`reset_cancel()` 后模型可再次使用。`close()` 与正在执行的 Python 调用通过共享生命周期隔离，不会提前释放底层模型。
 

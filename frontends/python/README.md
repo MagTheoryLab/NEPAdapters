@@ -16,7 +16,7 @@
 | `forces` | `(natoms, 3)` | 每原子力 |
 | `virials` | `(natoms, 9)` | 每原子 raw9 virial |
 
-`Model.descriptors()` 返回 `(natoms, descriptor_dim)` 的 descriptor 矩阵。`Model.model_info()` 不执行计算，直接返回 cutoff、能力标志和 `descriptor_dim` 等模型信息。
+`Model.descriptors()` 返回 `(natoms, descriptor_dim)` 的 descriptor 矩阵，适用于普通、qNEP、dipole 和 polarizability 模型；每个模型使用自身的 descriptor 参数和 scaler，因此不同模型的数值或维度不要求一致。`Model.model_info()` 不执行计算，直接返回 cutoff、能力标志和 `descriptor_dim` 等模型信息。
 
 qNEP 使用 `Model.calculate_charge()`，固定返回：
 

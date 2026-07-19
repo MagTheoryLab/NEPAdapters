@@ -162,7 +162,13 @@ class ProductionApiTest(unittest.TestCase):
                     FIXTURE_ROOT / name / "structure.xyz"
                 )
                 golden = np.loadtxt(FIXTURE_ROOT / name / "golden.txt")
+                descriptor_golden = np.loadtxt(
+                    FIXTURE_ROOT / name / "descriptor_golden.txt",
+                    comments="#",
+                )
                 with NEPCalculator(FIXTURE_ROOT / name / "nep.txt") as calculator:
+                    info = calculator.model.model_info()
+                    self.assertEqual(info["capabilities"] & (1 << 6), 1 << 6)
                     output = getattr(calculator, method_name)([structure, structure])
                     self.assertEqual(output.shape, shape)
                     self.assertEqual(output.dtype, np.float64)
@@ -180,6 +186,31 @@ class ProductionApiTest(unittest.TestCase):
                     )
                     low = low_method(types, boxes, positions, counts, pbc)
                     np.testing.assert_allclose(low, output, atol=0.0, rtol=0.0)
+                    descriptors = calculator.predict_descriptors(
+                        [structure, structure]
+                    )
+                    self.assertEqual(
+                        descriptors.shape,
+                        (2 * len(structure), info["descriptor_dim"]),
+                    )
+                    self.assertEqual(descriptors.dtype, np.float64)
+                    np.testing.assert_allclose(
+                        descriptors,
+                        np.tile(descriptor_golden, (2, 1)),
+                        atol=1e-10,
+                        rtol=1e-10,
+                    )
+                    low_descriptors = calculator.model.descriptors(
+                        types, boxes, positions, counts, pbc
+                    )
+                    np.testing.assert_allclose(
+                        low_descriptors, descriptors, atol=0.0, rtol=0.0
+                    )
+                    empty_descriptors = calculator.predict_descriptors([])
+                    self.assertEqual(
+                        empty_descriptors.shape, (0, info["descriptor_dim"])
+                    )
+                    self.assertEqual(empty_descriptors.dtype, np.float64)
                     with self.assertRaisesRegex(
                         (ValueError, RuntimeError), "explicit|response"
                     ):

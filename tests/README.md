@@ -21,7 +21,7 @@ CTest 是 native 测试的统一入口。
 | `ase` | 可选 ASE adapter smoke；未安装 ASE 时正常 skip |
 | `production` | charge/BEC、响应模型、DFT-D3 和 cancellation 正式 API |
 | `dftd3` | pure DFT-D3 与 NEP+DFT-D3 |
-| `dipole`、`polarizability` | 响应模型独立入口与 golden |
+| `dipole`、`polarizability` | 响应模型独立入口、普通 descriptor 接口与 golden |
 | `cancellation` | cancelled 状态、线程取消与 reset 恢复 |
 
 ## CPU 参考与 fixture
@@ -44,7 +44,7 @@ CPU 正确性同时使用固定 golden label 和独立编译的严格 FP64 oracl
 
 `tests/fixtures/production_api/` 保存生产 API 的最小固定 oracle：
 
-- dipole/polarizability 模型、首个 13 原子结构和 golden 来自 NepTrainKit 原固定测试；容差分别为 `rtol=5e-4, atol=1e-5` 与 `rtol=5e-4, atol=2e-4`；
+- dipole/polarizability 模型、首个 13 原子结构和响应量 golden 来自 NepTrainKit 原固定测试；容差分别为 `rtol=5e-4, atol=1e-5` 与 `rtol=5e-4, atol=2e-4`。对应逐原子 descriptor golden 由官方 NEP_CPU standalone `find_descriptor()` 生成，使用 `atol=rtol=1e-10`；
 - DFT-D3 的四原子结构和碳模型来自 `NEP_CPU/test_dftd3`，golden 由其独立 standalone 程序用 PBE、`cutoff=12 A`、`cutoff_cn=10 A` 生成；能量、力和 summed raw9 virial 使用 `atol=1e-10, rtol=2e-11`；
 - qNEP charge/BEC golden 来自 vendored NEP_CPU native 输出，固定选定原子和全局不变量，CPU 容差为 `1e-12`；完整力、virial 和 descriptor 仍使用 `nep_cpu_reference/qnep` 的独立文件。
 

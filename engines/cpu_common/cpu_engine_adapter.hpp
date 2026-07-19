@@ -58,9 +58,11 @@ class CpuModel final : public Model {
     }
     const NepaModelKind kind = model_kind();
     if (kind == NEPA_MODEL_KIND_DIPOLE) {
-      out.capabilities = to_mask(Capability::dipole);
+      out.capabilities = to_mask(Capability::dipole) |
+                         to_mask(Capability::descriptors);
     } else if (kind == NEPA_MODEL_KIND_POLARIZABILITY) {
-      out.capabilities = to_mask(Capability::polarizability);
+      out.capabilities = to_mask(Capability::polarizability) |
+                         to_mask(Capability::descriptors);
     } else {
       out.capabilities = to_mask(Capability::batch_find_force) |
                          to_mask(Capability::external_neighbors) |
@@ -354,10 +356,6 @@ class CpuModel final : public Model {
       NepaFindDescriptorResult& result) override {
     if (!valid_batch(batch) || result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
-    }
-    if (model_kind() == NEPA_MODEL_KIND_DIPOLE ||
-        model_kind() == NEPA_MODEL_KIND_POLARIZABILITY) {
-      return NEPA_STATUS_UNSUPPORTED;
     }
     if (is_cancelled()) {
       return NEPA_STATUS_CANCELLED;

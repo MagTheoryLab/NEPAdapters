@@ -60,6 +60,7 @@ bool close(double actual, double expected, double atol, double rtol) {
 bool check_response(
     const std::string& model_path,
     const std::string& structure_path,
+    const std::string& descriptor_path,
     NepaModelKind expected_kind,
     nep_adapters::Capability expected_capability,
     const std::vector<double>& golden) {
@@ -77,7 +78,10 @@ bool check_response(
   const bool metadata_ok =
       nepa_model_kind(model, &kind) == NEPA_STATUS_OK && kind == expected_kind &&
       nepa_model_info(model, &info) == NEPA_STATUS_OK &&
-      nep_adapters::has_capability(info.capabilities, expected_capability);
+      nep_adapters::has_capability(info.capabilities, expected_capability) &&
+      nep_adapters::has_capability(
+          info.capabilities, nep_adapters::Capability::descriptors) &&
+      info.descriptor_dim > 0;
   std::vector<double> values(golden.size() * 2, 0.0);
   NepaStatus status = NEPA_STATUS_UNSUPPORTED;
   if (expected_kind == NEPA_MODEL_KIND_DIPOLE) {
@@ -94,11 +98,19 @@ bool check_response(
   force_result.forces_aos3 = force.data();
   const NepaStatus ordinary_status =
       nepa_find_force_batch(model, &batch.view, &force_result);
+  std::vector<double> descriptors(
+      static_cast<std::size_t>(batch.view.total_atoms) * info.descriptor_dim,
+      0.0);
+  NepaFindDescriptorResult descriptor_result{descriptors.data()};
+  const NepaStatus descriptor_status =
+      nepa_find_descriptors(model, &batch.view, &descriptor_result);
   nepa_free_model(model);
   if (!metadata_ok || status != NEPA_STATUS_OK ||
-      ordinary_status != NEPA_STATUS_UNSUPPORTED) {
+      ordinary_status != NEPA_STATUS_UNSUPPORTED ||
+      descriptor_status != NEPA_STATUS_OK) {
     std::cerr << "response metadata/status mismatch kind=" << kind
               << " status=" << status << " ordinary=" << ordinary_status
+              << " descriptor=" << descriptor_status
               << " error=" << nepa_last_error_message() << '\n';
     return false;
   }
@@ -109,6 +121,27 @@ bool check_response(
                 << " actual=" << values[i]
                 << " expected=" << golden[i % golden.size()] << '\n';
       return false;
+    }
+  }
+  const cpu_test::Matrix expected_descriptors =
+      cpu_test::read_matrix(descriptor_path);
+  const std::size_t atoms_per_structure = frame.types.size();
+  if (expected_descriptors.rows != atoms_per_structure ||
+      expected_descriptors.cols != static_cast<std::size_t>(info.descriptor_dim)) {
+    std::cerr << "response descriptor golden shape mismatch\n";
+    return false;
+  }
+  for (int structure = 0; structure < batch.view.num_structures; ++structure) {
+    const std::size_t offset =
+        static_cast<std::size_t>(structure) * atoms_per_structure * info.descriptor_dim;
+    for (std::size_t i = 0; i < expected_descriptors.values.size(); ++i) {
+      if (!close(descriptors[offset + i], expected_descriptors.values[i],
+                 1.0e-10, 1.0e-10)) {
+        std::cerr << "response descriptor mismatch structure=" << structure
+                  << " index=" << i << " actual=" << descriptors[offset + i]
+                  << " expected=" << expected_descriptors.values[i] << '\n';
+        return false;
+      }
     }
   }
   return true;
@@ -178,12 +211,14 @@ int main() {
   const std::string root = NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR;
   if (!check_response(
           root + "/dipole/nep.txt", root + "/dipole/structure.xyz",
+          root + "/dipole/descriptor_golden.txt",
           NEPA_MODEL_KIND_DIPOLE, nep_adapters::Capability::dipole,
           {0.15439024567604065, 0.005705520510673523,
            0.0044387467205524445}) ||
       !check_response(
           root + "/polarizability/nep.txt",
           root + "/polarizability/structure.xyz",
+          root + "/polarizability/descriptor_golden.txt",
           NEPA_MODEL_KIND_POLARIZABILITY,
           nep_adapters::Capability::polarizability,
           {100.79893493652344, 92.42485046386719, 56.936161041259766,
