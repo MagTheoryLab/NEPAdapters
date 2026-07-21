@@ -230,8 +230,8 @@ void launch_spin_density_forces(
       const auto launch_virial = [&](auto virial_tag) {
         constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
         const auto launch_transfer = [&](auto transfer_tag) {
-          constexpr int AtomsPerWarp = 8;
-          constexpr int EdgesPerAtomBatch = 4;
+          constexpr int AtomsPerWarp = 4;
+          constexpr int EdgesPerAtomBatch = 8;
           constexpr bool AccumulateSpinTransfer =
               decltype(transfer_tag)::value;
           const int tile_blocks =

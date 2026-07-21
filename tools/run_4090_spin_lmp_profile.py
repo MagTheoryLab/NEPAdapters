@@ -37,10 +37,15 @@ SOURCE_INPUTS = (
     "tools/run_4090_spin_lmp_profile.py",
     MODEL_REL,
 )
-NCU_LABELS = ("primitive", "chiral", "density")
+BUILD_FINGERPRINT_INPUTS = tuple(
+    item for item in SOURCE_INPUTS
+    if item != "tools/run_4090_spin_lmp_profile.py")
+NCU_LABELS = ("primitive", "ann", "chiral", "density")
 NCU_SELECTED_METRICS = (
     "gpu__time_duration.sum",
     "launch__registers_per_thread",
+    "launch__shared_mem_per_block_static",
+    "launch__shared_mem_per_block_dynamic",
     "launch__block_size",
     "launch__grid_size",
     "sm__warps_active.avg.pct_of_peak_sustained_active",
@@ -50,6 +55,39 @@ NCU_SELECTED_METRICS = (
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
     "l1tex__t_sector_hit_rate.pct",
     "lts__t_sector_hit_rate.pct",
+    "smsp__inst_executed.sum",
+    "smsp__sass_inst_executed_op_global_ld.sum",
+    "smsp__sass_inst_executed_op_global_st.sum",
+    "smsp__sass_inst_executed_op_local_ld.sum",
+    "smsp__sass_inst_executed_op_local_st.sum",
+    "smsp__sass_inst_executed_op_shared_ld.sum",
+    "smsp__sass_inst_executed_op_shared_st.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "lts__t_sectors_srcunit_tex_op_read.sum",
+    "lts__t_sectors_srcunit_tex_op_write.sum",
+    "memory_l1_wavefronts_shared",
+    "memory_l1_wavefronts_shared_ideal",
+    "smsp__inst_executed_op_global_red.sum",
+    "smsp__inst_executed_op_generic_atom_dot_alu.sum",
+    "smsp__pcsamp_warps_issue_stalled_barrier",
+    "smsp__pcsamp_warps_issue_stalled_branch_resolving",
+    "smsp__pcsamp_warps_issue_stalled_dispatch_stall",
+    "smsp__pcsamp_warps_issue_stalled_drain",
+    "smsp__pcsamp_warps_issue_stalled_imc_miss",
+    "smsp__pcsamp_warps_issue_stalled_lg_throttle",
+    "smsp__pcsamp_warps_issue_stalled_long_scoreboard",
+    "smsp__pcsamp_warps_issue_stalled_math_pipe_throttle",
+    "smsp__pcsamp_warps_issue_stalled_membar",
+    "smsp__pcsamp_warps_issue_stalled_mio_throttle",
+    "smsp__pcsamp_warps_issue_stalled_misc",
+    "smsp__pcsamp_warps_issue_stalled_no_instructions",
+    "smsp__pcsamp_warps_issue_stalled_not_selected",
+    "smsp__pcsamp_warps_issue_stalled_selected",
+    "smsp__pcsamp_warps_issue_stalled_short_scoreboard",
+    "smsp__pcsamp_warps_issue_stalled_sleeping",
+    "smsp__pcsamp_warps_issue_stalled_tex_throttle",
+    "smsp__pcsamp_warps_issue_stalled_wait",
 )
 LEGACY_NCU_SELECTED_METRICS = (
     "gpu__time_duration.sum",
@@ -223,6 +261,41 @@ def parse_pair_profile(stderr):
   return samples
 
 
+def parse_nsys_kernel_summary(text):
+  kernels = []
+  for line in text.splitlines():
+    fields = line.strip().split(None, 8)
+    if len(fields) != 9:
+      continue
+    try:
+      time_pct, total_ns, instances, average_ns, median_ns, min_ns, max_ns, stddev_ns = (
+          float(value) for value in fields[:8])
+    except ValueError:
+      continue
+    steady_weight_ns = median_ns * int(instances)
+    kernels.append({
+        "name": fields[8],
+        "reported_time_pct": time_pct,
+        "total_ns": total_ns,
+        "instances": int(instances),
+        "average_ns": average_ns,
+        "median_ns": median_ns,
+        "min_ns": min_ns,
+        "max_ns": max_ns,
+        "stddev_ns": stddev_ns,
+        "max_to_median": max_ns / median_ns if median_ns else None,
+        "steady_weight_ns": steady_weight_ns,
+    })
+  total_steady_ns = sum(item["steady_weight_ns"] for item in kernels)
+  for item in kernels:
+    item["steady_estimated_share_pct"] = (
+        100.0 * item["steady_weight_ns"] / total_steady_ns
+        if total_steady_ns else None)
+    item["mixed_outlier_warning"] = bool(
+        item["max_to_median"] is not None and item["max_to_median"] >= 3.0)
+  return sorted(kernels, key=lambda item: item["steady_weight_ns"], reverse=True)
+
+
 def run_benchmark_case(profile, plan, gpu, args, strip_spin, repeats, profile_pair=0):
   command = bench_command(plan, args, strip_spin)
   env_line = ""
@@ -310,7 +383,13 @@ print(json.dumps({{
 }}))
 PY
       """)
-  return json.loads(ssh_bash(profile, script).stdout.strip().splitlines()[-1])
+  payload = json.loads(ssh_bash(profile, script).stdout.strip().splitlines()[-1])
+  payload["steady_kernel_table"] = parse_nsys_kernel_summary(
+      payload.get("kernels_head", ""))
+  payload["interpretation_warning"] = (
+      "reported_time_pct includes initialization/rebuild outliers; use "
+      "steady_estimated_share_pct when mixed_outlier_warning is true")
+  return payload
 
 
 def detailed_ncu_metrics(text):
@@ -410,7 +489,7 @@ def source_provenance(local_source_sha256, remote_source_sha256, git_commit,
 
 
 def collect_source_provenance(profile, plan, gpu, build_performed):
-  local_source_sha256 = source_tree_sha256(ROOT)
+  local_source_sha256 = source_tree_sha256(ROOT, BUILD_FINGERPRINT_INPUTS)
   git_commit = git_value("rev-parse", "HEAD")
   git_branch = git_value("branch", "--show-current")
   git_dirty = bool(git_value("status", "--porcelain"))
@@ -448,7 +527,8 @@ if cache.is_file():
       configured_cuda_release_flags_status = "present"
       break
 print(json.dumps({{
-    "source_sha256": module.source_tree_sha256(root),
+    "source_sha256": module.source_tree_sha256(
+        root, module.BUILD_FINGERPRINT_INPUTS),
     "remote_benchmark_executable": {{
         "path": str(benchmark),
         "sha256": digest.hexdigest(),
@@ -471,6 +551,17 @@ PY
       build_performed,
       remote["configured_cuda_release_flags"],
       remote["configured_cuda_release_flags_status"])
+
+
+def require_matching_source_provenance(provenance):
+  local_hash = provenance.get("local_source_sha256")
+  remote_hash = provenance.get("remote_source_sha256")
+  if not local_hash or not remote_hash:
+    raise RuntimeError("source provenance is incomplete")
+  if local_hash != remote_hash:
+    raise RuntimeError(
+        "local and remote build-source fingerprints differ; sync and rebuild "
+        "before collecting correctness, benchmark, NSYS, or NCU evidence")
 
 
 def build_legacy_ncu_script(plan, args, run_dir, label, kernel_regex, gpu="0"):
@@ -573,36 +664,44 @@ def build_detailed_ncu_script(plan, args, run_dir, label, kernel_regex, gpu="0")
   required_paths = [paths["report"], *[
       paths[name] for name in detailed_ncu_text_artifact_names()
   ]]
+  reuse_condition = " && ".join(f"[ -s {q(path)} ]" for path in required_paths)
+  reuse_existing = "1" if getattr(args, "resume", False) else "0"
   return remote_env(gpu) + textwrap.dedent(f"""
       artifact_dir=$(dirname {q(paths["report"])})
       artifact_stem=$(basename {q(paths["report"][:-len(".ncu-rep")])})
       mkdir -p "$artifact_dir"
-      find "$artifact_dir" -maxdepth 1 -type f -name "${{artifact_stem}}.*" -delete
-      if ! command -v ncu >/dev/null 2>&1; then
-        echo '{{"skipped":"ncu not found"}}'
-        exit 0
+      reuse_existing={reuse_existing}
+      if [ "$reuse_existing" -eq 1 ] && ! ( {reuse_condition} ); then
+        reuse_existing=0
       fi
-      cd {q(plan["source_dir"])}
-      ncu --target-processes all --kernel-name {q("regex:" + kernel_regex)} --launch-count 1 --set detailed --metrics {q(",".join(NCU_SELECTED_METRICS))} --import-source yes --export {q(paths["report"][:-len(".ncu-rep")])} --csv --page raw --log-file {q(paths["raw_csv"])} \
-        {' '.join(q(part) for part in command)}
-      if [ ! -s {q(paths["report"])} ] || [ ! -s {q(paths["raw_csv"])} ]; then
-        echo "detailed NCU did not produce a current report and raw CSV" >&2
-        exit 1
+      if [ "$reuse_existing" -eq 0 ]; then
+        find "$artifact_dir" -maxdepth 1 -type f -name "${{artifact_stem}}.*" -delete
+        if ! command -v ncu >/dev/null 2>&1; then
+          echo '{{"skipped":"ncu not found"}}'
+          exit 0
+        fi
+        cd {q(plan["source_dir"])}
+        ncu --target-processes all --kernel-name {q("regex:" + kernel_regex)} --launch-count 1 --set detailed --metrics {q(",".join(NCU_SELECTED_METRICS))} --import-source yes --export {q(paths["report"][:-len(".ncu-rep")])} --csv --page raw --log-file {q(paths["raw_csv"])} \
+          {' '.join(q(part) for part in command)}
+        if [ ! -s {q(paths["report"])} ] || [ ! -s {q(paths["raw_csv"])} ]; then
+          echo "detailed NCU did not produce a current report and raw CSV" >&2
+          exit 1
+        fi
+        ncu --import {q(paths["report"])} --page source --print-source cuda \
+          > {q(paths["cuda_source"])}
+        ncu --import {q(paths["report"])} --page source --print-source sass \
+          > {q(paths["sass_source"])}
+        if ! command -v cuobjdump >/dev/null 2>&1; then
+          echo "cuobjdump is required for detailed NCU artifacts" >&2
+          exit 1
+        fi
+        cuobjdump --dump-sass {q(binary_path)} | \
+          awk -v pattern={q(kernel_regex)} \
+          '/Function : / {{ keep = ($0 ~ pattern) }} keep {{ print }}' \
+          > {q(paths["binary_sass"])}
+        cuobjdump --dump-resource-usage {q(binary_path)} \
+          > {q(paths["resource_usage"])}
       fi
-      ncu --import {q(paths["report"])} --page source --print-source cuda \
-        > {q(paths["cuda_source"])}
-      ncu --import {q(paths["report"])} --page source --print-source sass \
-        > {q(paths["sass_source"])}
-      if ! command -v cuobjdump >/dev/null 2>&1; then
-        echo "cuobjdump is required for detailed NCU artifacts" >&2
-        exit 1
-      fi
-      cuobjdump --dump-sass {q(binary_path)} | \
-        awk -v pattern={q(kernel_regex)} \
-        '/Function : / {{ keep = ($0 ~ pattern) }} keep {{ print }}' \
-        > {q(paths["binary_sass"])}
-      cuobjdump --dump-resource-usage {q(binary_path)} \
-        > {q(paths["resource_usage"])}
       for artifact in {' '.join(q(path) for path in required_paths)}; do
         if [ ! -s "$artifact" ]; then
           echo "required detailed artifact is missing or empty: $artifact" >&2
@@ -641,40 +740,24 @@ def run_ncu_detail_one(profile, plan, gpu, args, run_dir, label, kernel_regex):
   return payload
 
 
-def run_ncu(profile, plan, gpu, args, run_dir):
+def run_ncu(profile, plan, gpu, args, run_dir, on_result=None):
   small = argparse.Namespace(**vars(args))
   small.cubic = args.ncu_cubic
   small.warmup = 1
   small.iterations = 1
-  return {
-      "primitive": run_ncu_one(
-          profile,
-          plan,
-          gpu,
-          small,
-          run_dir,
-          "primitive",
-          "build_spin_descriptor_core_streaming",
-          args.ncu_detail),
-      "chiral": run_ncu_one(
-          profile,
-          plan,
-          gpu,
-          small,
-          run_dir,
-          "chiral",
-          "accumulate_spin_chiral_forces",
-          args.ncu_detail),
-      "density": run_ncu_one(
-          profile,
-          plan,
-          gpu,
-          small,
-          run_dir,
-          "density",
-          "accumulate_spin_density_forces_tile_f32",
-          args.ncu_detail),
-  }
+  targets = (
+      ("primitive", "build_spin_descriptor_core_streaming"),
+      ("ann", "evaluate_ann_energy_scheduled_subwarp"),
+      ("chiral", "accumulate_spin_chiral_forces"),
+      ("density", "accumulate_spin_density_forces_tile_f32"),
+  )
+  results = {}
+  for label, kernel_regex in targets:
+    results[label] = run_ncu_one(
+        profile, plan, gpu, small, run_dir, label, kernel_regex, args.ncu_detail)
+    if on_result:
+      on_result(label, results[label])
+  return results
 
 
 def metric_values(metrics):
@@ -890,12 +973,72 @@ def write_summary(summary, run_name):
   return path
 
 
+def register_campaign_run(campaign_path, summary_path, summary):
+  campaign_path = Path(campaign_path)
+  if not campaign_path.is_file():
+    raise FileNotFoundError(f"campaign state does not exist: {campaign_path}")
+  campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+  if campaign.get("schema") != "cuda-optimization-campaign.v1":
+    raise ValueError("unsupported campaign schema")
+  runs = campaign.setdefault("runs", [])
+  run_id = summary["run_name"]
+  prior_index = next(
+      (index for index, run in enumerate(runs) if run.get("id") == run_id), None)
+  if prior_index is not None and runs[prior_index].get("status") != "incomplete":
+    raise ValueError(f"campaign already contains completed run: {run_id}")
+  try:
+    summary_ref = str(Path(summary_path).resolve().relative_to(ROOT))
+  except ValueError:
+    summary_ref = str(Path(summary_path).resolve())
+  nsys = summary.get("nsys", {})
+  ncu = summary.get("ncu", {})
+  record = {
+      "id": run_id,
+      "status": summary.get("run_status", "complete"),
+      "failure": summary.get("failure"),
+      "summary": summary_ref,
+      "workload_contract": summary.get("workload_contract"),
+      "benchmark_options": summary.get("benchmark_options"),
+      "source_provenance": summary.get("source_provenance"),
+      "benchmark_evidence": benchmark_evidence(summary),
+      "correctness_recorded": "correctness_stdout" in summary,
+      "steady_kernel_table": nsys.get("steady_kernel_table", [])[:12],
+      "ncu": {
+          label: {
+              "kernel": next((item.get("value") for item in payload.get("metrics", [])
+                              if item.get("metric") == "Kernel Name"), None),
+              "metrics": metric_values(payload.get("metrics", [])),
+          }
+          for label, payload in ncu.items()
+      },
+  }
+  if prior_index is None:
+    runs.append(record)
+  else:
+    runs[prior_index] = record
+  campaign["last_run"] = run_id
+  temp_path = campaign_path.with_suffix(campaign_path.suffix + ".tmp")
+  temp_path.write_text(
+      json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+  temp_path.replace(campaign_path)
+
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("--profile", default="4090")
   parser.add_argument("--plan", type=Path, default=DEFAULT_PLAN)
   parser.add_argument("--gpu", default="0")
   parser.add_argument("--run-name", default="")
+  parser.add_argument(
+      "--workload-id",
+      default="spin-chiral-api",
+      help="stable workload identifier recorded in the summary")
+  parser.add_argument(
+      "--workload-role",
+      choices=["profile", "fast_gate", "stress"],
+      default="profile",
+      help=("this API driver cannot claim real-frontend acceptance; record its "
+            "campaign role explicitly"))
   parser.add_argument("--cubic", type=int, default=100)
   parser.add_argument("--spacing", type=float, default=3.0)
   parser.add_argument("--warmup", type=int, default=1)
@@ -910,6 +1053,10 @@ def main():
       "--baseline-summary",
       type=Path,
       help="compare this run with a prior summary.json")
+  parser.add_argument(
+      "--campaign-state",
+      type=Path,
+      help="append structured run evidence to an existing campaign JSON")
   parser.add_argument("--profile-pair", type=int, default=3)
   parser.add_argument(
       "--profile-mode",
@@ -919,6 +1066,10 @@ def main():
   parser.add_argument("--skip-sync", action="store_true")
   parser.add_argument("--skip-build", action="store_true")
   parser.add_argument("--skip-correctness", action="store_true")
+  parser.add_argument(
+      "--resume",
+      action="store_true",
+      help="reuse complete detailed NCU artifacts from the same remote run name")
   args = parser.parse_args()
 
   if args.quick:
@@ -926,11 +1077,13 @@ def main():
     args.iterations = 2
     args.repeats = 1
     args.profile_mode = "benchmark"
+    args.workload_role = "fast_gate"
 
   plan = load_plan(args.plan)
   run_name = args.run_name or datetime.now().strftime("%Y%m%d-%H%M%S")
   remote_run_dir = f"{plan['run_dir'].rstrip('/')}/{run_name}"
-  cleanup_local_run_artifacts(run_name)
+  if not args.resume:
+    cleanup_local_run_artifacts(run_name)
 
   if not args.skip_sync:
     sync_workspace(args.plan)
@@ -939,6 +1092,7 @@ def main():
 
   provenance = collect_source_provenance(
       args.profile, plan, args.gpu, build_performed=not args.skip_build)
+  require_matching_source_provenance(provenance)
 
   summary = {
       "run_name": run_name,
@@ -946,9 +1100,19 @@ def main():
       "gpu": args.gpu,
       "plan": str(args.plan),
       "remote_run_dir": remote_run_dir,
+      "workload_contract": {
+          "id": args.workload_id,
+          "role": args.workload_role,
+          "frontend": "device-layout-api-driver",
+          "acceptance_capable": False,
+          "boundary": (
+              "profile/fast-gate only; real LAMMPS NVT input is required for "
+              "the final user-visible KEEP decision"),
+      },
       "source_provenance": provenance,
       "benchmark_options": benchmark_workload_options(args),
       "ncu_workload_options": ncu_workload_options(args),
+      "run_status": "running",
   }
 
   if not args.skip_correctness:
@@ -976,7 +1140,26 @@ def main():
     summary["nsys"] = run_nsys(args.profile, plan, args.gpu, args, remote_run_dir)
 
   if args.profile_mode in ("ncu", "all"):
-    summary["ncu"] = run_ncu(args.profile, plan, args.gpu, args, remote_run_dir)
+    summary["ncu"] = {}
+    def checkpoint_ncu(label, payload):
+      summary["ncu"][label] = payload
+      write_summary(summary, run_name)
+    try:
+      run_ncu(
+          args.profile, plan, args.gpu, args, remote_run_dir,
+          on_result=checkpoint_ncu)
+    except Exception as error:
+      summary["run_status"] = "incomplete"
+      summary["failure"] = {
+          "stage": "ncu",
+          "type": type(error).__name__,
+          "message": str(error),
+          "completed_labels": list(summary["ncu"]),
+      }
+      summary_path = write_summary(summary, run_name)
+      if args.campaign_state:
+        register_campaign_run(args.campaign_state, summary_path, summary)
+      raise
     if args.ncu_detail:
       copy_text_artifacts(args.profile, summary["ncu"], run_name)
 
@@ -985,11 +1168,16 @@ def main():
       summary["comparison"] = compare_with_baseline(summary, json.load(handle))
     summary["baseline_summary"] = str(args.baseline_summary)
 
+  summary["run_status"] = "complete"
+  summary.pop("failure", None)
   summary_path = write_summary(summary, run_name)
+  if args.campaign_state:
+    register_campaign_run(args.campaign_state, summary_path, summary)
   print(json.dumps({
       "summary": str(summary_path),
       "remote_run_dir": remote_run_dir,
       "spin_to_structural_ms_ratio": summary.get("spin_to_structural_ms_ratio"),
+      "campaign_state": str(args.campaign_state) if args.campaign_state else None,
   }, indent=2, sort_keys=True))
 
 

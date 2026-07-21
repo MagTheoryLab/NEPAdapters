@@ -526,22 +526,23 @@ build_spin_descriptor_core_streaming(
   constexpr int HexTaskBase = Angular2TaskBase + 15;
   constexpr int Angular3TaskBase = HexTaskBase + kSpinChiralHReducedCount;
   constexpr int Angular4TaskBase = Angular3TaskBase + 21;
-  constexpr int TaskCount = Angular4TaskBase + 27;
-  static_assert(TaskCount == 104);
+  constexpr int Rho0DotTaskBase = Angular4TaskBase + 27;
+  constexpr int Raw1DotTaskBase = Rho0DotTaskBase + 3;
+  constexpr int TaskCount = Raw1DotTaskBase + 9;
+  static_assert(TaskCount == 116);
 
   const int task = lane;
   bool active_task = task < TaskCount;
   int row0 = 44;
   int row1 = 44;
+  int row2 = -1;
   int width = 0;
   int component = 0;
   int component_count = 0;
   int channel_count = C;
   int moment_base = -1;
-  int dot_moment_base = -1;
   int scalar_term = -1;
   float* output = nullptr;
-  float* dot_output = nullptr;
   if (task < Rho0TaskBase) {
     scalar_term = task - ScalarTaskBase;
     if (scalar_term == 0) {
@@ -561,9 +562,7 @@ build_spin_descriptor_core_streaming(
     width = 3;
     component_count = C * width;
     moment_base = Rho0Base;
-    dot_moment_base = Rho0DotBase;
     output = density_rho0_cache;
-    dot_output = density_rho0_dot_cache;
   } else if (task < GeomTaskBase) {
     component = task - Raw1TaskBase;
     const int a = component / 3;
@@ -572,9 +571,7 @@ build_spin_descriptor_core_streaming(
     width = 9;
     component_count = C * width;
     moment_base = Raw1Base;
-    dot_moment_base = Raw1DotBase;
     output = density_raw1_cache;
-    dot_output = density_raw1_dot_cache;
   } else if (task < PolarTaskBase) {
     component = task - GeomTaskBase;
     row0 = 48 + component;
@@ -619,7 +616,7 @@ build_spin_descriptor_core_streaming(
     component_count = C * width;
     moment_base = Angular3Base;
     output = density_angular3_cache;
-  } else if (active_task) {
+  } else if (task < Rho0DotTaskBase) {
     component = task - Angular4TaskBase;
     const int m = component / 3;
     row0 = 19 + m;
@@ -628,6 +625,24 @@ build_spin_descriptor_core_streaming(
     component_count = C * width;
     moment_base = Angular4Base;
     output = density_angular4_cache;
+  } else if (task < Raw1DotTaskBase) {
+    component = task - Rho0DotTaskBase;
+    row0 = component;
+    row1 = 6;
+    width = 3;
+    component_count = C * width;
+    moment_base = Rho0DotBase;
+    output = density_rho0_dot_cache;
+  } else if (active_task) {
+    component = task - Raw1DotTaskBase;
+    const int a = component / 3;
+    row0 = 3 + a;
+    row1 = component - 3 * a;
+    row2 = 6;
+    width = 9;
+    component_count = C * width;
+    moment_base = Raw1DotBase;
+    output = density_raw1_dot_cache;
   }
   if (task >= Raw1TaskBase && task < GeomTaskBase &&
       LMax < 1 && !Chiral) {
@@ -645,12 +660,14 @@ build_spin_descriptor_core_streaming(
   if (task >= Angular3TaskBase && task < Angular4TaskBase && LMax < 3) {
     active_task = false;
   }
-  if (task >= Angular4TaskBase && LMax < 4) {
+  if (task >= Angular4TaskBase && task < Rho0DotTaskBase && LMax < 4) {
+    active_task = false;
+  }
+  if (task >= Raw1DotTaskBase && LMax < 1 && !Chiral) {
     active_task = false;
   }
 
   float channel_acc[C] = {};
-  float dot_channel_acc[C] = {};
   const int count = nn_radial[atom];
   int chunk_count =
       (count + kSpinPrimitiveTileSlots - 1) / kSpinPrimitiveTileSlots;
@@ -693,13 +710,12 @@ build_spin_descriptor_core_streaming(
 
     if (active_task) {
       for (int slot = 0; slot < tile_count; ++slot) {
-        const float value = tape[row0][slot] * tape[row1][slot];
+        float value = tape[row0][slot] * tape[row1][slot];
+        if (row2 >= 0) {
+          value *= tape[row2][slot];
+        }
         for (int c = 0; c < channel_count; ++c) {
           channel_acc[c] += weights[c][slot] * value;
-          if (dot_output != nullptr) {
-            dot_channel_acc[c] +=
-                weights[c][slot] * value * tape[6][slot];
-          }
         }
       }
     }
@@ -720,13 +736,6 @@ build_spin_descriptor_core_streaming(
           if (moment_base >= 0) {
             density_components[moment_base + cache_component] =
                 channel_acc[c];
-          }
-          if (dot_output != nullptr) {
-            dot_output[spin_atom_cache_index(
-                atom_stride, component_count, atom, cache_component)] =
-                dot_channel_acc[c];
-            density_components[dot_moment_base + cache_component] =
-                dot_channel_acc[c];
           }
         }
       }

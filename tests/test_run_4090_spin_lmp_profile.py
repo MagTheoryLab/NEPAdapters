@@ -1,6 +1,7 @@
 """Focused unit tests for the RTX 4090 spin profiling harness."""
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from unittest import mock
@@ -57,7 +58,7 @@ class SpinLmpProfileTest(unittest.TestCase):
     }}}
 
   def ncu_evidence(self, duration="100", registers="64", labels=None):
-    labels = labels or ("primitive", "chiral", "density")
+    labels = labels or profile.NCU_LABELS
     return {
         label: {"metrics": [
             {"metric": "gpu__time_duration.sum", "value": duration},
@@ -109,6 +110,21 @@ class SpinLmpProfileTest(unittest.TestCase):
         {"metric": "gpu__time_duration.sum", "value": "1000"},
         {"metric": "launch__registers_per_thread", "value": "64"},
     ])
+
+  def test_nsys_summary_uses_steady_median_and_flags_rebuild_outliers(self):
+    text = """
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)  Name
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----
+ 60.0 6000 3 2000 1000 900 4100 1700 kernel_a
+ 40.0 4000 2 2000 1800 1700 2300 300 kernel_b
+"""
+
+    kernels = profile.parse_nsys_kernel_summary(text)
+
+    self.assertEqual([item["name"] for item in kernels], ["kernel_b", "kernel_a"])
+    self.assertAlmostEqual(kernels[0]["steady_estimated_share_pct"], 54.5454545)
+    self.assertTrue(kernels[1]["mixed_outlier_warning"])
+    self.assertFalse(kernels[0]["mixed_outlier_warning"])
 
   def test_profile_release_cuda_flags_preserve_optimized_lineinfo_build(self):
     flags = profile.profile_release_cuda_flags()
@@ -182,6 +198,11 @@ class SpinLmpProfileTest(unittest.TestCase):
         "tools/run_4090_spin_lmp_profile.py",
         profile.MODEL_REL,
     })
+    self.assertNotIn(
+        "tools/run_4090_spin_lmp_profile.py", profile.BUILD_FINGERPRINT_INPUTS)
+    self.assertEqual(
+        set(profile.BUILD_FINGERPRINT_INPUTS),
+        set(profile.SOURCE_INPUTS) - {"tools/run_4090_spin_lmp_profile.py"})
 
   def test_comparison_reports_only_comparable_benchmark_and_ncu_deltas(self):
     baseline = {
@@ -359,6 +380,18 @@ class SpinLmpProfileTest(unittest.TestCase):
 
       self.assertNotEqual(first, profile.source_tree_sha256(root, ("cmake",)))
 
+  def test_source_provenance_must_match_before_profile_evidence(self):
+    profile.require_matching_source_provenance({
+        "local_source_sha256": "same",
+        "remote_source_sha256": "same",
+    })
+
+    with self.assertRaisesRegex(RuntimeError, "fingerprints differ"):
+      profile.require_matching_source_provenance({
+          "local_source_sha256": "local",
+          "remote_source_sha256": "remote",
+      })
+
   def test_detailed_ncu_command_cleans_and_requires_current_text_artifacts(self):
     args = mock.MagicMock(cubic=50, spacing=3.0, warmup=1, iterations=1)
     plan = {
@@ -389,6 +422,39 @@ class SpinLmpProfileTest(unittest.TestCase):
     self.assertIn("if [ ! -s", script)
     self.assertNotIn("|| true", next(
         line for line in script.splitlines() if "ncu --target-processes all" in line))
+
+  def test_detailed_ncu_resume_reuses_only_complete_artifact_sets(self):
+    args = mock.MagicMock(
+        cubic=32, spacing=3.0, warmup=1, iterations=1, resume=True)
+    plan = {"source_dir": "/remote/source", "build_dir": "/remote/build"}
+
+    script = profile.build_detailed_ncu_script(
+        plan, args, "/remote/runs/run", "ann",
+        "evaluate_ann_energy_scheduled_subwarp")
+
+    self.assertIn("reuse_existing=1", script)
+    self.assertIn('if [ "$reuse_existing" -eq 1 ] && ! (', script)
+    self.assertIn('if [ "$reuse_existing" -eq 0 ]; then', script)
+    for path in profile.detailed_ncu_artifact_paths(
+        "/remote/runs/run", "ann").values():
+      self.assertIn(f"[ -s {path} ]", script)
+
+  def test_ncu_targets_all_steady_top_kernels(self):
+    args = mock.MagicMock(ncu_cubic=32, ncu_detail=False)
+    plan = {"source_dir": "/remote/source", "build_dir": "/remote/build"}
+    with mock.patch.object(profile, "run_ncu_one", return_value={}) as run_one:
+      result = profile.run_ncu(profile={}, plan=plan, gpu="0", args=args,
+                               run_dir="/remote/runs/run")
+
+    self.assertEqual(set(result), {"primitive", "ann", "chiral", "density"})
+    self.assertEqual(
+        [call.args[6] for call in run_one.call_args_list],
+        [
+            "build_spin_descriptor_core_streaming",
+            "evaluate_ann_energy_scheduled_subwarp",
+            "accumulate_spin_chiral_forces",
+            "accumulate_spin_density_forces_tile_f32",
+        ])
 
   def test_detailed_ncu_export_failures_do_not_become_nonempty_artifacts(self):
     args = mock.MagicMock(cubic=50, spacing=3.0, warmup=1, iterations=1)
@@ -465,6 +531,69 @@ class SpinLmpProfileTest(unittest.TestCase):
       profile.cleanup_local_run_artifacts("../escape")
     with self.assertRaisesRegex(ValueError, "single path component"):
       profile.write_summary({}, "../escape")
+
+  def test_campaign_registration_persists_structured_run_evidence(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      temp = Path(temp_dir)
+      campaign_path = temp / "campaign.json"
+      campaign_path.write_text(json.dumps({
+          "schema": "cuda-optimization-campaign.v1",
+          "objective": {"metric": "latency_ms"},
+          "runs": [],
+      }), encoding="utf-8")
+      summary_path = temp / "summary.json"
+      summary = {
+          "run_name": "profile-001",
+          "workload_contract": {
+              "id": "api-c32", "role": "profile",
+              "frontend": "device-layout-api-driver", "acceptance_capable": False,
+          },
+          "benchmark_options": self.BENCHMARK_OPTIONS,
+          "source_provenance": {"local_source_sha256": "source"},
+          "benchmarks": self.benchmark_evidence(latency=8.0, throughput=2.5),
+          "correctness_stdout": "PASS",
+          "nsys": {"steady_kernel_table": [{"name": "kernel", "median_ns": 10}]},
+          "ncu": self.ncu_evidence(duration="80"),
+      }
+      summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+      profile.register_campaign_run(campaign_path, summary_path, summary)
+
+      campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+      self.assertEqual(campaign["last_run"], "profile-001")
+      self.assertEqual(campaign["runs"][0]["benchmark_evidence"], {
+          "spin_median_latency_ms": 8.0,
+          "spin_median_throughput_matom_per_s": 2.5,
+      })
+      self.assertEqual(campaign["runs"][0]["steady_kernel_table"][0]["name"], "kernel")
+      self.assertEqual(
+          campaign["runs"][0]["ncu"]["primitive"]["metrics"]["gpu__time_duration.sum"],
+          80.0)
+
+      with self.assertRaisesRegex(ValueError, "already contains completed run"):
+        profile.register_campaign_run(campaign_path, summary_path, summary)
+
+  def test_campaign_registration_replaces_incomplete_run_on_resume(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      temp = Path(temp_dir)
+      campaign_path = temp / "campaign.json"
+      campaign_path.write_text(json.dumps({
+          "schema": "cuda-optimization-campaign.v1",
+          "runs": [{"id": "profile-001", "status": "incomplete"}],
+      }), encoding="utf-8")
+      summary_path = temp / "summary.json"
+      summary = {
+          "run_name": "profile-001",
+          "run_status": "complete",
+          "ncu": self.ncu_evidence(),
+      }
+      summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+      profile.register_campaign_run(campaign_path, summary_path, summary)
+
+      campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+      self.assertEqual(len(campaign["runs"]), 1)
+      self.assertEqual(campaign["runs"][0]["status"], "complete")
 
 
 if __name__ == "__main__":

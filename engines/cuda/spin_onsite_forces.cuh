@@ -1795,14 +1795,15 @@ accumulate_spin_chiral_forces_tile_f32(
     fill_spin_monomials2f(rhat, m2);
     fill_spin_monomialsf(rhat, m3, m4);
 
-    float grad_weight[C] = {};
+    float grad_dist = 0.0f;
     float grad_rhat[3] = {};
     float grad_sj[3] = {};
     for (int c = 0; c < C; ++c) {
+      float grad_weight = 0.0f;
       const float w = weights[c];
       const float* q_terms =
           atom_pulls->geom_terms + c * kSpinDeg2Count;
-      grad_weight[c] +=
+      grad_weight +=
           dot_spin_termsf(q_terms, m2, kSpinDeg2Count);
       grad_rhat[0] += w *
           (2.0f * q_terms[0] * rhat[0] + q_terms[3] * rhat[1] +
@@ -1815,7 +1816,7 @@ accumulate_spin_chiral_forces_tile_f32(
            q_terms[5] * rhat[1]);
 
       const float* grad_polar = atom_pulls->polar + c * 3;
-      grad_weight[c] += dot3f(grad_polar, rhat);
+      grad_weight += dot3f(grad_polar, rhat);
 #pragma unroll
       for (int d = 0; d < 3; ++d) {
         grad_rhat[d] += w * grad_polar[d];
@@ -1838,7 +1839,7 @@ accumulate_spin_chiral_forces_tile_f32(
             grad_raw1[3 + b] * rhat[1] +
             grad_raw1[6 + b] * rhat[2];
       }
-      grad_weight[c] += dot3f(rhat, grad_raw1_sj);
+      grad_weight += dot3f(rhat, grad_raw1_sj);
 #pragma unroll
       for (int d = 0; d < 3; ++d) {
         grad_rhat[d] += w * grad_raw1_sj[d];
@@ -1847,7 +1848,7 @@ accumulate_spin_chiral_forces_tile_f32(
 
       const float grad_rdot = atom_pulls->rdot[c];
       const float rhat_dot_sj = dot3f(rhat, sj);
-      grad_weight[c] += grad_rdot * rhat_dot_sj;
+      grad_weight += grad_rdot * rhat_dot_sj;
 #pragma unroll
       for (int d = 0; d < 3; ++d) {
         grad_rhat[d] += w * grad_rdot * sj[d];
@@ -1861,7 +1862,7 @@ accumulate_spin_chiral_forces_tile_f32(
       cross3f(rhat, sj, rhat_cross_sj);
       cross3f(sj, grad_cross, sj_cross_grad);
       cross3f(grad_cross, rhat, grad_cross_rhat);
-      grad_weight[c] += dot3f(grad_cross, rhat_cross_sj);
+      grad_weight += dot3f(grad_cross, rhat_cross_sj);
 #pragma unroll
       for (int d = 0; d < 3; ++d) {
         grad_rhat[d] += w * sj_cross_grad[d];
@@ -1870,7 +1871,7 @@ accumulate_spin_chiral_forces_tile_f32(
 
       const float* octupole_terms =
           atom_pulls->octupole_terms + c * kSpinDeg3Count;
-      grad_weight[c] +=
+      grad_weight +=
           dot_spin_termsf(octupole_terms, m3, kSpinDeg3Count);
       float octupole_gradient[3];
       evaluate_spin_polynomial_gradientf(
@@ -1883,7 +1884,7 @@ accumulate_spin_chiral_forces_tile_f32(
       if (c < ChiC) {
         const float* hexadecapole_terms =
             atom_pulls->hexadecapole_terms + c * kSpinDeg4Count;
-        grad_weight[c] +=
+        grad_weight +=
             dot_spin_termsf(hexadecapole_terms, m4, kSpinDeg4Count);
         float hexadecapole_gradient[3];
         evaluate_spin_polynomial_gradientf(
@@ -1893,12 +1894,7 @@ accumulate_spin_chiral_forces_tile_f32(
           grad_rhat[d] += w * hexadecapole_gradient[d];
         }
       }
-    }
-
-    float grad_dist = 0.0f;
-#pragma unroll
-    for (int c = 0; c < C; ++c) {
-      grad_dist += grad_weight[c] * weight_derivatives[c];
+      grad_dist += grad_weight * weight_derivatives[c];
     }
     const float dot_r = dot3f(grad_rhat, rhat);
     float grad_rij[3];
