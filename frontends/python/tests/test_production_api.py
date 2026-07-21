@@ -45,6 +45,51 @@ def read_qnep_structure():
 
 
 class ProductionApiTest(unittest.TestCase):
+    def test_ordinary_parallel_batch_matches_single_structure(self):
+        structure = read_labeled_structure(
+            FIXTURE_ROOT / "dftd3" / "structure.xyz"
+        )
+        structures = [structure] * 32
+        with NEPCalculator(FIXTURE_ROOT / "dftd3" / "nep.txt") as calculator:
+            single = calculator.predict_structures([structure])
+            batch = calculator.predict_structures(structures)
+            single_descriptors = calculator.predict_descriptors([structure])
+            batch_descriptors = calculator.predict_descriptors(structures)
+
+        np.testing.assert_allclose(
+            batch.energy, np.tile(single.energy, 32), atol=1e-12, rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            batch.potential,
+            np.tile(single.potential, 32),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.forces,
+            np.tile(single.forces, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.virials,
+            np.tile(single.virials, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.structure_virials,
+            np.tile(single.structure_virials, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch_descriptors,
+            np.tile(single_descriptors, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
     def test_qnep_explicit_low_and_high_level_api(self):
         structure = read_qnep_structure()
         model_path = QNEP_ROOT / "nep.txt"

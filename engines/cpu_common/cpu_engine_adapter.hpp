@@ -25,6 +25,11 @@ template <typename T>
 struct HasSpin<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
     : std::true_type {};
 
+// Each structure worker owns a NativeNep copy. These measured work floors keep
+// model-copy cost from dominating small ordinary batches.
+constexpr std::int64_t kForceBatchAtomsPerTypeWorker = 4;
+constexpr std::int64_t kDescriptorBatchAtomsPerTypeWorker = 10;
+
 template <typename NativeNep>
 class CpuModel final : public Model {
  public:
@@ -296,12 +301,15 @@ class CpuModel final : public Model {
     };
 
 #if defined(_OPENMP)
-    bool use_structure_parallel = false;
-    if constexpr (HasSpin<NativeNep>::value) {
-      use_structure_parallel =
-          nep_.paramb.spin_mode > 0 && batch.num_structures > 1 &&
-          omp_get_max_threads() > 1;
-    }
+    const NepaModelKind kind = model_kind();
+    const int structure_threads =
+        std::min<int>(batch.num_structures, omp_get_max_threads());
+    const std::int64_t ordinary_parallel_min_atoms =
+        kForceBatchAtomsPerTypeWorker * nep_.paramb.num_types * structure_threads;
+    const bool use_structure_parallel = structure_threads > 1 &&
+        (kind == NEPA_MODEL_KIND_SPIN ||
+         (kind == NEPA_MODEL_KIND_ORDINARY &&
+          batch.total_atoms >= ordinary_parallel_min_atoms));
 #else
     const bool use_structure_parallel = false;
 #endif
@@ -309,23 +317,25 @@ class CpuModel final : public Model {
     try {
       if (use_structure_parallel) {
 #if defined(_OPENMP)
-        const int num_threads =
-            std::min<int>(batch.num_structures, omp_get_max_threads());
         std::vector<NativeNep> workers(
-            static_cast<std::size_t>(num_threads),
+            static_cast<std::size_t>(structure_threads),
             nep_);
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
-        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-          try {
-            statuses[static_cast<std::size_t>(structure)] =
-                process_structure(
-                    workers[static_cast<std::size_t>(omp_get_thread_num())],
-                    structure);
-          } catch (const std::exception&) {
-            statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+#pragma omp parallel num_threads(structure_threads)
+        {
+          omp_set_num_threads(1);
+#pragma omp for schedule(dynamic, 1)
+          for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+            try {
+              statuses[static_cast<std::size_t>(structure)] =
+                  process_structure(
+                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      structure);
+            } catch (const std::exception&) {
+              statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+            }
           }
         }
         for (const NepaStatus status : statuses) {
@@ -367,8 +377,9 @@ class CpuModel final : public Model {
       return NEPA_STATUS_UNSUPPORTED;
     }
 
-    try {
-      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+    auto process_structure = [&](
+        NativeNep& native,
+        const std::int32_t structure) -> NepaStatus {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;
         }
@@ -402,7 +413,7 @@ class CpuModel final : public Model {
             box.data());
 
         if constexpr (HasSpin<NativeNep>::value) {
-          if (nep_.paramb.spin_mode > 0) {
+          if (native.paramb.spin_mode > 0) {
             if (batch.spins_aos3 == nullptr) {
               return NEPA_STATUS_INVALID_ARGUMENT;
             }
@@ -415,12 +426,13 @@ class CpuModel final : public Model {
               spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
-            nep_.find_descriptor(types, box, positions_soa, spins_soa, descriptor_soa);
+            native.find_descriptor(
+                types, box, positions_soa, spins_soa, descriptor_soa);
           } else {
-            nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+            native.find_descriptor(types, box, positions_soa, descriptor_soa);
           }
         } else {
-          nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+          native.find_descriptor(types, box, positions_soa, descriptor_soa);
         }
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
@@ -430,6 +442,61 @@ class CpuModel final : public Model {
                 static_cast<std::size_t>(global_atom) * descriptor_dim + component] =
                 descriptor_soa[
                     static_cast<std::size_t>(component) * atom_count + atom];
+          }
+        }
+        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+    };
+
+#if defined(_OPENMP)
+    const int structure_threads =
+        std::min<int>(batch.num_structures, omp_get_max_threads());
+    const std::int64_t ordinary_parallel_min_atoms =
+        kDescriptorBatchAtomsPerTypeWorker * nep_.paramb.num_types * structure_threads;
+    const bool use_structure_parallel =
+        model_kind() == NEPA_MODEL_KIND_ORDINARY && structure_threads > 1 &&
+        batch.total_atoms >= ordinary_parallel_min_atoms;
+#else
+    const bool use_structure_parallel = false;
+#endif
+
+    try {
+      if (use_structure_parallel) {
+#if defined(_OPENMP)
+        std::vector<NativeNep> workers(
+            static_cast<std::size_t>(structure_threads),
+            nep_);
+        std::vector<NepaStatus> statuses(
+            static_cast<std::size_t>(batch.num_structures),
+            NEPA_STATUS_OK);
+#pragma omp parallel num_threads(structure_threads)
+        {
+          omp_set_num_threads(1);
+#pragma omp for schedule(dynamic, 1)
+          for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+            try {
+              statuses[static_cast<std::size_t>(structure)] =
+                  process_structure(
+                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      structure);
+            } catch (const std::exception&) {
+              statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+            }
+          }
+        }
+        for (const NepaStatus status : statuses) {
+          if (status != NEPA_STATUS_OK) {
+            return status;
+          }
+        }
+#endif
+      } else {
+        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+          if (is_cancelled()) {
+            return NEPA_STATUS_CANCELLED;
+          }
+          const NepaStatus status = process_structure(nep_, structure);
+          if (status != NEPA_STATUS_OK) {
+            return status;
           }
         }
       }
