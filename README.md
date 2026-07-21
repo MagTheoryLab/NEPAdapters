@@ -19,15 +19,16 @@ native engine 和 Python 接口使用按模型语义分开的正式入口：普�
 
 | 场景 | 后端 | 要求 |
 |---|---|---|
-| 普通 CPU 计算、Python CPU wheel、LAMMPS CPU 插件 | `cpu` | C++17；OpenMP |
+| 普通 CPU 计算、Python、LAMMPS CPU 插件 | `cpu` | C++17；OpenMP |
 | NVIDIA GPU 批计算或 LAMMPS Kokkos | `cuda` | CUDA Toolkit；LAMMPS 路径还需要启用 CUDA 的 Kokkos |
 
-两个后端通过相同的核心 API 暴露能力，但实现、打包和测试保持分离：
+两个后端通过相同的核心 API 暴露能力，但实现和测试保持分离：
 
-- Python CPU wheel 只包含 `nep_cpu`。
-- Python GPU wheel 包含 `nep_cpu` 和按需加载的 `nep_gpu`。
+- PyPI 只发布一个 `nep-adapters` distribution 和一个版本号。
+- Linux x86_64 wheel 同时包含 `nep_cpu` 与按需加载的 `nep_gpu`；macOS、Windows 因没有受支持的 CUDA 运行面，只包含 `nep_cpu`。
 - 必须显式使用 `backend="cuda"` 才会加载 GPU 扩展。
 - CUDA 加载失败、NEP3 模型或未编译的 PPPM 请求都会直接报错，不会切换算法或后端。
+- `auto` 不是后端名；它属于 NepTrainKit 等调用方的选择策略。
 
 | 模型/能力 | 显式 Python 入口 | CPU | CUDA |
 |---|---|---|---|
@@ -69,7 +70,7 @@ conda activate mysci
 python -m build --wheel
 ```
 
-CPU wheel 使用 `NEPCalculator`：
+使用 `NEPCalculator`：
 
 ```python
 from nep_adapters import NEPCalculator
@@ -78,6 +79,10 @@ calculator = NEPCalculator("nep.txt", backend="cpu")
 prediction = calculator.predict_structures(structures)
 energy, force_blocks, virial_blocks = calculator.calculate(structures)
 ```
+
+`inspect_model()` 返回稳定的 `ModelInfo`（模型类型、元素、cutoff、descriptor 维度、能力和 SHA256）；`backend_status("cuda")` 在不加载模型的前提下报告模块、驱动、设备和可用显存。失败通过 `NepAdaptersError` 的稳定子类与 `code/backend/operation` 元数据交付，调用方可以据此给出操作建议，不需要匹配 native 错误字符串。
+
+CUDA calculator 的 `estimate_workspace()` 给出指定 atom/structure capacity 的显存计划；`recommend_max_atoms()` 按当前空闲显存给出保守的单结构原子上限。这里的 atom capacity 是批次中最大单结构原子数，不表示能够拆开一个超大结构。
 
 结构默认按全周期 `(1, 1, 1)` 处理。显式传入非全周期值或 `None` 会报错；接口没有非周期或旧哨兵值 fallback。
 
@@ -103,7 +108,7 @@ python3 tools/run_cuda_tests.py --cuda-arch 70
 
 该脚本负责配置 CUDA、编译测试并运行 `ctest -L cuda`。它是正确性门禁，不是性能 benchmark。
 
-本机构建 GPU wheel：
+本机构建包含 CPU+CUDA 的 Linux wheel：
 
 ```sh
 NEP_CUDA=1 python -m build --wheel
@@ -244,7 +249,7 @@ wheel 不会复制当前 Python 环境：
 - NumPy 由包管理器单独安装；
 - ASE 是可选依赖，不会嵌入 wheel；
 - pybind11、CMake、scikit-build-core 和编译器只用于构建；
-- Linux GPU wheel 不携带 `libcuda`、`libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
+- Linux combined wheel 不携带 `libcuda`、动态 `libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
 - glibc、libstdc++、libm 和 libgcc 使用目标平台系统库。
 
 发布时必须检查 `auditwheel show` 和 wheel 归档内容。发现新的动态依赖时应明确审查，不允许用 repair 失败后的原 wheel 作为 fallback。
@@ -253,13 +258,13 @@ wheel 不会复制当前 Python 环境：
 
 [`.github/workflows/python-package.yml`](.github/workflows/python-package.yml) 构建：
 
-- CPython 3.10–3.14 的 Linux x86_64、macOS x86_64/arm64 和 Windows x86_64 CPU wheel；
+- CPython 3.10–3.14 的 macOS x86_64/arm64 和 Windows x86_64 CPU wheel；
 - source distribution；
-- CPython 3.10–3.14 的 Linux x86_64 CUDA wheel。
+- CPython 3.10–3.14 的 Linux x86_64 combined CPU+CUDA wheel。
 
-创建 GitHub Release 时，CPU wheel 和 source distribution 通过 Trusted Publishing 发布到 PyPI。CUDA wheel 使用标准 `1cuda` build tag，只作为 GitHub Release 附件，避免普通 `pip install nep-adapters` 误选 GPU 包。
+创建 GitHub Release 时，所有平台 wheel 和 source distribution 作为同一个 `nep-adapters` 版本通过 Trusted Publishing 发布到 PyPI。发布门禁要求 Linux combined wheel 成功，不再维护同版本的 CPU/GPU 竞争包或 `1cuda` build tag。
 
-每个 wheel 都会在隔离环境中安装并执行真实 CPU 计算。GPU wheel 还会检查 `nep_gpu` 导入和归档内容；完整 CUDA 数值测试仍需要有 GPU 的发布节点。
+每个 wheel 都会在隔离环境中安装并执行真实 CPU 计算。Linux combined wheel 还会检查 `nep_gpu` 导入和归档内容；完整 CUDA 数值测试仍需要有 GPU 的发布节点。
 
 ## 目录结构
 

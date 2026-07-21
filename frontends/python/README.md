@@ -2,7 +2,13 @@
 
 本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。
 
-默认 wheel 只构建 CPU，不导入也不链接 CUDA。只有显式构建 GPU wheel 并选择 `backend="cuda"` 时，Python 才会按需加载 `nep_gpu`。
+PyPI 只发布一个 `nep-adapters` distribution。Linux x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS 和 Windows wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
+
+## 运行时检查与错误
+
+`inspect_model(path)` 返回 `ModelInfo`，统一提供模型类型、元素、cutoff、descriptor 维度、能力名和模型 SHA256。`backend_status("cpu" | "cuda")` 返回 `BackendStatus`；CUDA 状态包含扩展是否安装、运行时是否可用、原因、设备列表和当前可用显存。
+
+公共 Python 入口统一抛出 `NepAdaptersError` 子类：`InvalidInputError`、`UnsupportedModelError`、`BackendUnavailableError`、`ModelLoadError`、`BackendRuntimeError`、`OutOfMemoryError` 和 `CancelledError`。每个异常都带稳定的 `code`，以及适用时的 `backend`、`operation`；调用方不应匹配完整错误文案。
 
 ## 返回数据
 
@@ -110,7 +116,11 @@ spin 高层接口包括：
 - `get_spin_descriptor()`；
 - `get_spin_structures_descriptor()`。
 
-结构可以通过 `(natoms, 3)` 的 `spins` 属性或 `arrays["spins"]` 提供 spin；调用方也可以显式传入拼接后的 spin 数组。
+结构可以通过 `(natoms, 3)` 的 `spin` 或 `spins` 提供 spin，来源可以是 `atomic_properties`、`arrays` 或同名属性；进入计算前统一归一化为连续数组。ASE 的 vector `initial_magmoms` 也可直接使用；scalar `initial_magmoms` 必须由调用方显式提升为三维向量。多个来源同时存在但数值不同会作为歧义输入拒绝。
+
+## CUDA workspace 预算
+
+`NEPCalculator.estimate_workspace(atom_capacity, structure_capacity)` 返回模型、workspace 与合计字节数。`recommend_max_atoms()` 根据当前 CUDA 空闲显存计算保守上限，供上层构造 chunk；atom capacity 对应批次中的最大单结构原子数，因此 chunk 能控制进度和批次资源，但不能拆分一个超大结构。
 
 ## 可选 ASE 接口
 
@@ -140,15 +150,15 @@ ctest --test-dir .build/python -L python --output-on-failure
 
 ## 构建 wheel
 
-CPU wheel：
+本地默认 CPU wheel：
 
 ```sh
 python -m build --wheel
 ```
 
-wheel 配置默认关闭 CUDA 和 qNEP PPPM/cuFFT，但 CPU 扩展始终启用 OpenMP。基础 wheel 包含 Python 包、ABI 匹配的 `nep_cpu` 扩展和必要时由 wheel 修复工具打包的 OpenMP runtime。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
+wheel 配置默认关闭 CUDA 和 qNEP PPPM/cuFFT，但 CPU 扩展始终启用 OpenMP。源码默认构建适用于本机开发；正式 Linux 发布由 CI 显式启用 CUDA 并生成 combined wheel。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
 
-GPU wheel：
+本地 combined CPU+CUDA wheel：
 
 ```sh
 NEP_CUDA=1 python -m build --wheel
@@ -168,7 +178,7 @@ NEP_CUDA=1 pip install .
 `--config-settings=cmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON` 显式传递 CMake
 选项；一般用户不需要记忆这条长命令。
 
-GPU wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或选择 `cpu` 时只加载 `nep_cpu`；只有显式选择 `backend="cuda"` 才按需导入 `nep_gpu`。CUDA 加载失败不会切换到 CPU。
+combined wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或选择 `cpu` 时只加载 `nep_cpu`；只有显式选择 `backend="cuda"` 才按需导入 `nep_gpu`。CUDA 加载失败不会切换到 CPU。
 
 CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型通过 `nep_gpu` 执行 `calculate_charge()` 和 `descriptors()`；普通 `calculate()` 对 charge 模型保持 fail-closed。
 
@@ -190,8 +200,8 @@ wheel 不会复制当前 Python 环境：
 - NumPy 是运行时依赖，由包管理器单独安装；
 - ASE 是可选依赖，不嵌入 wheel；
 - pybind11、CMake、scikit-build-core 和编译器只用于构建；
-- CPU 和 GPU wheel 都启用 OpenMP；Linux/macOS 修复后的 wheel 可能携带 `libgomp` 或 `libomp`，Windows 使用对应的 OpenMP runtime；
-- 默认 Linux GPU wheel 不携带 `libcuda`、`libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
+- 所有 wheel 都启用 CPU OpenMP；Linux/macOS 修复后的 wheel 可能携带 `libgomp` 或 `libomp`，Windows 使用对应的 OpenMP runtime；
+- Linux combined wheel 不携带 `libcuda`、动态 `libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
 - glibc、libstdc++、libm 和 libgcc 使用系统库，其最低符号版本由 manylinux 构建环境决定。
 
 发布门禁必须执行 `auditwheel show` 和归档内容检查。未来如果增加新的非系统动态库，应显式审查，不允许把意外 vendoring 当成正常结果。

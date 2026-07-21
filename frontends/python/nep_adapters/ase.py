@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .calculator import NEPCalculator
+from .calculator import NEPCalculator, SpinPrediction
 
 try:
     from ase.calculators.calculator import Calculator, all_changes
@@ -24,7 +24,14 @@ def _stress_from_nep_compute_virial(virial9, atoms):
 
 
 class NepAseCalculator(Calculator):
-    implemented_properties = ["energy", "energies", "forces", "stress", "descriptor"]
+    implemented_properties = [
+        "energy",
+        "energies",
+        "forces",
+        "stress",
+        "descriptor",
+        "mforces",
+    ]
 
     def __init__(self, model_file="nep.txt", backend="cpu", **kwargs):
         super().__init__(**kwargs)
@@ -35,7 +42,10 @@ class NepAseCalculator(Calculator):
             properties = self.implemented_properties
         super().calculate(atoms, properties, system_changes)
 
-        prediction = self._calc.predict_structures([atoms])
+        if self._calc.model_info.model_type == "spin":
+            prediction = self._calc.predict_spin_structures([atoms])
+        else:
+            prediction = self._calc.predict_structures([atoms])
         self.results["energy"] = float(prediction.energy[0])
         self.results["energies"] = prediction.potential
         self.results["forces"] = prediction.forces
@@ -44,12 +54,20 @@ class NepAseCalculator(Calculator):
             atoms,
         )
         if "descriptor" in properties:
-            self.results["descriptor"] = self._calc.get_descriptor(atoms)
+            if isinstance(prediction, SpinPrediction):
+                self.results["descriptor"] = self._calc.get_spin_descriptor(atoms)
+            else:
+                self.results["descriptor"] = self._calc.get_descriptor(atoms)
+        if isinstance(prediction, SpinPrediction):
+            self.results["mforces"] = prediction.mforces
 
 
 def attach_single_point(atoms_or_list, calculator: NEPCalculator, calc_descriptor: bool = False):
     atoms_list = [atoms_or_list] if hasattr(atoms_or_list, "get_chemical_symbols") else list(atoms_or_list)
-    prediction = calculator.predict_structures(atoms_list)
+    if calculator.model_info.model_type == "spin":
+        prediction = calculator.predict_spin_structures(atoms_list)
+    else:
+        prediction = calculator.predict_structures(atoms_list)
     force_blocks = prediction.force_blocks()
     for index, atoms in enumerate(atoms_list):
         spc = SinglePointCalculator(
@@ -59,6 +77,11 @@ def attach_single_point(atoms_or_list, calculator: NEPCalculator, calc_descripto
             stress=_stress_from_nep_compute_virial(prediction.structure_virials[index], atoms),
         )
         if calc_descriptor:
-            spc.results["descriptor"] = calculator.get_descriptor(atoms)
+            if isinstance(prediction, SpinPrediction):
+                spc.results["descriptor"] = calculator.get_spin_descriptor(atoms)
+            else:
+                spc.results["descriptor"] = calculator.get_descriptor(atoms)
+        if isinstance(prediction, SpinPrediction):
+            spc.results["mforces"] = prediction.mforce_blocks()[index]
         atoms.calc = spc
     return atoms_or_list

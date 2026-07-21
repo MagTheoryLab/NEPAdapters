@@ -33,7 +33,9 @@ constexpr std::int64_t kDescriptorBatchAtomsPerTypeWorker = 10;
 template <typename NativeNep>
 class CpuModel final : public Model {
  public:
-  explicit CpuModel(const std::string& model_path) : nep_(model_path) {}
+  explicit CpuModel(const std::string& model_path) {
+    nep_.init_from_file(model_path, false);
+  }
 
   NepaModelKind model_kind() const override {
     if (nep_.paramb.model_type == 1) {
@@ -80,6 +82,7 @@ class CpuModel final : public Model {
         out.capabilities |= to_mask(Capability::spin_energy_transfer);
       } else {
         out.capabilities |= to_mask(Capability::dftd3);
+        out.capabilities |= NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS;
       }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
@@ -97,6 +100,16 @@ class CpuModel final : public Model {
     return find_force_batch_impl(batch, result);
   }
 
+  NepaStatus evaluate_batch(
+      const NepaStructureBatch& batch,
+      NepaEvaluateResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_ORDINARY ||
+        result.descriptor.descriptors == nullptr) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    return find_force_batch_impl(batch, result.prediction, &result.descriptor);
+  }
+
   NepaStatus find_charge_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) override {
@@ -112,7 +125,8 @@ class CpuModel final : public Model {
 
   NepaStatus find_force_batch_impl(
       const NepaStructureBatch& batch,
-      NepaFindForceResult& result) {
+      NepaFindForceResult& result,
+      NepaFindDescriptorResult* descriptor_result = nullptr) {
     if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -174,6 +188,11 @@ class CpuModel final : public Model {
 
         std::vector<double> charge;
         std::vector<double> bec_soa;
+        std::vector<double> descriptor_soa;
+        if (descriptor_result != nullptr) {
+          descriptor_soa.assign(
+              static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
+        }
         if constexpr (HasSpin<NativeNep>::value) {
           if (native.paramb.spin_mode > 0) {
             std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
@@ -185,7 +204,7 @@ class CpuModel final : public Model {
               spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
-            std::vector<double> descriptor_soa(
+            descriptor_soa.assign(
                 static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
             std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
             std::vector<double> spin_transfer_soa;
@@ -236,7 +255,14 @@ class CpuModel final : public Model {
                 charge,
                 bec_soa);
           } else {
-            native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+            native.compute(
+                types,
+                box,
+                positions_soa,
+                potential,
+                force_soa,
+                virial_soa,
+                descriptor_soa.empty() ? nullptr : &descriptor_soa);
           }
         } else if (native.paramb.charge_mode > 0) {
           charge.assign(static_cast<std::size_t>(atom_count), 0.0);
@@ -251,7 +277,14 @@ class CpuModel final : public Model {
               charge,
               bec_soa);
         } else {
-          native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+          native.compute(
+              types,
+              box,
+              positions_soa,
+              potential,
+              force_soa,
+              virial_soa,
+              descriptor_soa.empty() ? nullptr : &descriptor_soa);
         }
 
         result.energy_per_structure[structure] =
@@ -281,6 +314,16 @@ class CpuModel final : public Model {
             for (std::int32_t component = 0; component < 9; ++component) {
               result.bec_per_atom_row_major9[9 * global_atom + component] =
                   bec_soa[static_cast<std::size_t>(component) * atom_count + atom];
+            }
+          }
+          if (descriptor_result != nullptr) {
+            for (std::int32_t component = 0;
+                 component < native.annmb.dim;
+                 ++component) {
+              descriptor_result->descriptors[
+                  static_cast<std::size_t>(global_atom) * native.annmb.dim +
+                  component] = descriptor_soa[
+                      static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
         }
@@ -846,7 +889,7 @@ class CpuEngine final : public Engine {
       capabilities |= to_mask(Capability::spin) |
                       to_mask(Capability::spin_energy_transfer);
     }
-    return {name_, "external", capabilities};
+    return {name_, NEP_ADAPTERS_VERSION_STRING, capabilities};
   }
 
   NepaStatus load_model(
@@ -856,13 +899,8 @@ class CpuEngine final : public Engine {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
 
-    try {
-      out = std::make_unique<CpuModel<NativeNep>>(model_path);
-      return NEPA_STATUS_OK;
-    } catch (const std::exception&) {
-      out.reset();
-      return NEPA_STATUS_RUNTIME_ERROR;
-    }
+    out = std::make_unique<CpuModel<NativeNep>>(model_path);
+    return NEPA_STATUS_OK;
   }
 
  private:

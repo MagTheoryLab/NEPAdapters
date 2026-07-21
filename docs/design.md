@@ -93,19 +93,13 @@ DFT-D3 engine SPI 只调用 CPU native 的 `compute_dftd3` 与 `compute_with_dft
 
 取消状态属于 model，使用原子状态位。C API 为 `nepa_cancel_model()` 和 `nepa_reset_cancel()`；batch engine 至少在每个结构边界检查状态。已启动的 CUDA kernel 不被强制抢占，返回后才停止后续工作。前端只有在整个调用成功时才发布结果；cancelled 状态不会被包装成部分成功。Python 计算持有共享 model 生命周期并释放 GIL，因此 `close()`、`cancel()` 和正在执行的调用不会形成 use-after-free。
 
-engine SPI 面向 engine 实现者，位于 `engine.hpp`。在 v0 阶段仍可随实现边界调整。
-
-`include/nep_adapters/api.h` 的 C API 当前仍是实验接口。只有 spin、charge、descriptor、外部邻居、自有邻居和 device input 都形成明确 data-view 契约后，才能冻结 ABI。
+engine SPI 面向 engine 实现者，位于 `engine.hpp`；它不是面向应用的稳定 ABI。`include/nep_adapters/api.h` 的 C API 从 v1 起按 semver 演进，raw9 virial、模型类型、capability 和 data-view 约定属于兼容边界。
 
 ## 打包策略
 
-默认 Python 包为 CPU-only：
+PyPI 只有一个 `nep-adapters` distribution 和一个版本序列。Linux x86_64 发布 wheel 同时包含独立的 `nep_cpu` 与 `nep_gpu` 扩展；macOS 和 Windows 没有受支持的 CUDA 运行面，只包含 `nep_cpu`。所有平台都不包含 LAMMPS。
 
-- 构建 core 与 `cpu`；
-- 不包含 LAMMPS；
-- 不加载 CUDA。
-
-GPU wheel 包含独立的 `nep_cpu` 和 `nep_gpu` 扩展。只有显式选择 `backend="cuda"` 才加载 GPU 模块。CUDA 加载或模型能力失败时直接报错，不允许切换到 CPU。
+导入包或选择 `backend="cpu"` 不加载 CUDA；只有显式选择 `backend="cuda"` 才加载 GPU 模块。CUDA 加载或模型能力失败时直接报错，不允许切换到 CPU。`auto` 属于 NepTrainKit 等调用方策略，不进入 backend registry。
 
 LAMMPS integration 由源码仓库单独构建：
 
@@ -113,7 +107,7 @@ LAMMPS integration 由源码仓库单独构建：
 - 无法加载 plugin 的 LAMMPS 构建可使用独立 source integration；
 - LAMMPS 只链接 runtime/engine，不依赖 Python。
 
-CUDA wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。
+Linux combined wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。CUDA Runtime 静态链接，wheel 不打包动态 `libcudart`、`libcuda` 或 `libcufft`。
 
 ## CPU 基准
 

@@ -20,6 +20,7 @@ enum class Capability : CapabilityMask {
   dipole = NEPA_CAPABILITY_DIPOLE,
   polarizability = NEPA_CAPABILITY_POLARIZABILITY,
   dftd3 = NEPA_CAPABILITY_DFTD3,
+  evaluate_with_descriptors = NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS,
 };
 
 constexpr CapabilityMask to_mask(Capability capability) {

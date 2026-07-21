@@ -7,10 +7,10 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "nep-adapters"
-version = "0.1.0"
+version = "1.0.0"
 description = "NEP runtime adapters for Python and LAMMPS frontends"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "numpy",
 ]

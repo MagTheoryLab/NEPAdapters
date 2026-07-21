@@ -36,11 +36,6 @@ def backend_name(member: str) -> str | None:
 
 
 def inspect_wheel(path: Path, variant: str) -> None:
-    if variant == "gpu" and "-1cuda-" not in path.name:
-        raise AssertionError(f"{path.name}: GPU wheel must use the 1cuda build tag")
-    if variant == "cpu" and "-1cuda-" in path.name:
-        raise AssertionError(f"{path.name}: CPU wheel must not use the CUDA build tag")
-
     with zipfile.ZipFile(path) as archive:
         corrupt = archive.testzip()
         if corrupt is not None:
@@ -103,7 +98,7 @@ def inspect_wheel(path: Path, variant: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--variant", choices=("cpu", "gpu"), required=True)
+    parser.add_argument("--variant", choices=("cpu", "combined"), required=True)
     parser.add_argument("--wheel-dir", type=Path, required=True)
     args = parser.parse_args()
     wheels = sorted(args.wheel_dir.rglob("*.whl"))

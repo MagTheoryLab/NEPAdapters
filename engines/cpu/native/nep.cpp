@@ -725,7 +725,12 @@ void find_descriptor_small_box(
   std::vector<double>& ann_q_group_workspace,
   std::vector<double>& ann_hidden_workspace,
   std::vector<double>& ann_coeff_workspace,
-  std::vector<double>& ann_fp_group_workspace)
+  std::vector<double>& ann_fp_group_workspace,
+  const int* radial_edge_offsets = nullptr,
+  double* radial_gnp_cache = nullptr,
+  const int* angular_edge_offsets = nullptr,
+  double* angular_gn_cache = nullptr,
+  double* angular_gnp_cache = nullptr)
 {
 #if defined(NEP_ADAPTERS_CPU_USE_CBLAS)
   const bool use_batched_ann =
@@ -766,23 +771,42 @@ void find_descriptor_small_box(
           g_gn_radial, g_gnp_radial, index_left_all, index_right_all, weight_right, table_step);
       }
 #else
-      double fc12;
       double rc = paramb.rc_radial_pair[t12];
       double rcinv = paramb.rcinv_radial_pair[t12];
-      find_fc(rc, rcinv, d12, fc12);
+      double fc12;
+      double fcp12 = 0.0;
       double fn12[MAX_NUM_N];
-      find_fn(paramb.basis_size_radial, rcinv, d12, fc12, fn12);
+      double fnp12[MAX_NUM_N];
+      if (radial_gnp_cache) {
+        find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+        find_fn_and_fnp(
+          paramb.basis_size_radial, rcinv, d12, fc12, fcp12, fn12, fnp12);
+      } else {
+        find_fc(rc, rcinv, d12, fc12);
+        find_fn(paramb.basis_size_radial, rcinv, d12, fc12, fn12);
+      }
       const double* c_pair =
         annmb.c_radial_pair.data() + static_cast<std::size_t>(t12) *
                                       (paramb.n_max_radial + 1) *
                                       (paramb.basis_size_radial + 1);
+      const std::size_t cache_base = radial_gnp_cache
+        ? static_cast<std::size_t>(radial_edge_offsets[n1] + i1) *
+            (paramb.n_max_radial + 1)
+        : 0;
       for (int n = 0; n <= paramb.n_max_radial; ++n) {
         double gn12 = 0.0;
+        double gnp12 = 0.0;
         const double* c_n = c_pair + n * (paramb.basis_size_radial + 1);
         for (int k = 0; k <= paramb.basis_size_radial; ++k) {
           gn12 += fn12[k] * c_n[k];
+          if (radial_gnp_cache) {
+            gnp12 += fnp12[k] * c_n[k];
+          }
         }
         q[n] += gn12;
+        if (radial_gnp_cache) {
+          radial_gnp_cache[cache_base + n] = gnp12;
+        }
       }
 #endif
     }
@@ -886,6 +910,76 @@ void find_descriptor_small_box(
       }
     } else
 #endif
+#ifndef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    {
+      double s_all[MAX_NUM_N * NUM_OF_ABC];
+      std::fill(
+        s_all, s_all + static_cast<std::size_t>(paramb.n_max_angular + 1) * NUM_OF_ABC, 0.0);
+      for (int i1 = 0; i1 < g_NN_angular[n1]; ++i1) {
+        const int index = i1 * N + n1;
+        const int n2 = g_NL_angular[index];
+        const int t2 = g_type[n2];
+        const int t12 = t1 * paramb.num_types + t2;
+        const double r12[3] = {
+          g_x12_angular[index], g_y12_angular[index], g_z12_angular[index]};
+        const double d12 =
+          sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+        const double rc = paramb.rc_angular_pair[t12];
+        const double rcinv = paramb.rcinv_angular_pair[t12];
+        double fc12;
+        double fcp12 = 0.0;
+        double fn12[MAX_NUM_N];
+        double fnp12[MAX_NUM_N];
+        if (angular_gnp_cache) {
+          find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+          find_fn_and_fnp(
+            paramb.basis_size_angular, rcinv, d12, fc12, fcp12, fn12, fnp12);
+        } else {
+          find_fc(rc, rcinv, d12, fc12);
+          find_fn(paramb.basis_size_angular, rcinv, d12, fc12, fn12);
+        }
+        const double* c_pair =
+          annmb.c_angular_pair.data() + static_cast<std::size_t>(t12) *
+                                           (paramb.n_max_angular + 1) *
+                                           (paramb.basis_size_angular + 1);
+        const std::size_t cache_base = angular_gnp_cache
+          ? static_cast<std::size_t>(angular_edge_offsets[n1] + i1) *
+              (paramb.n_max_angular + 1)
+          : 0;
+        for (int n = 0; n <= paramb.n_max_angular; ++n) {
+          double gn12 = 0.0;
+          double gnp12 = 0.0;
+          const double* c_n = c_pair + n * (paramb.basis_size_angular + 1);
+          for (int k = 0; k <= paramb.basis_size_angular; ++k) {
+            gn12 += fn12[k] * c_n[k];
+            if (angular_gnp_cache) {
+              gnp12 += fnp12[k] * c_n[k];
+            }
+          }
+          if (angular_gnp_cache) {
+            angular_gn_cache[cache_base + n] = gn12;
+            angular_gnp_cache[cache_base + n] = gnp12;
+          }
+          accumulate_s(
+            paramb.L_max, d12, r12[0], r12[1], r12[2], gn12,
+            s_all + n * NUM_OF_ABC);
+        }
+      }
+      for (int n = 0; n <= paramb.n_max_angular; ++n) {
+        double* s = s_all + n * NUM_OF_ABC;
+        find_q(
+          paramb.L_max, paramb.has_q_222, paramb.has_q_1111, paramb.has_q_112,
+          paramb.has_q_123, paramb.has_q_233, paramb.has_q_134,
+          paramb.n_max_angular + 1, n, s, q.data() + (paramb.n_max_radial + 1));
+        for (int abc = 0; abc < NUM_OF_ABC; ++abc) {
+          const int d = n * NUM_OF_ABC + abc;
+          g_sum_fxyz[
+            static_cast<std::size_t>(n1) * (paramb.n_max_angular + 1) * NUM_OF_ABC + d] =
+            s[abc];
+        }
+      }
+    }
+#else
     for (int n = 0; n <= paramb.n_max_angular; ++n) {
       double s[NUM_OF_ABC] = {0.0};
       for (int i1 = 0; i1 < g_NN_angular[n1]; ++i1) {
@@ -895,7 +989,6 @@ void find_descriptor_small_box(
         int t12 = t1 * paramb.num_types + t2;
         double r12[3] = {g_x12_angular[index], g_y12_angular[index], g_z12_angular[index]};
         double d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
-#ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
         int index_left, index_right;
         double weight_left, weight_right;
         double rcinv = paramb.rcinv_angular_pair[t12];
@@ -909,24 +1002,6 @@ void find_descriptor_small_box(
         double gn12 = interpolate_table_value(
           g_gn_angular, g_gnp_angular, index_left_all, index_right_all, weight_right, table_step);
         accumulate_s(paramb.L_max, d12, r12[0], r12[1], r12[2], gn12, s);
-#else
-        double fc12;
-        double rc = paramb.rc_angular_pair[t12];
-        double rcinv = paramb.rcinv_angular_pair[t12];
-        find_fc(rc, rcinv, d12, fc12);
-        double fn12[MAX_NUM_N];
-        find_fn(paramb.basis_size_angular, rcinv, d12, fc12, fn12);
-        const double* c_pair =
-          annmb.c_angular_pair.data() + static_cast<std::size_t>(t12) *
-                                         (paramb.n_max_angular + 1) *
-                                         (paramb.basis_size_angular + 1);
-        double gn12 = 0.0;
-        const double* c_n = c_pair + n * (paramb.basis_size_angular + 1);
-        for (int k = 0; k <= paramb.basis_size_angular; ++k) {
-          gn12 += fn12[k] * c_n[k];
-        }
-        accumulate_s(paramb.L_max, d12, r12[0], r12[1], r12[2], gn12, s);
-#endif
       }
       find_q(
         paramb.L_max, paramb.has_q_222, paramb.has_q_1111, paramb.has_q_112, paramb.has_q_123,
@@ -939,6 +1014,7 @@ void find_descriptor_small_box(
           s[abc];
       }
     }
+#endif
 
     if (calculating_descriptor) {
       for (int d = 0; d < annmb.dim; ++d) {
@@ -1462,7 +1538,9 @@ void find_force_radial_small_box(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int* edge_offsets = nullptr,
+  const double* gnp_cache = nullptr)
 {
   auto evaluate_n1 = [&](
                        const int n1,
@@ -1501,24 +1579,36 @@ void find_force_radial_small_box(
         }
       }
 #else
-      double fc12, fcp12;
-      double rc = paramb.rc_radial_pair[t12];
-      double rcinv = paramb.rcinv_radial_pair[t12];
-      find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
-      std::array<double, MAX_NUM_N> fn12;
-      std::array<double, MAX_NUM_N> fnp12;
-      find_fn_and_fnp(paramb.basis_size_radial, rcinv, d12, fc12, fcp12, fn12.data(), fnp12.data());
-      const double* c_pair =
-        annmb.c_radial_pair.data() + static_cast<std::size_t>(t12) *
-                                      (paramb.n_max_radial + 1) *
-                                      (paramb.basis_size_radial + 1);
-      for (int n = 0; n <= paramb.n_max_radial; ++n) {
-        double gnp12 = 0.0;
-        const double* c_n = c_pair + n * (paramb.basis_size_radial + 1);
-        for (int k = 0; k <= paramb.basis_size_radial; ++k) {
-          gnp12 += fnp12[k] * c_n[k];
+      const double* cached_gnp = gnp_cache
+        ? gnp_cache + static_cast<std::size_t>(edge_offsets[n1] + i1) *
+                        (paramb.n_max_radial + 1)
+        : nullptr;
+      std::array<double, MAX_NUM_N> computed_gnp;
+      if (!cached_gnp) {
+        double fc12, fcp12;
+        double rc = paramb.rc_radial_pair[t12];
+        double rcinv = paramb.rcinv_radial_pair[t12];
+        find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+        std::array<double, MAX_NUM_N> fn12;
+        std::array<double, MAX_NUM_N> fnp12;
+        find_fn_and_fnp(
+          paramb.basis_size_radial, rcinv, d12, fc12, fcp12, fn12.data(), fnp12.data());
+        const double* c_pair =
+          annmb.c_radial_pair.data() + static_cast<std::size_t>(t12) *
+                                        (paramb.n_max_radial + 1) *
+                                        (paramb.basis_size_radial + 1);
+        for (int n = 0; n <= paramb.n_max_radial; ++n) {
+          double gnp12 = 0.0;
+          const double* c_n = c_pair + n * (paramb.basis_size_radial + 1);
+          for (int k = 0; k <= paramb.basis_size_radial; ++k) {
+            gnp12 += fnp12[k] * c_n[k];
+          }
+          computed_gnp[n] = gnp12;
         }
-        double tmp12 = fp_center[n] * gnp12 * d12inv;
+        cached_gnp = computed_gnp.data();
+      }
+      for (int n = 0; n <= paramb.n_max_radial; ++n) {
+        double tmp12 = fp_center[n] * cached_gnp[n] * d12inv;
         for (int d = 0; d < 3; ++d) {
           f12[d] += tmp12 * r12[d];
         }
@@ -1615,7 +1705,10 @@ void find_force_angular_small_box(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int* edge_offsets = nullptr,
+  const double* gn_cache = nullptr,
+  const double* gnp_cache = nullptr)
 {
   const int angular_sum_stride = (paramb.n_max_angular + 1) * NUM_OF_ABC;
   auto evaluate_n1 = [&](
@@ -1669,28 +1762,39 @@ void find_force_angular_small_box(
         gnp12_all[n] = gnp12;
       }
 #else
-      double fc12, fcp12;
-      double rc = paramb.rc_angular_pair[t12];
-      double rcinv = paramb.rcinv_angular_pair[t12];
-      find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
-
-      std::array<double, MAX_NUM_N> fn12;
-      std::array<double, MAX_NUM_N> fnp12;
-      find_fn_and_fnp(paramb.basis_size_angular, rcinv, d12, fc12, fcp12, fn12.data(), fnp12.data());
-      const double* c_pair =
-        annmb.c_angular_pair.data() + static_cast<std::size_t>(t12) *
-                                       (paramb.n_max_angular + 1) *
-                                       (paramb.basis_size_angular + 1);
-      for (int n = 0; n <= paramb.n_max_angular; ++n) {
-        double gn12 = 0.0;
-        double gnp12 = 0.0;
-        const double* c_n = c_pair + n * (paramb.basis_size_angular + 1);
-        for (int k = 0; k <= paramb.basis_size_angular; ++k) {
-          gn12 += fn12[k] * c_n[k];
-          gnp12 += fnp12[k] * c_n[k];
+      if (gn_cache) {
+        const std::size_t cache_base =
+          static_cast<std::size_t>(edge_offsets[n1] + i1) *
+          (paramb.n_max_angular + 1);
+        for (int n = 0; n <= paramb.n_max_angular; ++n) {
+          gn12_all[n] = gn_cache[cache_base + n];
+          gnp12_all[n] = gnp_cache[cache_base + n];
         }
-        gn12_all[n] = gn12;
-        gnp12_all[n] = gnp12;
+      } else {
+        double fc12, fcp12;
+        double rc = paramb.rc_angular_pair[t12];
+        double rcinv = paramb.rcinv_angular_pair[t12];
+        find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+
+        std::array<double, MAX_NUM_N> fn12;
+        std::array<double, MAX_NUM_N> fnp12;
+        find_fn_and_fnp(
+          paramb.basis_size_angular, rcinv, d12, fc12, fcp12, fn12.data(), fnp12.data());
+        const double* c_pair =
+          annmb.c_angular_pair.data() + static_cast<std::size_t>(t12) *
+                                         (paramb.n_max_angular + 1) *
+                                         (paramb.basis_size_angular + 1);
+        for (int n = 0; n <= paramb.n_max_angular; ++n) {
+          double gn12 = 0.0;
+          double gnp12 = 0.0;
+          const double* c_n = c_pair + n * (paramb.basis_size_angular + 1);
+          for (int k = 0; k <= paramb.basis_size_angular; ++k) {
+            gn12 += fn12[k] * c_n[k];
+            gnp12 += fnp12[k] * c_n[k];
+          }
+          gn12_all[n] = gn12;
+          gnp12_all[n] = gnp12;
+        }
       }
 #endif
       accumulate_f12_contracted_all_n(
@@ -3912,11 +4016,8 @@ int get_int_from_token(const std::string& token, const char* filename, const int
   try {
     value = std::stoi(token);
   } catch (const std::exception& e) {
-    std::cout << "Standard exception:\n";
-    std::cout << "    File:          " << filename << std::endl;
-    std::cout << "    Line:          " << line << std::endl;
-    std::cout << "    Error message: " << e.what() << std::endl;
-    exit(1);
+    throw std::invalid_argument(
+      "invalid integer token '" + token + "' at " + filename + ":" + std::to_string(line));
   }
   return value;
 }
@@ -3927,11 +4028,8 @@ double get_double_from_token(const std::string& token, const char* filename, con
   try {
     value = std::stod(token);
   } catch (const std::exception& e) {
-    std::cout << "Standard exception:\n";
-    std::cout << "    File:          " << filename << std::endl;
-    std::cout << "    Line:          " << line << std::endl;
-    std::cout << "    Error message: " << e.what() << std::endl;
-    exit(1);
+    throw std::invalid_argument(
+      "invalid floating-point token '" + token + "' at " + filename + ":" + std::to_string(line));
   }
   return value;
 }
@@ -8148,15 +8246,12 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
 {
   std::ifstream input(potential_filename);
   if (!input.is_open()) {
-    std::cout << "Failed to open " << potential_filename << std::endl;
-    exit(1);
+    throw std::runtime_error("failed to open NEP model: " + potential_filename);
   }
 
   std::vector<std::string> tokens = get_tokens(input);
   if (tokens.size() < 3) {
-    print_tokens(tokens);
-    std::cout << "The first line of nep.txt should have at least 3 items." << std::endl;
-    exit(1);
+    throw std::invalid_argument("the first line of a NEP model must contain at least 3 fields");
   }
   if (tokens[0] == "nep3") {
     paramb.model_type = 0;
@@ -8234,16 +8329,13 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     zbl.enabled = true;
     paramb.charge_mode = 3;
   } else {
-    std::cout << tokens[0] << " is an unsupported NEP model." << std::endl;
-    exit(1);
+    throw std::invalid_argument(tokens[0] + " is an unsupported NEP model");
   }
 
   paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
   if (tokens.size() != 2 + paramb.num_types) {
-    print_tokens(tokens);
-    std::cout << "The first line of nep.txt should have " << paramb.num_types << " atom symbols."
-              << std::endl;
-    exit(1);
+    throw std::invalid_argument(
+      "the first line of a NEP model has the wrong number of atom symbols");
   }
 
   element_list.resize(paramb.num_types);
@@ -8356,9 +8448,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // zbl
   if (zbl.enabled) {
     if (tokens.size() != 3 && tokens.size() != 4) {
-      print_tokens(tokens);
-      std::cout << "This line should be zbl rc_inner rc_outer [zbl_factor]." << std::endl;
-      exit(1);
+      throw std::invalid_argument("expected: zbl rc_inner rc_outer [zbl_factor]");
     }
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
@@ -8375,9 +8465,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
 
   // cutoff
   if (tokens.size() != 5 && tokens.size() != paramb.num_types * 2 + 3) {
-    print_tokens(tokens);
-    std::cout << "cutoff should have 4 or num_types * 2 + 2 parameters.\n";
-    exit(1);
+    throw std::invalid_argument("cutoff has the wrong number of parameters");
   }
   if (tokens.size() == 5) {
     paramb.rc_radial[0] = get_double_from_token(tokens[1], __FILE__, __LINE__);
@@ -8413,9 +8501,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // n_max 10 8
   tokens = get_tokens(input);
   if (tokens.size() != 3) {
-    print_tokens(tokens);
-    std::cout << "This line should be n_max n_max_radial n_max_angular." << std::endl;
-    exit(1);
+    throw std::invalid_argument("expected: n_max n_max_radial n_max_angular");
   }
   paramb.n_max_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.n_max_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
@@ -8423,10 +8509,8 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // basis_size 10 8
   tokens = get_tokens(input);
   if (tokens.size() != 3) {
-    print_tokens(tokens);
-    std::cout << "This line should be basis_size basis_size_radial basis_size_angular."
-              << std::endl;
-    exit(1);
+    throw std::invalid_argument(
+      "expected: basis_size basis_size_radial basis_size_angular");
   }
   paramb.basis_size_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.basis_size_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
@@ -8434,11 +8518,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // l_max
   tokens = get_tokens(input);
   if (tokens.size() < 4) {
-    print_tokens(tokens);
-    std::cout << "l_max line should be l_max l_max_3body has_q_222 has_q_1111 "
-                 "[has_q_112] [has_q_123] [has_q_233] [has_q_134]."
-              << std::endl;
-    exit(1);
+    throw std::invalid_argument("l_max line has too few parameters");
   }
 
   paramb.L_max = get_int_from_token(tokens[1], __FILE__, __LINE__);
@@ -8468,9 +8548,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // ANN
   tokens = get_tokens(input);
   if (tokens.size() != 3) {
-    print_tokens(tokens);
-    std::cout << "This line should be ANN num_neurons 0." << std::endl;
-    exit(1);
+    throw std::invalid_argument("expected: ANN num_neurons 0");
   }
   annmb.num_neurons1 = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.struct_dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
@@ -8807,7 +8885,8 @@ void NEP::compute(
   const std::vector<double>& position,
   std::vector<double>& potential,
   std::vector<double>& force,
-  std::vector<double>& virial)
+  std::vector<double>& virial,
+  std::vector<double>* descriptor)
 {
   if (paramb.model_type != 0) {
     std::cout << "Cannot compute potential using a non-potential NEP model.\n";
@@ -8837,6 +8916,9 @@ void NEP::compute(
   if (N * 9 != virial.size()) {
     std::cout << "Type and virial sizes are inconsistent.\n";
     exit(1);
+  }
+  if (descriptor != nullptr && N * annmb.dim != descriptor->size()) {
+    throw std::runtime_error("type and descriptor sizes are inconsistent");
   }
 
   const bool phase_timing = nep_phase_timer_enabled();
@@ -8870,6 +8952,26 @@ void NEP::compute(
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
   }
+#ifndef USE_TABLE_FOR_RADIAL_FUNCTIONS
+  small_box_radial_edge_offsets.resize(N + 1);
+  small_box_angular_edge_offsets.resize(N + 1);
+  small_box_radial_edge_offsets[0] = 0;
+  small_box_angular_edge_offsets[0] = 0;
+  for (std::size_t n = 0; n < N; ++n) {
+    small_box_radial_edge_offsets[n + 1] =
+      small_box_radial_edge_offsets[n] + NN_radial[n];
+    small_box_angular_edge_offsets[n + 1] =
+      small_box_angular_edge_offsets[n] + NN_angular[n];
+  }
+  small_box_radial_gnp.resize(
+    static_cast<std::size_t>(small_box_radial_edge_offsets[N]) *
+    (paramb.n_max_radial + 1));
+  const std::size_t angular_cache_size =
+    static_cast<std::size_t>(small_box_angular_edge_offsets[N]) *
+    (paramb.n_max_angular + 1);
+  small_box_angular_gn.resize(angular_cache_size);
+  small_box_angular_gnp.resize(angular_cache_size);
+#endif
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -8879,15 +8981,22 @@ void NEP::compute(
 #endif
 
   find_descriptor_small_box(
-    true, false, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
+    true, descriptor != nullptr, false, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
     NN_angular.data(), NL_angular.data(), type.data(), r12.data(), r12.data() + size_x12,
     r12.data() + size_x12 * 2, r12.data() + size_x12 * 3, r12.data() + size_x12 * 4,
     r12.data() + size_x12 * 5,
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
     gn_radial.data(), gnp_radial.data(), gn_angular.data(), gnp_angular.data(),
 #endif
-    Fp.data(), sum_fxyz.data(), potential.data(), nullptr, nullptr, nullptr, false, nullptr,
-    ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+    Fp.data(), sum_fxyz.data(), potential.data(), descriptor ? descriptor->data() : nullptr,
+    nullptr, nullptr, false, nullptr,
+    ann_q_group, ann_hidden, ann_coeff, ann_fp_group
+#ifndef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    , small_box_radial_edge_offsets.data(), small_box_radial_gnp.data(),
+    small_box_angular_edge_offsets.data(), small_box_angular_gn.data(),
+    small_box_angular_gnp.data()
+#endif
+    );
   if (phase_timing) {
     phase_descriptor = nep_phase_elapsed(phase_mark);
   }
@@ -8898,7 +9007,11 @@ void NEP::compute(
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
     gn_radial.data(), gnp_radial.data(),
 #endif
-    force.data(), force.data() + N, force.data() + N * 2, virial.data());
+    force.data(), force.data() + N, force.data() + N * 2, virial.data()
+#ifndef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    , small_box_radial_edge_offsets.data(), small_box_radial_gnp.data()
+#endif
+    );
   if (phase_timing) {
     phase_radial = nep_phase_elapsed(phase_mark);
   }
@@ -8910,7 +9023,12 @@ void NEP::compute(
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
     gn_angular.data(), gnp_angular.data(),
 #endif
-    force.data(), force.data() + N, force.data() + N * 2, virial.data());
+    force.data(), force.data() + N, force.data() + N * 2, virial.data()
+#ifndef USE_TABLE_FOR_RADIAL_FUNCTIONS
+    , small_box_angular_edge_offsets.data(), small_box_angular_gn.data(),
+    small_box_angular_gnp.data()
+#endif
+    );
   if (phase_timing) {
     phase_angular = nep_phase_elapsed(phase_mark);
   }

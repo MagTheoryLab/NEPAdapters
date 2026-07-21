@@ -35,9 +35,9 @@ if(NEP_ADAPTERS_ENABLE_CUDA)
 endif()
 
 if(NEP_ADAPTERS_ENABLE_CUDA)
-  project(NEPAdapters VERSION 0.1.0 LANGUAGES CXX CUDA)
+  project(NEPAdapters VERSION 1.0.0 LANGUAGES CXX CUDA)
 else()
-  project(NEPAdapters VERSION 0.1.0 LANGUAGES CXX)
+  project(NEPAdapters VERSION 1.0.0 LANGUAGES CXX)
 endif()
 
 include(CMakePackageConfigHelpers)

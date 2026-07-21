@@ -13,9 +13,10 @@
 #  define NEP_ADAPTERS_API
 #endif
 
-#define NEP_ADAPTERS_API_VERSION_MAJOR 0
-#define NEP_ADAPTERS_API_VERSION_MINOR 3
+#define NEP_ADAPTERS_API_VERSION_MAJOR 1
+#define NEP_ADAPTERS_API_VERSION_MINOR 0
 #define NEP_ADAPTERS_API_VERSION_PATCH 0
+#define NEP_ADAPTERS_VERSION_STRING "1.0.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,7 +42,8 @@ typedef enum NepaCapabilityFlags {
   NEPA_CAPABILITY_SPIN_ENERGY_TRANSFER = 1u << 7u,
   NEPA_CAPABILITY_DIPOLE = 1u << 8u,
   NEPA_CAPABILITY_POLARIZABILITY = 1u << 9u,
-  NEPA_CAPABILITY_DFTD3 = 1u << 10u
+  NEPA_CAPABILITY_DFTD3 = 1u << 10u,
+  NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS = 1u << 11u
 } NepaCapabilityFlags;
 
 typedef enum NepaModelKind {
@@ -68,6 +70,14 @@ typedef struct NepaModelInfo {
   int32_t num_types;
   int32_t descriptor_dim;
 } NepaModelInfo;
+
+typedef struct NepaWorkspaceEstimate {
+  uint64_t model_bytes;
+  uint64_t workspace_bytes;
+  uint64_t total_bytes;
+  int32_t atom_capacity;
+  int32_t structure_capacity;
+} NepaWorkspaceEstimate;
 
 typedef struct NepaStructureBatch {
   int32_t num_structures;
@@ -106,6 +116,11 @@ typedef struct NepaFindDescriptorResult {
   /* Row-major per-atom descriptors with shape (total_atoms, descriptor_dim). */
   double* descriptors;
 } NepaFindDescriptorResult;
+
+typedef struct NepaEvaluateResult {
+  NepaFindForceResult prediction;
+  NepaFindDescriptorResult descriptor;
+} NepaEvaluateResult;
 
 typedef struct NepaDipoleResult {
   /* Row-major values with shape (num_structures, 3). */
@@ -229,10 +244,19 @@ NEP_ADAPTERS_API NepaStatus nepa_model_info(
 NEP_ADAPTERS_API NepaStatus nepa_model_kind(
     NepaModel* model,
     NepaModelKind* out);
+NEP_ADAPTERS_API NepaStatus nepa_estimate_workspace(
+    NepaModel* model,
+    int32_t atom_capacity,
+    int32_t structure_capacity,
+    NepaWorkspaceEstimate* out);
 NEP_ADAPTERS_API NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
     NepaFindForceResult* result);
+NEP_ADAPTERS_API NepaStatus nepa_evaluate_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaEvaluateResult* result);
 NEP_ADAPTERS_API NepaStatus nepa_find_charge_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,

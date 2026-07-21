@@ -529,6 +529,29 @@ class CudaModel : public nep_adapters::Model {
     return NEPA_STATUS_OK;
   }
 
+  NepaStatus estimate_workspace(
+      std::int32_t atom_capacity,
+      std::int32_t structure_capacity,
+      NepaWorkspaceEstimate& out) const override {
+    if (atom_capacity <= 0 || structure_capacity <= 0) {
+      return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    const auto plan =
+        nep_adapters::cuda_backend::make_internal_neighbor_workspace_plan(
+            protocol_,
+            static_cast<std::size_t>(atom_capacity),
+            static_cast<std::size_t>(structure_capacity));
+    const std::size_t model_bytes = device_.upload_summary().total_bytes;
+    const std::size_t workspace_bytes = plan.total_bytes();
+    out = {};
+    out.model_bytes = static_cast<std::uint64_t>(model_bytes);
+    out.workspace_bytes = static_cast<std::uint64_t>(workspace_bytes);
+    out.total_bytes = static_cast<std::uint64_t>(model_bytes + workspace_bytes);
+    out.atom_capacity = atom_capacity;
+    out.structure_capacity = structure_capacity;
+    return NEPA_STATUS_OK;
+  }
+
   NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) override {
@@ -1302,7 +1325,7 @@ class CudaEngine : public nep_adapters::Engine {
   nep_adapters::EngineInfo info() const override {
     return {
         "cuda",
-        "0.1.0",
+        NEP_ADAPTERS_VERSION_STRING,
         nep_adapters::to_mask(nep_adapters::Capability::device_input)};
   }
 
