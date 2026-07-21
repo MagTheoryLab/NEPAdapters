@@ -25,10 +25,17 @@ template <typename T>
 struct HasSpin<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
     : std::true_type {};
 
+// Each structure worker owns a NativeNep copy. These measured work floors keep
+// model-copy cost from dominating small ordinary batches.
+constexpr std::int64_t kForceBatchAtomsPerTypeWorker = 4;
+constexpr std::int64_t kDescriptorBatchAtomsPerTypeWorker = 10;
+
 template <typename NativeNep>
 class CpuModel final : public Model {
  public:
-  explicit CpuModel(const std::string& model_path) : nep_(model_path) {}
+  explicit CpuModel(const std::string& model_path) {
+    nep_.init_from_file(model_path, false);
+  }
 
   NepaModelKind model_kind() const override {
     if (nep_.paramb.model_type == 1) {
@@ -75,6 +82,7 @@ class CpuModel final : public Model {
         out.capabilities |= to_mask(Capability::spin_energy_transfer);
       } else {
         out.capabilities |= to_mask(Capability::dftd3);
+        out.capabilities |= NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS;
       }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
@@ -92,6 +100,16 @@ class CpuModel final : public Model {
     return find_force_batch_impl(batch, result);
   }
 
+  NepaStatus evaluate_batch(
+      const NepaStructureBatch& batch,
+      NepaEvaluateResult& result) override {
+    if (model_kind() != NEPA_MODEL_KIND_ORDINARY ||
+        result.descriptor.descriptors == nullptr) {
+      return NEPA_STATUS_UNSUPPORTED;
+    }
+    return find_force_batch_impl(batch, result.prediction, &result.descriptor);
+  }
+
   NepaStatus find_charge_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) override {
@@ -107,7 +125,8 @@ class CpuModel final : public Model {
 
   NepaStatus find_force_batch_impl(
       const NepaStructureBatch& batch,
-      NepaFindForceResult& result) {
+      NepaFindForceResult& result,
+      NepaFindDescriptorResult* descriptor_result = nullptr) {
     if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -169,6 +188,11 @@ class CpuModel final : public Model {
 
         std::vector<double> charge;
         std::vector<double> bec_soa;
+        std::vector<double> descriptor_soa;
+        if (descriptor_result != nullptr) {
+          descriptor_soa.assign(
+              static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
+        }
         if constexpr (HasSpin<NativeNep>::value) {
           if (native.paramb.spin_mode > 0) {
             std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
@@ -180,7 +204,7 @@ class CpuModel final : public Model {
               spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
-            std::vector<double> descriptor_soa(
+            descriptor_soa.assign(
                 static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
             std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
             std::vector<double> spin_transfer_soa;
@@ -231,7 +255,14 @@ class CpuModel final : public Model {
                 charge,
                 bec_soa);
           } else {
-            native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+            native.compute(
+                types,
+                box,
+                positions_soa,
+                potential,
+                force_soa,
+                virial_soa,
+                descriptor_soa.empty() ? nullptr : &descriptor_soa);
           }
         } else if (native.paramb.charge_mode > 0) {
           charge.assign(static_cast<std::size_t>(atom_count), 0.0);
@@ -246,7 +277,14 @@ class CpuModel final : public Model {
               charge,
               bec_soa);
         } else {
-          native.compute(types, box, positions_soa, potential, force_soa, virial_soa);
+          native.compute(
+              types,
+              box,
+              positions_soa,
+              potential,
+              force_soa,
+              virial_soa,
+              descriptor_soa.empty() ? nullptr : &descriptor_soa);
         }
 
         result.energy_per_structure[structure] =
@@ -278,6 +316,16 @@ class CpuModel final : public Model {
                   bec_soa[static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
+          if (descriptor_result != nullptr) {
+            for (std::int32_t component = 0;
+                 component < native.annmb.dim;
+                 ++component) {
+              descriptor_result->descriptors[
+                  static_cast<std::size_t>(global_atom) * native.annmb.dim +
+                  component] = descriptor_soa[
+                      static_cast<std::size_t>(component) * atom_count + atom];
+            }
+          }
         }
 
         if (result.virials_row_major9 != nullptr) {
@@ -296,12 +344,15 @@ class CpuModel final : public Model {
     };
 
 #if defined(_OPENMP)
-    bool use_structure_parallel = false;
-    if constexpr (HasSpin<NativeNep>::value) {
-      use_structure_parallel =
-          nep_.paramb.spin_mode > 0 && batch.num_structures > 1 &&
-          omp_get_max_threads() > 1;
-    }
+    const NepaModelKind kind = model_kind();
+    const int structure_threads =
+        std::min<int>(batch.num_structures, omp_get_max_threads());
+    const std::int64_t ordinary_parallel_min_atoms =
+        kForceBatchAtomsPerTypeWorker * nep_.paramb.num_types * structure_threads;
+    const bool use_structure_parallel = structure_threads > 1 &&
+        (kind == NEPA_MODEL_KIND_SPIN ||
+         (kind == NEPA_MODEL_KIND_ORDINARY &&
+          batch.total_atoms >= ordinary_parallel_min_atoms));
 #else
     const bool use_structure_parallel = false;
 #endif
@@ -309,23 +360,25 @@ class CpuModel final : public Model {
     try {
       if (use_structure_parallel) {
 #if defined(_OPENMP)
-        const int num_threads =
-            std::min<int>(batch.num_structures, omp_get_max_threads());
         std::vector<NativeNep> workers(
-            static_cast<std::size_t>(num_threads),
+            static_cast<std::size_t>(structure_threads),
             nep_);
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(num_threads)
-        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-          try {
-            statuses[static_cast<std::size_t>(structure)] =
-                process_structure(
-                    workers[static_cast<std::size_t>(omp_get_thread_num())],
-                    structure);
-          } catch (const std::exception&) {
-            statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+#pragma omp parallel num_threads(structure_threads)
+        {
+          omp_set_num_threads(1);
+#pragma omp for schedule(dynamic, 1)
+          for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+            try {
+              statuses[static_cast<std::size_t>(structure)] =
+                  process_structure(
+                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      structure);
+            } catch (const std::exception&) {
+              statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+            }
           }
         }
         for (const NepaStatus status : statuses) {
@@ -367,8 +420,9 @@ class CpuModel final : public Model {
       return NEPA_STATUS_UNSUPPORTED;
     }
 
-    try {
-      for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+    auto process_structure = [&](
+        NativeNep& native,
+        const std::int32_t structure) -> NepaStatus {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;
         }
@@ -402,7 +456,7 @@ class CpuModel final : public Model {
             box.data());
 
         if constexpr (HasSpin<NativeNep>::value) {
-          if (nep_.paramb.spin_mode > 0) {
+          if (native.paramb.spin_mode > 0) {
             if (batch.spins_aos3 == nullptr) {
               return NEPA_STATUS_INVALID_ARGUMENT;
             }
@@ -415,12 +469,13 @@ class CpuModel final : public Model {
               spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
-            nep_.find_descriptor(types, box, positions_soa, spins_soa, descriptor_soa);
+            native.find_descriptor(
+                types, box, positions_soa, spins_soa, descriptor_soa);
           } else {
-            nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+            native.find_descriptor(types, box, positions_soa, descriptor_soa);
           }
         } else {
-          nep_.find_descriptor(types, box, positions_soa, descriptor_soa);
+          native.find_descriptor(types, box, positions_soa, descriptor_soa);
         }
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
@@ -430,6 +485,63 @@ class CpuModel final : public Model {
                 static_cast<std::size_t>(global_atom) * descriptor_dim + component] =
                 descriptor_soa[
                     static_cast<std::size_t>(component) * atom_count + atom];
+          }
+        }
+        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+    };
+
+#if defined(_OPENMP)
+    const int structure_threads =
+        std::min<int>(batch.num_structures, omp_get_max_threads());
+    const std::int64_t ordinary_parallel_min_atoms =
+        kDescriptorBatchAtomsPerTypeWorker * nep_.paramb.num_types * structure_threads;
+    const NepaModelKind kind = model_kind();
+    const bool use_structure_parallel = structure_threads > 1 &&
+        (kind == NEPA_MODEL_KIND_SPIN ||
+         (kind == NEPA_MODEL_KIND_ORDINARY &&
+          batch.total_atoms >= ordinary_parallel_min_atoms));
+#else
+    const bool use_structure_parallel = false;
+#endif
+
+    try {
+      if (use_structure_parallel) {
+#if defined(_OPENMP)
+        std::vector<NativeNep> workers(
+            static_cast<std::size_t>(structure_threads),
+            nep_);
+        std::vector<NepaStatus> statuses(
+            static_cast<std::size_t>(batch.num_structures),
+            NEPA_STATUS_OK);
+#pragma omp parallel num_threads(structure_threads)
+        {
+          omp_set_num_threads(1);
+#pragma omp for schedule(dynamic, 1)
+          for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+            try {
+              statuses[static_cast<std::size_t>(structure)] =
+                  process_structure(
+                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      structure);
+            } catch (const std::exception&) {
+              statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
+            }
+          }
+        }
+        for (const NepaStatus status : statuses) {
+          if (status != NEPA_STATUS_OK) {
+            return status;
+          }
+        }
+#endif
+      } else {
+        for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+          if (is_cancelled()) {
+            return NEPA_STATUS_CANCELLED;
+          }
+          const NepaStatus status = process_structure(nep_, structure);
+          if (status != NEPA_STATUS_OK) {
+            return status;
           }
         }
       }
@@ -779,7 +891,7 @@ class CpuEngine final : public Engine {
       capabilities |= to_mask(Capability::spin) |
                       to_mask(Capability::spin_energy_transfer);
     }
-    return {name_, "external", capabilities};
+    return {name_, NEP_ADAPTERS_VERSION_STRING, capabilities};
   }
 
   NepaStatus load_model(
@@ -789,13 +901,8 @@ class CpuEngine final : public Engine {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
 
-    try {
-      out = std::make_unique<CpuModel<NativeNep>>(model_path);
-      return NEPA_STATUS_OK;
-    } catch (const std::exception&) {
-      out.reset();
-      return NEPA_STATUS_RUNTIME_ERROR;
-    }
+    out = std::make_unique<CpuModel<NativeNep>>(model_path);
+    return NEPA_STATUS_OK;
   }
 
  private:

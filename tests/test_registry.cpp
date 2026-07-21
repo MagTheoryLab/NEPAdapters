@@ -45,7 +45,10 @@ class FakeEngine : public nep_adapters::Engine {
 }  // namespace
 
 int main() {
-  if (nepa_api_version() != 300) {
+  if (nepa_api_version() !=
+      NEP_ADAPTERS_API_VERSION_MAJOR * 10000 +
+          NEP_ADAPTERS_API_VERSION_MINOR * 100 +
+          NEP_ADAPTERS_API_VERSION_PATCH) {
     return EXIT_FAILURE;
   }
 
@@ -95,6 +98,18 @@ int main() {
 
   NepaModelInfo model_info{};
   if (nepa_model_info(model, &model_info) != NEPA_STATUS_UNSUPPORTED) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+
+  NepaWorkspaceEstimate workspace{};
+  if (nepa_estimate_workspace(model, 1, 1, &workspace) !=
+      NEPA_STATUS_UNSUPPORTED) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
+  }
+  if (nepa_estimate_workspace(model, 0, 1, &workspace) !=
+      NEPA_STATUS_INVALID_ARGUMENT) {
     nepa_free_model(model);
     return EXIT_FAILURE;
   }

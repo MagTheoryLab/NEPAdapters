@@ -208,7 +208,8 @@ public:
     const std::vector<double>& position,
     std::vector<double>& potential,
     std::vector<double>& force,
-    std::vector<double>& virial);
+    std::vector<double>& virial,
+    std::vector<double>* descriptor = nullptr);
 
   void compute(
     const std::vector<int>& type,
@@ -344,6 +345,11 @@ public:
   std::vector<double> ann_hidden;
   std::vector<double> ann_coeff;
   std::vector<double> ann_fp_group;
+  std::vector<int> small_box_radial_edge_offsets;
+  std::vector<double> small_box_radial_gnp;
+  std::vector<int> small_box_angular_edge_offsets;
+  std::vector<double> small_box_angular_gn;
+  std::vector<double> small_box_angular_gnp;
   std::vector<double> D_real;
   std::vector<double> charge_derivative;
   std::vector<double> parameters;

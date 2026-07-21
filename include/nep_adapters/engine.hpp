@@ -29,9 +29,27 @@ class Model {
     return NEPA_MODEL_KIND_ORDINARY;
   }
 
+  virtual NepaStatus estimate_workspace(
+      std::int32_t atom_capacity,
+      std::int32_t structure_capacity,
+      NepaWorkspaceEstimate& out) const {
+    (void)atom_capacity;
+    (void)structure_capacity;
+    out = {};
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+
   virtual NepaStatus find_force_batch(
       const NepaStructureBatch& batch,
       NepaFindForceResult& result) = 0;
+
+  virtual NepaStatus evaluate_batch(
+      const NepaStructureBatch& batch,
+      NepaEvaluateResult& result) {
+    (void)batch;
+    (void)result;
+    return NEPA_STATUS_UNSUPPORTED;
+  }
 
   virtual NepaStatus find_charge_batch(
       const NepaStructureBatch& batch,

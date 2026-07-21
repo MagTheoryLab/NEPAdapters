@@ -23,6 +23,31 @@ class SpinStructure:
         self.spins = np.asarray(spins, dtype=np.float64)
 
 
+class SpinAliasStructure(SpinStructure):
+    def __init__(self, spins, *, source, extra=None):
+        super().__init__(spins)
+        del self.spins
+        values = np.asarray(spins, dtype=np.float64)
+        if source == "atomic_spin":
+            self.atomic_properties = {"spin": values}
+        elif source == "atomic_spins":
+            self.atomic_properties = {"spins": values}
+        elif source == "arrays_spin":
+            self.arrays = {"spin": values}
+        elif source == "initial_magmoms":
+            self.arrays = {"initial_magmoms": values}
+        elif source == "scalar_initial_magmoms":
+            self.arrays = {"initial_magmoms": values[:, 2]}
+        elif source == "missing":
+            pass
+        else:
+            raise AssertionError(f"unknown test source {source}")
+        if extra is not None:
+            if not hasattr(self, "arrays"):
+                self.arrays = {}
+            self.arrays.update(extra)
+
+
 def read_reference(path):
     blocks = {}
     tokens = open(path, encoding="utf-8").read().split()
@@ -71,6 +96,14 @@ def main():
             spins,
             atom_counts,
         )
+        batch_size = 32
+        batch_descriptors = model.descriptors_spin(
+            np.tile(types, batch_size),
+            np.tile(box, (batch_size, 1)),
+            np.tile(structure.positions, (batch_size, 1)),
+            np.tile(spins, (batch_size, 1)),
+            np.full(batch_size, len(types), dtype=np.int32),
+        )
         try:
             model.calculate(types, box, structure.positions, atom_counts)
         except ValueError:
@@ -95,6 +128,13 @@ def main():
         raise AssertionError("spin virial differs from fixture")
     if not np.allclose(descriptors.reshape(-1), reference["descriptor"], rtol=0.0, atol=1.0e-10):
         raise AssertionError("spin descriptors differ from fixture")
+    if not np.allclose(
+        batch_descriptors,
+        np.tile(descriptors, (batch_size, 1)),
+        rtol=0.0,
+        atol=1.0e-10,
+    ):
+        raise AssertionError("parallel spin descriptor batch differs from serial result")
     with nep_adapters.NEPCalculator(model_path) as calculator:
         prediction = calculator.predict_spin_structures(structure)
         explicit_prediction = calculator.predict_spin_structures(structure, spins)
@@ -113,6 +153,56 @@ def main():
         atom_descriptors = calculator.get_spin_descriptor(structure)
         mean_descriptors = calculator.get_spin_structures_descriptor([structure])
         calculated = calculator.calculate_spin(structure)
+        for source in (
+            "atomic_spin",
+            "atomic_spins",
+            "arrays_spin",
+            "initial_magmoms",
+        ):
+            alias_prediction = calculator.predict_spin_structures(
+                SpinAliasStructure(spins, source=source)
+            )
+            if not np.allclose(alias_prediction.mforces, mforces):
+                raise AssertionError(f"{source} spin alias differs from explicit spins")
+        matching_initial = SpinAliasStructure(
+            spins,
+            source="arrays_spin",
+            extra={"initial_magmoms": spins.copy()},
+        )
+        calculator.predict_spin_structures(matching_initial)
+        calculator.predict_spin_structures(matching_initial, spins=spins.copy())
+        invalid_sources = [
+            SpinAliasStructure(spins, source="scalar_initial_magmoms"),
+            SpinAliasStructure(spins, source="missing"),
+            SpinAliasStructure(
+                spins,
+                source="arrays_spin",
+                extra={"initial_magmoms": spins + 1.0},
+            ),
+            SpinAliasStructure(
+                spins,
+                source="atomic_spin",
+                extra={"spins": spins + 1.0},
+            ),
+        ]
+        for invalid in invalid_sources:
+            try:
+                calculator.predict_spin_structures(invalid)
+            except nep_adapters.InvalidInputError:
+                pass
+            else:
+                raise AssertionError("invalid or ambiguous spin input must fail closed")
+        try:
+            calculator.predict_spin_structures(
+                matching_initial,
+                spins=spins + 1.0,
+            )
+        except nep_adapters.InvalidInputError:
+            pass
+        else:
+            raise AssertionError(
+                "explicit spins differing from ASE metadata must fail closed"
+            )
         try:
             calculator.predict_spin_arrays(
                 types,

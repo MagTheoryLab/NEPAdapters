@@ -7,10 +7,10 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "nep-adapters"
-version = "0.1.0"
+version = "1.0.0"
 description = "NEP runtime adapters for Python and LAMMPS frontends"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "numpy",
 ]
@@ -30,6 +30,7 @@ NEP_ADAPTERS_BUILD_TESTS = "OFF"
 NEP_ADAPTERS_BUILD_BENCHMARKS = "OFF"
 NEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM = "OFF"
 NEP_ADAPTERS_CPU_ENABLE_OPENMP = "ON"
+NEP_ADAPTERS_CPU_USE_RADIAL_TABLE = "OFF"
 NEP_ADAPTERS_ENABLE_PYTHON = "ON"
 NEP_ADAPTERS_ENABLE_LAMMPS = "OFF"
 NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES = "OFF"

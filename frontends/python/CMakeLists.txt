@@ -39,6 +39,7 @@ set_target_properties(
 )
 
 if(TARGET NEPAdapters::cuda)
+  find_package(CUDAToolkit REQUIRED)
   pybind11_add_module(nep_adapters_python_gpu MODULE
     src/python_module.cpp
   )
@@ -46,6 +47,7 @@ if(TARGET NEPAdapters::cuda)
     nep_adapters_python_gpu
     PRIVATE
       NEPAdapters::cuda
+      CUDA::cudart_static
   )
   target_compile_definitions(
     nep_adapters_python_gpu
@@ -123,6 +125,20 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
       "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_LIST_DIR}/tests/test_calculator.py"
   )
+
+  add_test(
+    NAME nep_adapters_python_runtime_contract_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_runtime_contract.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_runtime_contract_test
+    PROPERTIES
+      LABELS "contract;frontend;python;runtime;cpu"
+      ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt"
+  )
   set_tests_properties(
     nep_adapters_python_calculator_test
     PROPERTIES
@@ -142,7 +158,7 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
     PROPERTIES
       LABELS "production;contract;oracle;frontend;python;cpu;qnep;dftd3;dipole;polarizability;cancellation"
       ENVIRONMENT
-        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_QNEP_TEST_DATA_DIR=${NEP_ADAPTERS_QNEP_TEST_DATA_DIR};NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR=${PROJECT_SOURCE_DIR}/tests/fixtures/production_api"
+        "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_QNEP_TEST_DATA_DIR=${NEP_ADAPTERS_QNEP_TEST_DATA_DIR};NEP_ADAPTERS_PRODUCTION_FIXTURE_DIR=${PROJECT_SOURCE_DIR}/tests/fixtures/production_api"
   )
 
   add_test(
@@ -172,7 +188,7 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
       PROPERTIES
         LABELS "parity;frontend;python;calculator;cpu;spin"
         ENVIRONMENT
-          "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt;NEP_ADAPTERS_PYTHON_SPIN_REFERENCE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
+          "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt;NEP_ADAPTERS_PYTHON_SPIN_REFERENCE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
     )
 
     if(TARGET NEPAdapters::cuda)

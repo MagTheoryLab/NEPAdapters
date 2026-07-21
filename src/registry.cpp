@@ -173,6 +173,25 @@ NepaStatus nepa_model_kind(NepaModel* model, NepaModelKind* out) {
   }
 }
 
+NepaStatus nepa_estimate_workspace(
+    NepaModel* model,
+    int32_t atom_capacity,
+    int32_t structure_capacity,
+    NepaWorkspaceEstimate* out) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || out == nullptr || atom_capacity <= 0 ||
+      structure_capacity <= 0) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  try {
+    return model->impl->estimate_workspace(
+        atom_capacity, structure_capacity, *out);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
 NepaStatus nepa_find_force_batch(
     NepaModel* model,
     const NepaStructureBatch* batch,
@@ -202,6 +221,32 @@ NepaStatus nepa_find_force_batch(
 
   try {
     return model->impl->find_force_batch(*batch, *result);
+  } catch (const std::exception& error) {
+    nep_adapters::set_last_error(error.what());
+    return NEPA_STATUS_RUNTIME_ERROR;
+  }
+}
+
+NepaStatus nepa_evaluate_batch(
+    NepaModel* model,
+    const NepaStructureBatch* batch,
+    NepaEvaluateResult* result) {
+  nep_adapters::clear_last_error();
+  if (model == nullptr || batch == nullptr || result == nullptr) {
+    return NEPA_STATUS_INVALID_ARGUMENT;
+  }
+  if (!nep_adapters::is_fully_periodic(*batch)) {
+    nep_adapters::set_last_error(
+        "NEPAdapters supports fully periodic structures only (pbc=[1,1,1])");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  if (model->impl->model_kind() != NEPA_MODEL_KIND_ORDINARY) {
+    nep_adapters::set_last_error(
+        "evaluate_batch currently supports ordinary NEP models only");
+    return NEPA_STATUS_UNSUPPORTED;
+  }
+  try {
+    return model->impl->evaluate_batch(*batch, *result);
   } catch (const std::exception& error) {
     nep_adapters::set_last_error(error.what());
     return NEPA_STATUS_RUNTIME_ERROR;

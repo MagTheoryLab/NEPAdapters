@@ -11,12 +11,12 @@ on:
         default: ""
         type: string
       build_gpu:
-        description: Build Linux CUDA wheels
+        description: Build combined Linux CPU+CUDA wheels
         required: false
         default: true
         type: boolean
       publish_pypi:
-        description: Publish CPU artifacts to PyPI
+        description: Publish the complete package set to PyPI
         required: false
         default: false
         type: boolean
@@ -74,15 +74,12 @@ jobs:
           if-no-files-found: error
 
   cpu_wheels:
-    name: CPU wheels (${{ matrix.label }})
+    name: Platform wheels (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            archs: x86_64
           - os: macos-15-intel
             label: macos-x86_64
             archs: x86_64
@@ -100,22 +97,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build CPU wheels
+      - name: Build platform wheels
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_BEFORE_ALL_MACOS: brew install libomp
-      - name: Audit CPU wheel contents
+      - name: Audit platform wheel contents
         run: python tools/check_wheel_contents.py --variant cpu --wheel-dir wheelhouse
       - uses: actions/upload-artifact@v4
         with:
-          name: python-cpu-${{ matrix.label }}
+          name: python-platform-${{ matrix.label }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   gpu_wheels:
-    name: CUDA wheels (Linux x86_64)
-    if: github.event_name == 'release' || inputs.build_gpu
+    name: Combined CPU+CUDA wheels (Linux x86_64)
+    if: >-
+      github.event_name == 'release' ||
+      inputs.tag_name != '' ||
+      inputs.build_gpu ||
+      inputs.publish_pypi
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +126,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build CUDA wheels
+      - name: Build combined wheels
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS_LINUX: x86_64
@@ -139,18 +140,17 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >-
             PATH=/usr/local/cuda/bin:$PATH
             CUDACXX=/usr/local/cuda/bin/nvcc
-            SKBUILD_WHEEL_BUILD_TAG=1cuda
             CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
             -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
             -DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual"
           CIBW_TEST_COMMAND_LINUX: >-
             NEP_ADAPTERS_EXPECT_GPU_MODULE=1
             python {project}/frontends/python/tests/test_wheel_install.py
-      - name: Audit CUDA wheel contents
-        run: python tools/check_wheel_contents.py --variant gpu --wheel-dir wheelhouse
+      - name: Audit combined wheel contents
+        run: python tools/check_wheel_contents.py --variant combined --wheel-dir wheelhouse
       - uses: actions/upload-artifact@v4
         with:
-          name: python-gpu-linux-x86_64
+          name: python-combined-linux-x86_64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -162,7 +162,7 @@ jobs:
       (github.event_name == 'release' || inputs.tag_name != '') &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      (needs.gpu_wheels.result == 'success' || needs.gpu_wheels.result == 'skipped')
+      needs.gpu_wheels.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -180,14 +180,14 @@ jobs:
           overwrite_files: true
 
   publish_pypi:
-    name: Publish CPU packages to PyPI
+    name: Publish packages to PyPI
     needs: [sdist, cpu_wheels, gpu_wheels]
     if: >-
       always() &&
       (github.event_name == 'release' || inputs.publish_pypi) &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      (needs.gpu_wheels.result == 'success' || needs.gpu_wheels.result == 'skipped')
+      needs.gpu_wheels.result == 'success'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -199,7 +199,13 @@ jobs:
           path: dist
       - uses: actions/download-artifact@v4
         with:
-          pattern: python-cpu-*
+          pattern: python-platform-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: needs.gpu_wheels.result == 'success'
+        with:
+          pattern: python-combined-*
           path: dist
           merge-multiple: true
       - name: Publish

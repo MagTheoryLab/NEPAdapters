@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,95 @@ def read_qnep_structure():
 
 
 class ProductionApiTest(unittest.TestCase):
+    def test_extxyz_string_pbc_is_accepted(self):
+        structure = replace(
+            read_labeled_structure(FIXTURE_ROOT / "dftd3" / "structure.xyz"),
+            pbc="T F T",
+        )
+        with NEPCalculator(FIXTURE_ROOT / "dftd3" / "nep.txt") as calculator:
+            _, _, _, pbc = calculator.compose_structures([structure])
+        np.testing.assert_array_equal(pbc, [[1, 0, 1]])
+
+    def test_ordinary_parallel_batch_matches_single_structure(self):
+        structure = read_labeled_structure(
+            FIXTURE_ROOT / "dftd3" / "structure.xyz"
+        )
+        structures = [structure] * 32
+        with NEPCalculator(FIXTURE_ROOT / "dftd3" / "nep.txt") as calculator:
+            single = calculator.predict_structures([structure])
+            batch = calculator.predict_structures(structures)
+            single_descriptors = calculator.predict_descriptors([structure])
+            batch_descriptors = calculator.predict_descriptors(structures)
+
+        np.testing.assert_allclose(
+            batch.energy, np.tile(single.energy, 32), atol=1e-12, rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            batch.potential,
+            np.tile(single.potential, 32),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.forces,
+            np.tile(single.forces, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.virials,
+            np.tile(single.virials, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch.structure_virials,
+            np.tile(single.structure_virials, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+        np.testing.assert_allclose(
+            batch_descriptors,
+            np.tile(single_descriptors, (32, 1)),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+    def test_ordinary_prediction_with_descriptors_matches_separate_calls(self):
+        structure = read_labeled_structure(
+            FIXTURE_ROOT / "dftd3" / "structure.xyz"
+        )
+        structures = [structure] * 8
+        with NEPCalculator(FIXTURE_ROOT / "dftd3" / "nep.txt") as calculator:
+            self.assertTrue(
+                calculator.model_info.supports("evaluate_with_descriptors")
+            )
+            separate_prediction = calculator.predict_structures(structures)
+            separate_descriptors = calculator.predict_descriptors(structures)
+            fused_prediction, fused_descriptors = (
+                calculator.predict_with_descriptors_structures(structures)
+            )
+            empty_prediction, empty_descriptors = (
+                calculator.predict_with_descriptors_structures([])
+            )
+
+        for separate, fused in (
+            (separate_prediction.energy, fused_prediction.energy),
+            (separate_prediction.potential, fused_prediction.potential),
+            (separate_prediction.forces, fused_prediction.forces),
+            (separate_prediction.virials, fused_prediction.virials),
+            (
+                separate_prediction.structure_virials,
+                fused_prediction.structure_virials,
+            ),
+            (separate_descriptors, fused_descriptors),
+        ):
+            np.testing.assert_array_equal(fused, separate)
+        self.assertEqual(empty_prediction.energy.shape, (0,))
+        self.assertEqual(
+            empty_descriptors.shape, (0, calculator.descriptor_dim)
+        )
+
     def test_qnep_explicit_low_and_high_level_api(self):
         structure = read_qnep_structure()
         model_path = QNEP_ROOT / "nep.txt"

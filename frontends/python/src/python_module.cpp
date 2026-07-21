@@ -1,6 +1,7 @@
 #include "nep_adapters/api.h"
 #if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
 #include "nep_adapters/engines/cuda.hpp"
+#include <cuda_runtime.h>
 #else
 #include "nep_adapters/engines/cpu.hpp"
 #endif
@@ -229,6 +230,22 @@ class PyModel {
     return out;
   }
 
+  py::dict workspace_estimate(
+      std::int32_t atom_capacity,
+      std::int32_t structure_capacity) const {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    NepaWorkspaceEstimate estimate{};
+    check_status(nepa_estimate_workspace(
+        model.get(), atom_capacity, structure_capacity, &estimate));
+    py::dict out;
+    out["model_bytes"] = estimate.model_bytes;
+    out["workspace_bytes"] = estimate.workspace_bytes;
+    out["total_bytes"] = estimate.total_bytes;
+    out["atom_capacity"] = estimate.atom_capacity;
+    out["structure_capacity"] = estimate.structure_capacity;
+    return out;
+  }
+
   py::tuple calculate(
       py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
       py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
@@ -276,6 +293,60 @@ class PyModel {
       check_status(nepa_find_force_batch(model.get(), &batch, &result));
     }
     return py::make_tuple(potentials, forces, virials);
+  }
+
+  py::tuple calculate_with_descriptors(
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> types,
+      py::array_t<double, py::array::c_style | py::array::forcecast> boxes,
+      py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+      py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> atom_counts,
+      py::object pbc_object) {
+    const std::shared_ptr<NepaModel> model = snapshot_model();
+    NepaModelInfo info{};
+    check_status(nepa_model_info(model.get(), &info));
+    if ((info.capabilities & NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS) == 0u ||
+        info.descriptor_dim <= 0) {
+      throw std::runtime_error(
+          "prediction with descriptors is unsupported by this model/backend");
+    }
+
+    PreparedBatch input =
+        prepare_batch(types, boxes, positions, atom_counts, pbc_object);
+    py::array_t<double> potentials(static_cast<py::ssize_t>(input.total_atoms));
+    py::array_t<double> forces({input.total_atoms, static_cast<std::int32_t>(3)});
+    py::array_t<double> virials({input.total_atoms, static_cast<std::int32_t>(9)});
+    py::array_t<double> descriptors({input.total_atoms, info.descriptor_dim});
+    std::vector<double> energies(
+        static_cast<std::size_t>(input.structure_count), 0.0);
+    std::vector<double> structure_virials(
+        static_cast<std::size_t>(input.structure_count) * 9, 0.0);
+
+    NepaStructureBatch batch{};
+    batch.num_structures = input.structure_count;
+    batch.total_atoms = input.total_atoms;
+    batch.atom_counts = input.atom_counts;
+    batch.atom_offsets = input.offsets.data();
+    batch.types = input.types;
+    batch.positions_aos3 = input.positions;
+    batch.boxes_row_major9 = input.boxes;
+    batch.pbc_flags3 = input.pbc;
+
+    NepaEvaluateResult result{};
+    result.prediction.energy_per_structure = energies.data();
+    result.prediction.potential_per_atom =
+        static_cast<double*>(potentials.request().ptr);
+    result.prediction.forces_aos3 = static_cast<double*>(forces.request().ptr);
+    result.prediction.virials_row_major9 = structure_virials.data();
+    result.prediction.virials_per_atom_row_major9 =
+        static_cast<double*>(virials.request().ptr);
+    result.descriptor.descriptors =
+        static_cast<double*>(descriptors.request().ptr);
+
+    {
+      py::gil_scoped_release release;
+      check_status(nepa_evaluate_batch(model.get(), &batch, &result));
+    }
+    return py::make_tuple(potentials, forces, virials, descriptors);
   }
 
   py::tuple calculate_charge(
@@ -736,6 +807,14 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("atom_counts"),
           py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def(
+          "calculate_with_descriptors",
+          &PyModel::calculate_with_descriptors,
+          py::arg("types"),
+          py::arg("boxes"),
+          py::arg("positions"),
+          py::arg("atom_counts"),
+          py::arg("pbc") = py::make_tuple(1, 1, 1))
+      .def(
           "dipoles",
           &PyModel::dipoles,
           py::arg("types"),
@@ -808,6 +887,11 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
           py::arg("pbc") = py::make_tuple(1, 1, 1))
       .def("cancel", &PyModel::cancel)
       .def("reset_cancel", &PyModel::reset_cancel)
+      .def(
+          "workspace_estimate",
+          &PyModel::workspace_estimate,
+          py::arg("atom_capacity"),
+          py::arg("structure_capacity") = 1)
       .def("close", &PyModel::close)
       .def(
           "__enter__",
@@ -819,6 +903,63 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
       .def("model_info", &PyModel::model_info);
 
 #if defined(NEP_ADAPTERS_PYTHON_GPU_MODULE)
+  module.def("cuda_runtime_info", []() {
+    py::dict out;
+    int driver_version = 0;
+    int runtime_version = 0;
+    const cudaError_t driver_status = cudaDriverGetVersion(&driver_version);
+    const cudaError_t runtime_status = cudaRuntimeGetVersion(&runtime_version);
+    int device_count = 0;
+    const cudaError_t count_status = cudaGetDeviceCount(&device_count);
+    out["driver_version"] =
+        driver_status == cudaSuccess ? py::cast(driver_version) : py::none();
+    out["runtime_version"] =
+        runtime_status == cudaSuccess ? py::cast(runtime_version) : py::none();
+    out["devices"] = py::list();
+    out["free_memory_bytes"] = py::none();
+    if (count_status != cudaSuccess) {
+      out["available"] = false;
+      out["reason"] = count_status == cudaErrorInsufficientDriver
+          ? "driver_unavailable"
+          : "runtime_unavailable";
+      out["detail"] = cudaGetErrorString(count_status);
+      cudaGetLastError();
+      return out;
+    }
+    py::list devices;
+    for (int index = 0; index < device_count; ++index) {
+      cudaDeviceProp properties{};
+      const cudaError_t property_status =
+          cudaGetDeviceProperties(&properties, index);
+      if (property_status != cudaSuccess) {
+        cudaGetLastError();
+        continue;
+      }
+      py::dict device;
+      device["index"] = index;
+      device["name"] = properties.name;
+      device["major"] = properties.major;
+      device["minor"] = properties.minor;
+      device["total_memory_bytes"] = properties.totalGlobalMem;
+      devices.append(device);
+    }
+    out["devices"] = devices;
+    out["available"] = py::len(devices) > 0;
+    out["reason"] = py::len(devices) > 0 ? "available" : "no_device";
+    out["detail"] = py::len(devices) > 0
+        ? "CUDA runtime and at least one device are available."
+        : "CUDA runtime reported no usable devices.";
+    if (py::len(devices) > 0 && cudaSetDevice(0) == cudaSuccess) {
+      std::size_t free_bytes = 0;
+      std::size_t total_bytes = 0;
+      if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+        out["free_memory_bytes"] = free_bytes;
+      } else {
+        cudaGetLastError();
+      }
+    }
+    return out;
+  });
   module.def("register_cuda", []() {
     if (nepa_register_cuda_engine() != 1) {
       throw std::runtime_error("failed to register cuda engine");
