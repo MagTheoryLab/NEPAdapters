@@ -81,7 +81,7 @@ CPU LAMMPS pair 通过 LAMMPS 形状的 external-neighbor 契约进入 `cpu`，�
 - `nep/cpu`：CPU NEP；
 - `nep/gpu`、`nep/gpu/kk`、`nep/gpu/kk/device`：CUDA Kokkos NEP。
 
-pair 内部能够识别 spin capability，并要求 CPU 路径的 `atom_style spin` 或 CUDA 路径的 `atom_style spin/kk` 提供 `sp` 和 `fm`。单 rank、全周期 spin pair 计算已通过真实 LAMMPS 端到端门禁，属于生产 frontend；MPI 多 rank 仍不在当前发布范围。不要虚构未注册的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。
+pair 内部能够识别 spin capability，并要求 CPU 路径的 `atom_style spin` 或 CUDA 路径的 `atom_style spin/kk` 提供 `sp` 和 `fm`。CPU 与 CUDA 单 rank、全周期 spin pair 计算已通过真实 LAMMPS 端到端门禁。CUDA/Kokkos spin 还在 Sai V100 单节点完成了 1/2/4/8 MPI ranks 的专项正确性、TSPIN/dynspin 和扩展性验证；常规 CTest 目前仍只注册单 rank spin plugin case。CPU spin MPI 尚无同等级正式门禁，不能把 CUDA 的多 rank 结论扩大到全部后端。不要虚构未注册的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。
 
 ## 公共 API 与 engine SPI
 
@@ -97,14 +97,15 @@ engine SPI 面向 engine 实现者，位于 `engine.hpp`；它不是面向应用
 
 ## 打包策略
 
-PyPI 只有一个 `nep-adapters` distribution 和一个版本序列。Linux x86_64 发布 wheel 同时包含独立的 `nep_cpu` 与 `nep_gpu` 扩展；macOS 和 Windows 没有受支持的 CUDA 运行面，只包含 `nep_cpu`。所有平台都不包含 LAMMPS。
+Python 发布设计只有一个 `nep-adapters` distribution 和一个版本序列；当前 PyPI 尚无正式包。计划中的 Linux x86_64 wheel 同时包含独立的 `nep_cpu` 与 `nep_gpu` 扩展；macOS 和 Windows 没有受支持的 CUDA 运行面，只包含 `nep_cpu`。所有平台都不包含 LAMMPS。
 
 导入包或选择 `backend="cpu"` 不加载 CUDA；只有显式选择 `backend="cuda"` 才加载 GPU 模块。CUDA 加载或模型能力失败时直接报错，不允许切换到 CPU。`auto` 属于 NepTrainKit 等调用方策略，不进入 backend registry。
 
 LAMMPS integration 由源码仓库单独构建：
 
-- 条件允许时优先 runtime plugin；
-- 无法加载 plugin 的 LAMMPS 构建可使用独立 source integration；
+- runtime plugin 是当前正式支持并持续测试的安装方式；
+- pair 源码保留 `PairStyle` 宏，技术上可以编进 LAMMPS，但只复制到 `src/` 不足以完成 NEPAdapters、OpenMP/BLAS 或 Kokkos/CUDA 的 include 和链接集成；
+- source-tree 模式当前没有官方 CMake helper 和端到端门禁，属于自定义集成，不能在用户文档中写成已支持的一键安装；
 - LAMMPS 只链接 runtime/engine，不依赖 Python。
 
 Linux combined wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。CUDA Runtime 静态链接，wheel 不打包动态 `libcudart`、`libcuda` 或 `libcufft`。

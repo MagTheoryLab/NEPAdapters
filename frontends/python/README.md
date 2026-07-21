@@ -1,8 +1,8 @@
 # Python 前端
 
-本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。
+本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。面向使用者的安装、快速开始和 API 指南见 [Python 接口指南](../../docs/python.md)；本页保留 frontend 契约和开发构建说明。
 
-PyPI 只发布一个 `nep-adapters` distribution。Linux x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS 和 Windows wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
+发布设计只使用一个 `nep-adapters` distribution。当前 PyPI 尚无正式包，需要从源码安装。计划中的 Linux x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS 和 Windows wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
 
 ## 运行时检查与错误
 
@@ -143,7 +143,7 @@ cmake -S . -B .build/python \
   -DBUILD_SHARED_LIBS=ON \
   -DNEP_ADAPTERS_BUILD_TESTS=ON \
   -DNEP_ADAPTERS_ENABLE_PYTHON=ON \
-  -DPython3_EXECUTABLE=/Users/superbing/miniconda3/envs/mysci/bin/python
+  -DPython3_EXECUTABLE=/path/to/python
 cmake --build .build/python -j2
 ctest --test-dir .build/python -L python --output-on-failure
 ```

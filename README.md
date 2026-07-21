@@ -1,281 +1,100 @@
 # NEPAdapters
 
-NEPAdapters 提供统一的 NEP 运行时。同一套模型可以通过 Python 或 LAMMPS 调用，并明确选择 CPU 或 CUDA 后端。
+NEPAdapters 是统一的 NEP 推理运行时：同一个模型可以通过 Python、C/C++ 或 LAMMPS 调用，并显式选择 CPU 或 CUDA 后端。
 
-native engine 和 Python 接口使用按模型语义分开的正式入口：普通 NEP、qNEP、spin NEP、dipole 和 polarizability 不共享一个会静默改变返回值的 `calculate()`。生产 CPU 后端统一使用 `cpu`；CUDA 后端使用 `cuda`。不再提供 `cpu_nep3`，也不会在 GPU 不可用或模型不受支持时自动回退到 CPU。LAMMPS 的普通 NEP frontend 和单 rank 全周期 spin pair 计算均已进入发布面；spin MPI 多 rank 尚未列入发布支持范围。
+项目不会在后端不可用或模型不受支持时静默回退。普通 NEP、qNEP、spin NEP、dipole、polarizability 和 DFT-D3 使用各自明确的接口，避免返回值随模型类型悄悄变化。
 
-## 快速入口
+## 先选你要的入口
 
-| 你要做什么 | 入口 | 直接使用 |
-|---|---|---|
-| 构建并测试 CPU 版本 | [构建 CPU 版本](#构建-cpu-版本) | `cmake -S . -B .build/release ...` |
-| 构建 Python wheel | [使用 Python 接口](#使用-python-接口) | `python -m build --wheel` |
-| 构建 CUDA 版本 | [启用 CUDA](#启用-cuda) | `python3 tools/run_cuda_tests.py --cuda-arch 89` |
-| 安装 LAMMPS 插件 | [使用 LAMMPS 插件](#使用-lammps-插件) | `-DNEP_ADAPTERS_ENABLE_LAMMPS=ON` |
-| 查看测试覆盖 | [运行测试](#运行测试) | `ctest --test-dir ...` |
-| 查看自动打包规则 | [自动构建 wheel](#自动构建-wheel) | `.github/workflows/python-package.yml` |
+| 使用场景 | 从这里开始 |
+|---|---|
+| Python / NumPy / ASE | [Python 接口指南](docs/python.md) |
+| CMake 构建、测试和安装 | [构建与安装](docs/build.md) |
+| LAMMPS CPU 或 CUDA | [LAMMPS 前端指南](frontends/lammps/README.md) |
+| C/C++ API | [公共头文件](include/nep_adapters/api.h) 与 [架构说明](docs/design.md) |
+| 测试和正确性门禁 | [测试说明](tests/README.md) |
 
-## 选择后端
+## Python 快速开始
 
-| 场景 | 后端 | 要求 |
-|---|---|---|
-| 普通 CPU 计算、Python、LAMMPS CPU 插件 | `cpu` | C++17；OpenMP |
-| NVIDIA GPU 批计算或 LAMMPS Kokkos | `cuda` | CUDA Toolkit；LAMMPS 路径还需要启用 CUDA 的 Kokkos |
+PyPI 目前还没有可直接安装的正式包，请从源码安装。CPU 版本：
 
-两个后端通过相同的核心 API 暴露能力，但实现和测试保持分离：
+```sh
+git clone <NEPAdapters repository URL>
+cd NEPAdapters
+python -m pip install '.[ase]'
+```
 
-- PyPI 只发布一个 `nep-adapters` distribution 和一个版本号。
-- Linux x86_64 wheel 同时包含 `nep_cpu` 与按需加载的 `nep_gpu`；macOS、Windows 因没有受支持的 CUDA 运行面，只包含 `nep_cpu`。
-- 必须显式使用 `backend="cuda"` 才会加载 GPU 扩展。
-- CUDA 加载失败、NEP3 模型或未编译的 PPPM 请求都会直接报错，不会切换算法或后端。
-- `auto` 不是后端名；它属于 NepTrainKit 等调用方的选择策略。
+使用 ASE 做一次普通 NEP 计算：
 
-| 模型/能力 | 显式 Python 入口 | CPU | CUDA |
-|---|---|---|---|
-| 普通 NEP | `calculate()` / `predict_structures()` | 支持 | 支持已实现的 NEP4/NEP5 协议 |
-| qNEP charge/BEC | `calculate_charge()` / `predict_charge_structures()` | 支持 | 支持 direct；PPPM 仅在编译启用时支持 |
-| spin NEP | `calculate_spin()` / `predict_spin_structures()` | 支持 | 支持 |
-| dipole | `dipoles()` / `predict_dipoles()`；`descriptors()` | 支持 | 不支持，加载时明确报错 |
-| polarizability | `polarizabilities()` / `predict_polarizabilities()`；`descriptors()` | 支持 | 不支持，加载时明确报错 |
-| DFT-D3 | `calculate_dftd3()` / `calculate_with_dftd3()` | 仅普通非 spin、非 charge 势模型 | 不支持，且不会回退 CPU |
+```python
+from ase import Atoms
+from nep_adapters.ase import NepAseCalculator
 
-所有接口仍只接受 `pbc=(1,1,1)`。不支持的组合返回明确错误，不会改用另一个后端或第二套算法。
+atoms = Atoms(
+    "Fe2",
+    positions=[[0.0, 0.0, 0.0], [1.43, 1.43, 1.43]],
+    cell=[2.86, 2.86, 2.86],
+    pbc=True,
+)
+atoms.calc = NepAseCalculator("nep.txt", backend="cpu")
 
-## 构建 CPU 版本
+print(atoms.get_potential_energy())
+print(atoms.get_forces())
+```
+
+CUDA 源码安装需要 CUDA Toolkit，并且必须显式启用：
+
+```sh
+NEP_CUDA=1 python -m pip install .
+```
+
+选择 `backend="cuda"` 才会加载 GPU 扩展；失败时不会改用 CPU。更多 NumPy batch、qNEP、spin、descriptor 和错误处理示例见 [Python 接口指南](docs/python.md)。
+
+## CMake 快速开始
+
+只构建 CPU core 和测试：
 
 ```sh
 cmake -S . -B .build/release \
   -DCMAKE_BUILD_TYPE=Release \
-  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
   -DNEP_ADAPTERS_BUILD_TESTS=ON
 cmake --build .build/release -j2
 ctest --test-dir .build/release --output-on-failure
 ```
 
-CPU 实现已随仓库放在 `engines/cpu/native/`，不需要额外下载 `NEP_CPU` 源码。
+默认只启用 CPU。Python、CUDA 和 LAMMPS 都需要显式打开；完整组合、安装命令和选项默认值见 [构建与安装](docs/build.md)。
 
-跑完应检查：
+## LAMMPS 安装方式
 
-- `ctest` 显示全部测试通过；
-- 构建目录位于 `.build/`，没有在仓库根目录生成临时文件；
-- 默认构建没有加载 CUDA、Python 或 LAMMPS。
+当前正式支持和持续测试的是 **runtime plugin**：NEPAdapters 单独构建 `nepadapterscpuplugin.so` 或 `nepadaptersgpuplugin.so`，LAMMPS 通过 `LAMMPS_PLUGIN_PATH` 加载，不需要重新编译 LAMMPS。
 
-## 使用 Python 接口
+源码也保留了 LAMMPS `PairStyle` 注册宏，因此技术上可以把 pair 编进 LAMMPS；但**只复制 `pair_nep_adapters_*.cpp/.h` 到 `lammps/src/` 并不够**。这些文件还依赖 NEPAdapters 头文件、core/engine 库，以及 CPU 的 OpenMP/BLAS 或 CUDA 的 Kokkos/CUDA 构建接口。仓库目前没有正式的 source-tree 安装脚本和端到端门禁，所以这种方式属于自定义集成，不是已支持的安装流程。
 
-项目约定使用 `mysci` 环境进行本地 Python 开发：
+插件构建、加载、输入文件示例以及 source-tree 集成边界见 [LAMMPS 前端指南](frontends/lammps/README.md)。
 
-```sh
-source /Users/superbing/miniconda3/etc/profile.d/conda.sh
-conda activate mysci
-python -m build --wheel
-```
+## 当前支持范围
 
-使用 `NEPCalculator`：
+| 前端 / 后端 | 普通 NEP | qNEP | spin NEP | 其他响应模型 |
+|---|---|---|---|---|
+| Python / CPU | 支持 | charge/BEC 支持 | 支持 | dipole、polarizability、DFT-D3 支持；DFT-D3 仅普通非 spin、非 charge 模型 |
+| Python / CUDA | NEP4/NEP5 支持 | direct 支持；PPPM 需单独编译 | 支持 | dipole、polarizability、DFT-D3 不支持 |
+| LAMMPS / CPU plugin | 支持，含普通 MPI smoke | 尚未列入已验证支持面 | 单 rank 已进入门禁；CPU spin MPI 尚无同等级正式门禁 | 不适用 |
+| LAMMPS / CUDA Kokkos plugin | 支持 | **不支持，运行时明确拒绝** | 单节点 1/2/4/8 MPI ranks 已验证 | 不适用 |
 
-```python
-from nep_adapters import NEPCalculator
+补充边界：
 
-calculator = NEPCalculator("nep.txt", backend="cpu")
-prediction = calculator.predict_structures(structures)
-energy, force_blocks, virial_blocks = calculator.calculate(structures)
-```
+- 所有 Python batch 接口目前只接受全周期 `pbc=(1, 1, 1)`。
+- LAMMPS spin 不使用虚构的 `nep/spin/*` 名称；仍使用 `nep/cpu` 或 `nep/gpu/kk`，并配合 `atom_style spin` / `spin/kk`。
+- qNEP 的 CUDA batch API 可用，但 LAMMPS Kokkos 需要独立的 ghost/charge 数据流，因此当前 fail-closed。
+- virial 在不同公共入口有不同顺序；调用前请查 [Python 接口指南](docs/python.md) 或 [公共 API 契约](include/nep_adapters/api.h)。
 
-`inspect_model()` 返回稳定的 `ModelInfo`（模型类型、元素、cutoff、descriptor 维度、能力和 SHA256）；`backend_status("cuda")` 在不加载模型的前提下报告模块、驱动、设备和可用显存。失败通过 `NepAdaptersError` 的稳定子类与 `code/backend/operation` 元数据交付，调用方可以据此给出操作建议，不需要匹配 native 错误字符串。
+## 项目结构
 
-CUDA calculator 的 `estimate_workspace()` 给出指定 atom/structure capacity 的显存计划；`recommend_max_atoms()` 按当前空闲显存给出保守的单结构原子上限。这里的 atom capacity 是批次中最大单结构原子数，不表示能够拆开一个超大结构。
-
-结构默认按全周期 `(1, 1, 1)` 处理。显式传入非全周期值或 `None` 会报错；接口没有非周期或旧哨兵值 fallback。
-
-普通、qNEP、dipole 和 polarizability 模型共享无 spin 输入的 `descriptors()`；其返回值均为对应模型自身参数计算出的逐原子描述符，不保证不同模型间数值或维度相同。qNEP 必须使用 `calculate_charge()`，返回每原子 potential、force、raw9 virial、charge 和 BEC；普通 `calculate()` 遇到 charge 模型会拒绝调用，避免遗漏 charge/BEC。spin 模型必须使用独立的 `calculate_spin()` 和 `descriptors_spin()`，并提供形状为 `(natoms, 3)` 的 spin 数组。dipole、polarizability 和 DFT-D3 的响应量或修正量仍使用上表中的独立入口。高层接口还提供单结构、批结构和 descriptor 聚合方法。
-
-计算期间可从另一个 Python/UI 线程调用 `cancel()`。Python native 调用释放 GIL；CPU/CUDA 至少在结构边界检查取消，CUDA 单个已启动 kernel 不做强制抢占。取消返回 `cancelled` 异常且不交付部分数组；`reset_cancel()` 后模型可再次使用。`close()` 与正在执行的 Python 调用通过共享生命周期隔离，不会提前释放底层模型。
-
-NumPy 是必需的运行时依赖。ASE 是可选依赖；普通 `import nep_adapters` 不会导入 ASE。详细接口和数组布局见 [Python 前端说明](frontends/python/README.md)。
-
-## 启用 CUDA
-
-RTX 4090 / Ada 正确性测试：
-
-```sh
-python3 tools/run_cuda_tests.py --cuda-arch 89
-```
-
-V100 节点使用：
-
-```sh
-python3 tools/run_cuda_tests.py --cuda-arch 70
-```
-
-该脚本负责配置 CUDA、编译测试并运行 `ctest -L cuda`。它是正确性门禁，不是性能 benchmark。
-
-本机构建包含 CPU+CUDA 的 Linux wheel：
-
-```sh
-NEP_CUDA=1 python -m build --wheel
-```
-
-直接从源码安装 GPU 版使用短开关：
-
-```sh
-NEP_CUDA=1 pip install .
-```
-
-不传 `CMAKE_CUDA_ARCHITECTURES` 时使用 `native`。默认 `pip install .` 只构建
-启用 OpenMP 的 CPU 扩展，不会探测 CUDA。macOS 源码构建需要先安装
-Homebrew `libomp`；CMake 会自动读取其安装路径。
-
-高级用法仍可通过
-`--config-settings=cmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON` 显式传递 CMake
-选项；一般用户不需要记忆这条长命令。
-
-发布 wheel 不使用 `native`，而是嵌入 `sm_70`、`sm_75`、`sm_80`、`sm_86`、
-`sm_89` 的 SASS，并保留 `compute_89` PTX 用于较新架构的前向 JIT：
-
-```sh
-CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual' \
-python -m build --wheel \
-  -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
-```
-
-默认 CUDA 构建支持 qNEP direct 路径，不编译实验性 PPPM，也不链接 cuFFT。如需单独测试 PPPM，可运行：
-
-```sh
-python3 tools/run_cuda_tests.py --cuda-arch 89 --qnep-pppm
-```
-
-PPPM 当前只适合单节点实验，不属于默认生产包。未启用 PPPM 的构建收到 `NEP_ADAPTERS_QNEP_KSPACE=pppm` 时会直接报错。
-
-## 使用 LAMMPS 插件
-
-LAMMPS 插件按后端拆分：CPU 产物为 `nepadapterscpuplugin.so`，GPU 产物为 `nepadaptersgpuplugin.so`。两者可以单独构建，也可以同时安装到同一个目录；运行时通过 `pair_style` 明确选择后端，不存在 CPU/GPU fallback。
-
-CPU 插件：
-
-```sh
-cmake -S . -B .build/lammps \
-  -DNEP_ADAPTERS_BUILD_TESTS=ON \
-  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
-  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
-  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
-  -DNEP_ADAPTERS_LAMMPS_EXECUTABLE=/path/to/lmp
-cmake --build .build/lammps -j2
-ctest --test-dir .build/lammps -L lammps --output-on-failure
-```
-
-构建目录中的插件可以通过 `LAMMPS_PLUGIN_PATH` 自动加载：
-
-```sh
-PLUGIN="$PWD/.build/lammps/frontends/lammps/nepadapterscpuplugin.so"
-export LAMMPS_PLUGIN_PATH="$(dirname "$PLUGIN")"
-/path/to/lmp -in lmp.in
-```
-
-LAMMPS 会在启动时扫描该目录中名称以 `plugin.so` 结尾的文件，因此 `lmp.in` 不需要包含构建路径：
-
-```lammps
-pair_style nep/cpu
-pair_coeff * * nep.txt Fe
-```
-
-如需安装到固定位置，建议使用静态内部库和 runtime-only 安装，让安装目录只包含一个 LAMMPS 插件：
-
-```sh
-cmake -S . -B .build/lammps-install \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/path/to/nepadapters \
-  -DCMAKE_INSTALL_LIBDIR=lib \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DNEP_ADAPTERS_BUILD_TESTS=OFF \
-  -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
-  -DNEP_ADAPTERS_CPU_ENABLE_OPENMP=ON \
-  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
-  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps
-cmake --build .build/lammps-install --target nepadapterscpuplugin -j2
-cmake --install .build/lammps-install
-export LAMMPS_PLUGIN_PATH=/path/to/nepadapters/lib
-```
-
-此时 CPU 插件路径是 `/path/to/nepadapters/lib/nepadapterscpuplugin.so`。如果不显式设置 `CMAKE_INSTALL_LIBDIR=lib`，实际目录以 CMake 选择的 `lib` 或 `lib64` 为准。启用 `NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=ON` 时，还会安装头文件、C/C++ 库和 `lib/cmake/NEPAdapters/` 包元数据。
-
-GPU-only 安装模板：
-
-```sh
-cmake -S . -B .build/lammps-gpu-install \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/path/to/nepadapters \
-  -DCMAKE_INSTALL_LIBDIR=lib \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DNEP_ADAPTERS_BUILD_TESTS=OFF \
-  -DNEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES=OFF \
-  -DNEP_ADAPTERS_ENABLE_CPU=OFF \
-  -DNEP_ADAPTERS_ENABLE_CUDA=ON \
-  -DNEP_ADAPTERS_ENABLE_LAMMPS=ON \
-  -DNEP_ADAPTERS_LAMMPS_SOURCE_DIR=/path/to/lammps \
-  -DNEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR=/path/to/lammps-kokkos-build
-cmake --build .build/lammps-gpu-install --target nepadaptersgpuplugin -j2
-cmake --install .build/lammps-gpu-install
-```
-
-CUDA 插件要求 LAMMPS Kokkos 已启用 CUDA，产物为 `nepadaptersgpuplugin.so`，支持 `pair_style nep/gpu`；使用 Kokkos 后缀模式时也可显式写 `pair_style nep/gpu/kk`。GPU pair style 直接传递设备视图，不提供 host 或 CPU fallback。CPU、GPU 同时启用时，安装目录会同时包含两个插件，`LAMMPS_PLUGIN_PATH` 只需指向该目录。不要同时使用 `LAMMPS_PLUGIN_PATH` 和输入文件中的 `plugin load` 重复加载同一个插件。当前发布门禁只声明普通 NEP pair style；spin 模型虽然已有内部数据通路，但在真实 LAMMPS 端到端测试完成前不作为生产支持面。完整的 CPU-only、GPU-only 和同时安装模板见 [LAMMPS 前端说明](frontends/lammps/README.md)。
-
-## 运行测试
-
-常用 CTest 标签：
-
-- `contract`：核心 API 与 engine SPI 契约；
-- `smoke`：模型加载和有限值检查；
-- `parity`：与固定 oracle 或参考数据比对；
-- `frontend`：Python、LAMMPS 等前端集成；
-- `cuda`、`device`、`kokkos`：CUDA 与设备输入路径；
-- `force`：有限差分或力分量一致性；
-- `bench`、`performance`：性能测试，不参与普通正确性门禁。
-
-CPU 测试使用仓库内固定 fixture、严格 FP64 oracle、有限差分和 CPU/CUDA parity，不保留第二套 CPU 后端作为 fallback。完整覆盖见 [测试说明](tests/README.md)。
-
-构建 benchmark：
-
-```sh
-cmake -S . -B .build/bench \
-  -DNEP_ADAPTERS_BUILD_TESTS=ON \
-  -DNEP_ADAPTERS_BUILD_BENCHMARKS=ON
-cmake --build .build/bench -j2
-ctest --test-dir .build/bench -L bench --output-on-failure
-```
-
-## Python wheel 的依赖边界
-
-wheel 不会复制当前 Python 环境：
-
-- NumPy 由包管理器单独安装；
-- ASE 是可选依赖，不会嵌入 wheel；
-- pybind11、CMake、scikit-build-core 和编译器只用于构建；
-- Linux combined wheel 不携带 `libcuda`、动态 `libcudart` 或 `libcufft`；CUDA Runtime 静态链接进 `nep_gpu`，NVIDIA 驱动由目标机器提供；
-- glibc、libstdc++、libm 和 libgcc 使用目标平台系统库。
-
-发布时必须检查 `auditwheel show` 和 wheel 归档内容。发现新的动态依赖时应明确审查，不允许用 repair 失败后的原 wheel 作为 fallback。
-
-## 自动构建 wheel
-
-[`.github/workflows/python-package.yml`](.github/workflows/python-package.yml) 构建：
-
-- CPython 3.10–3.14 的 macOS x86_64/arm64 和 Windows x86_64 CPU wheel；
-- source distribution；
-- CPython 3.10–3.14 的 Linux x86_64 combined CPU+CUDA wheel。
-
-创建 GitHub Release 时，所有平台 wheel 和 source distribution 作为同一个 `nep-adapters` 版本通过 Trusted Publishing 发布到 PyPI。发布门禁要求 Linux combined wheel 成功，不再维护同版本的 CPU/GPU 竞争包或 `1cuda` build tag。
-
-每个 wheel 都会在隔离环境中安装并执行真实 CPU 计算。Linux combined wheel 还会检查 `nep_gpu` 导入和归档内容；完整 CUDA 数值测试仍需要有 GPU 的发布节点。
-
-## 目录结构
-
-- `include/nep_adapters/`：公共 C/C++ API、数据视图和能力定义；
-- `src/`：核心注册、调度和错误处理；
-- `engines/cpu/`：普通、spin 和 charge 模型的 CPU 实现；
-- `engines/cuda/`：batch 与 LAMMPS Kokkos 共用的 CUDA 实现；
-- `frontends/python/`：pybind11、NumPy 高层接口和可选 ASE 适配；
-- `frontends/lammps/`：LAMMPS runtime plugin；
+- `include/nep_adapters/`：公共 C/C++ API 和数据约定；
+- `src/`：core 注册、调度和错误处理；
+- `engines/cpu/`、`engines/cuda/`：计算后端；
+- `frontends/python/`、`frontends/lammps/`：用户前端；
 - `tests/`：契约、fixture、oracle 和集成测试；
-- `benchmarks/`：吞吐、扩展性与 profiler 入口；
-- `docs/design.md`：架构与边界说明。
+- `benchmarks/`：性能与扩展性入口。
 
-核心运行时必须保持可独立构建：它不依赖 Python、LAMMPS 或 CUDA。LAMMPS 和 Python 是 frontend，不是 compute backend。
+LAMMPS 和 Python 都是 frontend，不是 compute backend；算法实现只保留在 engine 层。
