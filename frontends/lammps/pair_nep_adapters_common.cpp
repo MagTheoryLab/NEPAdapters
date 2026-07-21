@@ -4,6 +4,7 @@
 #include "nep_adapters/virial_order.hpp"
 
 #include "atom.h"
+#include "comm.h"
 #include "domain.h"
 #include "error.h"
 #include "force.h"
@@ -129,6 +130,7 @@ void PairNEPAdaptersCommon::coeff(int narg, char** arg) {
   const std::string model_path = utils::get_potential_file_path(model_filename_);
   read_type_map(model_path, narg, arg);
   load_model(model_path);
+  log_loaded_model(model_path);
 
   for (int i = 1; i <= atom->ntypes; ++i) {
     for (int j = 1; j <= atom->ntypes; ++j) {
@@ -147,6 +149,7 @@ void PairNEPAdaptersCommon::read_type_map(
         label_ + ": failed to read element symbols from NEP file";
     error->all(FLERR, message.c_str());
   }
+  model_elements_ = elements;
 
   for (int type = 1; type <= atom->ntypes; ++type) {
     const char* symbol = arg[2 + type];
@@ -181,6 +184,44 @@ void PairNEPAdaptersCommon::load_model(const std::string& model_path) {
   }
   cutoff_ = info.cutoff_max;
   spin_model_ = (info.capabilities & NEPA_CAPABILITY_SPIN) != 0;
+}
+
+void PairNEPAdaptersCommon::log_loaded_model(
+    const std::string& model_path) const {
+  if (comm->me != 0) {
+    return;
+  }
+
+  std::ostringstream elements;
+  for (std::size_t index = 0; index < model_elements_.size(); ++index) {
+    if (index != 0) {
+      elements << ' ';
+    }
+    elements << model_elements_[index];
+  }
+
+  std::ostringstream type_map;
+  for (int type = 1; type <= atom->ntypes; ++type) {
+    if (type != 1) {
+      type_map << ", ";
+    }
+    const int model_type = type_map_[type];
+    type_map << type << "->" << model_elements_[model_type]
+             << "(model " << model_type + 1 << ')';
+  }
+
+  utils::logmesg(
+      lmp,
+      "NEPAdapters {}: loaded model {}\n"
+      "  pair_style: {}, backend: {}\n"
+      "  model elements: {}\n"
+      "  LAMMPS type map: {}\n",
+      NEP_ADAPTERS_VERSION_STRING,
+      model_path,
+      style_name_,
+      engine_name_,
+      elements.str(),
+      type_map.str());
 }
 
 void PairNEPAdaptersCommon::init_style() {

@@ -33,6 +33,7 @@ class PairNEPAdaptersCommon : public Pair {
   void allocate();
   void read_type_map(const std::string& model_path, int narg, char** arg);
   void load_model(const std::string& model_path);
+  void log_loaded_model(const std::string& model_path) const;
 
   const std::string style_name_;
   const std::string engine_name_;
@@ -42,6 +43,7 @@ class PairNEPAdaptersCommon : public Pair {
   int* type_map_ = nullptr;
   NepaModel* model_ = nullptr;
   std::string model_filename_;
+  std::vector<std::string> model_elements_;
   double cutoff_ = 0.0;
   bool spin_model_ = false;
 

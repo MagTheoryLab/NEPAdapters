@@ -84,6 +84,26 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "ending in 'plugin.so'"):
       smoke.plugin_environment("/opt/nepadapters/lib/nepadapters.so")
 
+  def test_startup_banner_requires_version_elements_and_type_map(self):
+    smoke.validate_startup_banner(
+        "\n".join(
+            (
+                "NEPAdapters 1.0.0: loaded model /tmp/nep.txt",
+                "  pair_style: nep/cpu, backend: cpu",
+                "  model elements: Fe O",
+                "  LAMMPS type map: 1->Fe(model 1), 2->O(model 2)",
+            )
+        ),
+        "nep/cpu",
+    )
+
+  def test_startup_banner_rejects_missing_type_map(self):
+    with self.assertRaisesRegex(RuntimeError, "LAMMPS type map"):
+      smoke.validate_startup_banner(
+          "NEPAdapters 1.0.0\npair_style: nep/cpu\nmodel elements: Fe\n",
+          "nep/cpu",
+      )
+
 
 if __name__ == "__main__":
   unittest.main()

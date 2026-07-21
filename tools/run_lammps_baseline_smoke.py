@@ -157,6 +157,21 @@ def run_command(args, cwd, env=None):
     return completed.stdout
 
 
+def validate_startup_banner(screen, pair_style):
+    required = (
+        "NEPAdapters ",
+        f"pair_style: {pair_style}",
+        "model elements:",
+        "LAMMPS type map:",
+    )
+    missing = [text for text in required if text not in screen]
+    if missing:
+        raise RuntimeError(
+            "LAMMPS output is missing the NEPAdapters model banner fields: "
+            + ", ".join(missing)
+        )
+
+
 def plugin_environment(plugin):
     plugin_path = Path(plugin)
     if not plugin_path.name.endswith("plugin.so"):
@@ -332,6 +347,7 @@ def main():
         work_dir,
         env=run_env,
     )
+    validate_startup_banner(screen, args.pair_style)
     (work_dir / "screen.out").write_text(screen, encoding="utf-8")
     payload = {
         "lmp": args.lmp,
