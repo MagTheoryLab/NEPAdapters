@@ -59,6 +59,22 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
 
     self.assertIn("plugin load nepadapterscpuplugin.so", contents)
 
+  def test_builtin_load_mode_writes_no_plugin_command(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "in.baseline"
+      smoke.write_input(
+          path,
+          "",
+          "nep.txt",
+          ["Fe"],
+          plugin_load_mode="builtin",
+      )
+
+      contents = path.read_text(encoding="utf-8")
+
+    self.assertIn("pair_style nep/cpu", contents)
+    self.assertNotIn("plugin load", contents)
+
   def test_plugin_environment_points_to_plugin_directory(self):
     env = smoke.plugin_environment("/opt/nepadapters/lib/nepadapterscpuplugin.so")
 

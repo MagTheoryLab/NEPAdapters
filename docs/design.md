@@ -104,8 +104,9 @@ Python 发布设计只有一个 `nep-adapters` distribution 和一个版本序�
 LAMMPS integration 由源码仓库单独构建：
 
 - runtime plugin 是当前正式支持并持续测试的安装方式；
-- pair 源码保留 `PairStyle` 宏，技术上可以编进 LAMMPS，但只复制到 `src/` 不足以完成 NEPAdapters、OpenMP/BLAS 或 Kokkos/CUDA 的 include 和链接集成；
-- source-tree 模式当前没有官方 CMake helper 和端到端门禁，属于自定义集成，不能在用户文档中写成已支持的一键安装；
+- source-tree installer 复制受管 pair 文件和一个窄 CMake hook；hook 在 LAMMPS seam 上静态加入所选 core/engine，不复制算法，也不要求调用方手改 LAMMPS `CMakeLists.txt`；
+- manifest 以 SHA256 保护更新和卸载，不覆盖或删除用户修改的 pair 文件；
+- plugin 与 builtin 是同一 frontend implementation 的两种装配方式，不能演化成两套 pair 逻辑；
 - LAMMPS 只链接 runtime/engine，不依赖 Python。
 
 Linux combined wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。CUDA Runtime 静态链接，wheel 不打包动态 `libcudart`、`libcuda` 或 `libcufft`。

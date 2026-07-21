@@ -66,11 +66,12 @@ ctest --test-dir .build/release --output-on-failure
 
 ## LAMMPS 安装方式
 
-当前正式支持和持续测试的是 **runtime plugin**：NEPAdapters 单独构建 `nepadapterscpuplugin.so` 或 `nepadaptersgpuplugin.so`，LAMMPS 通过 `LAMMPS_PLUGIN_PATH` 加载，不需要重新编译 LAMMPS。
+LAMMPS 有两种正式安装方式：
 
-源码也保留了 LAMMPS `PairStyle` 注册宏，因此技术上可以把 pair 编进 LAMMPS；但**只复制 `pair_nep_adapters_*.cpp/.h` 到 `lammps/src/` 并不够**。这些文件还依赖 NEPAdapters 头文件、core/engine 库，以及 CPU 的 OpenMP/BLAS 或 CUDA 的 Kokkos/CUDA 构建接口。仓库目前没有正式的 source-tree 安装脚本和端到端门禁，所以这种方式属于自定义集成，不是已支持的安装流程。
+- **runtime plugin（推荐）**：单独构建 `.so`，通过 `LAMMPS_PLUGIN_PATH` 加载，不需要重新编译 LAMMPS；
+- **source-tree / builtin**：运行 `tools/install_lammps_source.py`，把受管 pair 文件复制到 `lammps/src/`，再通过随附的 CMake hook 把 core/engine 静态编进 `lmp`。运行时不需要 plugin 环境变量。
 
-插件构建、加载、输入文件示例以及 source-tree 集成边界见 [LAMMPS 前端指南](frontends/lammps/README.md)。
+不要手工只复制 `.cpp/.h`；官方 helper 还会安装依赖连接所需的 CMake hook、记录文件哈希并提供安全卸载。两种方式的完整命令见 [LAMMPS 前端指南](frontends/lammps/README.md)。
 
 ## 当前支持范围
 

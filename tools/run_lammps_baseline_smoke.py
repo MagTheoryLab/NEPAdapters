@@ -250,11 +250,12 @@ def compare(fixture, dump_rows, thermo):
 
 def write_markdown(path, payload):
     result = payload["result"]
+    plugin = payload["plugin"] or "built into lmp"
     lines = [
         "# LAMMPS Baseline Smoke Report",
         "",
         f"- lmp: `{payload['lmp']}`",
-        f"- plugin: `{payload['plugin']}`",
+        f"- plugin: `{plugin}`",
         f"- model: `{payload['model']}`",
         f"- fixture: `{payload['fixture']}`",
         "",
@@ -272,7 +273,11 @@ def write_markdown(path, payload):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--lmp", required=True)
-    parser.add_argument("--plugin", required=True)
+    parser.add_argument(
+        "--plugin",
+        default="",
+        help="Plugin path; omitted when --plugin-load-mode=builtin",
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--fixture", required=True)
     parser.add_argument(
@@ -280,11 +285,12 @@ def main():
     )
     parser.add_argument(
         "--plugin-load-mode",
-        choices=("environment", "command"),
+        choices=("environment", "command", "builtin"),
         default="environment",
         help=(
             "Load through LAMMPS_PLUGIN_PATH by default; use 'command' only "
-            "to exercise an explicit plugin load line."
+            "to exercise an explicit plugin load line, or 'builtin' for a "
+            "pair style compiled directly into lmp."
         ),
     )
     parser.add_argument("--work-dir", default="build-lammps-baseline-smoke")
@@ -296,7 +302,9 @@ def main():
     args = parser.parse_args()
 
     args.lmp = str(Path(args.lmp).resolve())
-    args.plugin = str(Path(args.plugin).resolve())
+    if args.plugin_load_mode != "builtin" and not args.plugin:
+        parser.error("--plugin is required unless --plugin-load-mode=builtin")
+    args.plugin = str(Path(args.plugin).resolve()) if args.plugin else ""
     args.model = str(Path(args.model).resolve())
     args.fixture = str(Path(args.fixture).resolve())
 

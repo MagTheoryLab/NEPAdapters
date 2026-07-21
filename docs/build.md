@@ -118,7 +118,11 @@ CPU + CUDA Python 开发构建只需追加：
 -DCMAKE_CUDA_ARCHITECTURES=native
 ```
 
-## LAMMPS plugin
+## LAMMPS
+
+推荐 runtime plugin；如果需要把 pair 直接编进 `lmp`，使用 source-tree helper。两种方式的完整命令见 [LAMMPS 前端指南](../frontends/lammps/README.md)。
+
+### runtime plugin
 
 CPU plugin 的最小配置：
 
@@ -131,6 +135,23 @@ cmake --build .build/lammps --target nepadapterscpuplugin -j2
 ```
 
 `NEP_ADAPTERS_LAMMPS_EXECUTABLE` 只用于运行时 smoke test，不是编译插件的必填项。CUDA plugin 还必须启用 CUDA，并设置 `NEP_ADAPTERS_LAMMPS_KOKKOS_BUILD_DIR`。完整安装和运行命令见 [LAMMPS 前端指南](../frontends/lammps/README.md)。
+
+### source-tree / builtin
+
+```sh
+python3 tools/install_lammps_source.py install \
+  --lammps-source /path/to/lammps \
+  --backend cpu
+
+cmake -S /path/to/lammps/cmake \
+  -B /path/to/lammps/.build/nep-adapters-cpu \
+  -DCMAKE_PROJECT_INCLUDE=/path/to/lammps/cmake/Modules/NEPAdaptersLAMMPSSource.cmake \
+  -DNEP_ADAPTERS_SOURCE_DIR="$PWD" \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_BACKEND=cpu
+cmake --build /path/to/lammps/.build/nep-adapters-cpu --target lmp -j2
+```
+
+生成的 `lmp` 已内置 `nep/cpu`，运行时不需要 plugin 环境变量。CUDA 和 `both` 模式见 LAMMPS 前端指南。
 
 ## 主要 CMake 选项
 

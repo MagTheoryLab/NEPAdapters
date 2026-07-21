@@ -7,9 +7,9 @@ NEPAdapters 的 LAMMPS 集成负责转换原子、盒子、类型映射、邻居
 | 方式 | 当前状态 | 是否重编 LAMMPS | 适合谁 |
 |---|---|---:|---|
 | runtime plugin | **正式支持并持续测试，推荐** | 否 | 绝大多数用户 |
-| 编进 LAMMPS `src/` | 技术上可行，但当前是自定义集成 | 是 | 需要维护自有 LAMMPS 构建的人 |
+| source-tree / builtin | **正式 helper；pair 和 engine 直接编进 `lmp`** | 是 | 不能或不想在运行时加载 plugin 的用户 |
 
-不是只有 plugin 才能工作。pair 头文件保留了 LAMMPS `PairStyle` 注册宏，源码可以参与 LAMMPS 静态构建；但只复制文件到 `lammps/src/` 不会自动完成依赖和链接。具体差异见 [源码树集成](#源码树集成不是只复制文件)。
+两种方式使用同一套 pair 和 engine 实现，计算语义不分叉。source-tree 模式必须使用仓库 helper，不能只手工复制 `.cpp/.h`；helper 会同时安装 CMake hook，完成依赖和链接。具体命令见 [source-tree / builtin 安装](#source-tree--builtin-安装)。
 
 ## plugin 和 pair style
 
@@ -31,6 +31,8 @@ spin 模型没有单独的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。仍使用 
 | spin NEP / CPU plugin | 单 rank 真实 LAMMPS 门禁已覆盖能量、力、磁力、virial 和 spin 读回 |
 | spin NEP / CUDA Kokkos plugin | 单 rank 在常规 CTest；Sai V100 单节点 1/2/4/8 MPI ranks 已做专项正确性和 TSPIN/dynspin 验证 |
 | qNEP / CUDA Kokkos plugin | **不支持**；运行时明确拒绝，需要独立的 ghost/charge 数据流 |
+| ordinary NEP / CPU builtin | 已在干净 LAMMPS 源码副本中完成编译和无 plugin baseline smoke |
+| ordinary NEP / CUDA Kokkos builtin | 已在 RTX 4090 / CUDA 12.8 上完成干净构建和无 plugin baseline smoke |
 
 边界要区分清楚：CUDA spin MPI 多 rank 不是“没测试”，而是已经完成过 1/2/4/8 ranks 专项验证；当前仓库常规 CTest 仍只自动注册单 rank spin plugin case。CPU spin MPI 尚没有同等级的正式门禁，因此不要把“CUDA spin MPI 已验证”扩大成“所有 spin MPI 都支持”。
 
@@ -197,30 +199,89 @@ cmake --install .build/lammps-all
 
 设置一次 `LAMMPS_PLUGIN_PATH` 后，通过 `pair_style nep/cpu` 或 `pair_style nep/gpu/kk` 显式选择后端。
 
-## 源码树集成不是只复制文件
+## source-tree / builtin 安装
 
-LAMMPS 的 CMake 会扫描 `src/pair_*.cpp` 和带 `PairStyle` 宏的头文件，所以 pair 源码具备被编进 LAMMPS 的基础条件。当前相关文件是：
+这种方式把 pair style 和所选 engine 直接编进 `lmp`。运行时不设置 `LAMMPS_PLUGIN_PATH`，输入文件里也不写 `plugin load`。
 
-```text
-pair_nep_adapters_common.cpp/.h
-pair_nep_adapters_cpu.cpp/.h
-pair_nep_adapters_cuda.cpp/.h
+### 1. 安装受管源码
+
+在 NEPAdapters 仓库根目录运行：
+
+```sh
+python3 tools/install_lammps_source.py install \
+  --lammps-source /path/to/lammps \
+  --backend cpu
 ```
 
-但是复制这些文件后还必须处理：
+`--backend` 可选 `cpu`、`cuda` 或 `both`。helper 会：
 
-- 把 NEPAdapters 公共头文件加入 LAMMPS include path；
-- 把 `NEPAdapters::cpu` 或 `NEPAdapters::cuda` 以及 core 链入 `lammps` target；
-- 传播 CPU 的 OpenMP/BLAS 依赖；
-- CUDA 路径传播 Kokkos/CUDA 的 include、compile definitions、编译选项和链接接口；
-- 保证 LAMMPS 与 NEPAdapters 使用兼容的 MPI、精度、Kokkos 和 CUDA 配置；
-- 自行维护这个组合的构建与端到端测试。
+- 复制 common 和所选 backend 的 pair `.cpp/.h` 到 `lammps/src/`；
+- 安装 `cmake/Modules/NEPAdaptersLAMMPSSource.cmake`；
+- 写入 `.nep_adapters_source_manifest.json`，记录来源和 SHA256；
+- 重装或切换 backend 时只更新未被用户修改的受管文件；
+- 遇到同名本地文件或已修改文件时拒绝覆盖。
 
-仓库当前没有可复制的官方 CMake fragment、安装 target 或 source-tree smoke gate。因此结论是：
+### 2. 构建 CPU builtin
 
-- **可以编进 `src/`，但不是“复制后正常重编”这么简单；**
-- **当前用户安装请使用 runtime plugin；**
-- 若以后要把 source-tree 模式列为正式支持，需要先补官方集成 helper 和真实 LAMMPS 构建门禁。
+仍在 NEPAdapters 仓库根目录执行，`NEP_ADAPTERS_SOURCE_DIR` 指向当前仓库：
+
+```sh
+cmake -S /path/to/lammps/cmake \
+  -B /path/to/lammps/.build/nep-adapters-cpu \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PROJECT_INCLUDE=/path/to/lammps/cmake/Modules/NEPAdaptersLAMMPSSource.cmake \
+  -DNEP_ADAPTERS_SOURCE_DIR="$PWD" \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_BACKEND=cpu
+cmake --build /path/to/lammps/.build/nep-adapters-cpu --target lmp -j2
+```
+
+运行时直接使用生成的 `lmp`：
+
+```sh
+/path/to/lammps/.build/nep-adapters-cpu/lmp -in lmp.in
+```
+
+### 3. 构建 CUDA Kokkos builtin
+
+先安装 CUDA pair：
+
+```sh
+python3 tools/install_lammps_source.py install \
+  --lammps-source /path/to/lammps \
+  --backend cuda
+```
+
+再使用 LAMMPS 的 Kokkos CUDA preset。下面以 RTX 4090 / Ada 89 为例；其他 GPU 必须更换 CUDA architecture 和 Kokkos architecture：
+
+```sh
+cmake -S /path/to/lammps/cmake \
+  -B /path/to/lammps/.build/nep-adapters-cuda \
+  -C /path/to/lammps/cmake/presets/kokkos-cuda.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DKokkos_ARCH_ADA89=ON \
+  -DPKG_KOKKOS=ON \
+  -DKokkos_ENABLE_CUDA=ON \
+  -DCMAKE_PROJECT_INCLUDE=/path/to/lammps/cmake/Modules/NEPAdaptersLAMMPSSource.cmake \
+  -DNEP_ADAPTERS_SOURCE_DIR="$PWD" \
+  -DNEP_ADAPTERS_LAMMPS_SOURCE_BACKEND=cuda
+cmake --build /path/to/lammps/.build/nep-adapters-cuda --target lmp -j2
+```
+
+`both` 会把 `nep/cpu` 和 `nep/gpu*` 同时编进一个 `lmp`，CUDA/Kokkos 要求与 `cuda` 相同。CMake hook 会把 NEPAdapters core/engine 作为静态内部实现构建，即使调用方选择 shared `liblammps`，也不需要额外部署 NEPAdapters runtime library。
+
+当前 builtin helper 只支持 LAMMPS 的 CMake 构建系统，不支持传统 make package 命令。若已有自己的 `CMAKE_PROJECT_INCLUDE`，应在那个 hook 中 `include()` 本文件，而不是覆盖掉已有逻辑。
+
+### 更新和卸载
+
+NEPAdapters 更新后重新运行同一条 `install` 命令，再重新配置并构建 LAMMPS。安全卸载：
+
+```sh
+python3 tools/install_lammps_source.py uninstall \
+  --lammps-source /path/to/lammps
+```
+
+卸载只删除 manifest 中记录且 SHA256 未改变的文件；发现本地修改会停止，不会误删用户代码。
 
 ## 常见错误
 
@@ -239,3 +300,7 @@ CPU 改用 `atom_style spin`；CUDA Kokkos 改用 `atom_style spin/kk`，并确�
 ### plugin 能加载，但 CUDA pair 不能运行
 
 检查 LAMMPS 是否确实使用 CUDA Kokkos device execution，并按 GPU 数量设置 `-k on g N`、`-sf kk` 和 `-pk kokkos ... comm device`。
+
+### builtin 配置后没有 `nep/cpu` 或 `nep/gpu`
+
+确认在第一次配置前已经运行 `install_lammps_source.py`，并传入了 `CMAKE_PROJECT_INCLUDE`、`NEP_ADAPTERS_SOURCE_DIR` 和一致的 `NEP_ADAPTERS_LAMMPS_SOURCE_BACKEND`。切换 backend 后必须重新配置构建目录。
