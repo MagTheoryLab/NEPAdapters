@@ -96,6 +96,14 @@ def main():
             spins,
             atom_counts,
         )
+        batch_size = 32
+        batch_descriptors = model.descriptors_spin(
+            np.tile(types, batch_size),
+            np.tile(box, (batch_size, 1)),
+            np.tile(structure.positions, (batch_size, 1)),
+            np.tile(spins, (batch_size, 1)),
+            np.full(batch_size, len(types), dtype=np.int32),
+        )
         try:
             model.calculate(types, box, structure.positions, atom_counts)
         except ValueError:
@@ -120,6 +128,13 @@ def main():
         raise AssertionError("spin virial differs from fixture")
     if not np.allclose(descriptors.reshape(-1), reference["descriptor"], rtol=0.0, atol=1.0e-10):
         raise AssertionError("spin descriptors differ from fixture")
+    if not np.allclose(
+        batch_descriptors,
+        np.tile(descriptors, (batch_size, 1)),
+        rtol=0.0,
+        atol=1.0e-10,
+    ):
+        raise AssertionError("parallel spin descriptor batch differs from serial result")
     with nep_adapters.NEPCalculator(model_path) as calculator:
         prediction = calculator.predict_spin_structures(structure)
         explicit_prediction = calculator.predict_spin_structures(structure, spins)

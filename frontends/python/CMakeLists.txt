@@ -188,7 +188,7 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
       PROPERTIES
         LABELS "parity;frontend;python;calculator;cpu;spin"
         ENVIRONMENT
-          "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt;NEP_ADAPTERS_PYTHON_SPIN_REFERENCE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
+          "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt;NEP_ADAPTERS_PYTHON_SPIN_REFERENCE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
     )
 
     if(TARGET NEPAdapters::cuda)

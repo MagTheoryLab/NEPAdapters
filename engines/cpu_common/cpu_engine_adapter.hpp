@@ -495,9 +495,11 @@ class CpuModel final : public Model {
         std::min<int>(batch.num_structures, omp_get_max_threads());
     const std::int64_t ordinary_parallel_min_atoms =
         kDescriptorBatchAtomsPerTypeWorker * nep_.paramb.num_types * structure_threads;
-    const bool use_structure_parallel =
-        model_kind() == NEPA_MODEL_KIND_ORDINARY && structure_threads > 1 &&
-        batch.total_atoms >= ordinary_parallel_min_atoms;
+    const NepaModelKind kind = model_kind();
+    const bool use_structure_parallel = structure_threads > 1 &&
+        (kind == NEPA_MODEL_KIND_SPIN ||
+         (kind == NEPA_MODEL_KIND_ORDINARY &&
+          batch.total_atoms >= ordinary_parallel_min_atoms));
 #else
     const bool use_structure_parallel = false;
 #endif
