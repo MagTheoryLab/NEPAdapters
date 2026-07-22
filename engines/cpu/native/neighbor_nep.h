@@ -23,7 +23,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #pragma once
 #include <vector>
 
-void find_neighbor_list_small_box(
+int find_neighbor_list_small_box(
   const double rc_radial,
   const double rc_angular,
   const int N,
@@ -36,4 +36,5 @@ void find_neighbor_list_small_box(
   std::vector<int>& g_NL_radial,
   std::vector<int>& g_NN_angular,
   std::vector<int>& g_NL_angular,
-  std::vector<double>& r12);
+  std::vector<double>& r12,
+  bool report_required_capacity = false);

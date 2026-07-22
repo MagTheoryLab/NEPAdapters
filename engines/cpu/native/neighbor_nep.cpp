@@ -20,7 +20,10 @@ Combining high accuracy and low cost in atomistic simulations and application to
 heat transport, Phys. Rev. B. 104, 104309 (2021).
 ------------------------------------------------------------------------------*/
 
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #if defined(_OPENMP)
@@ -191,7 +194,7 @@ void applyPbc(const int N, const double* box, double* x, double* y, double* z)
   }
 }
 
-void find_neighbor_list_large_box(
+int find_neighbor_list_large_box(
   const double rc_radial,
   const double rc_angular,
   const int N,
@@ -206,7 +209,8 @@ void find_neighbor_list_large_box(
   std::vector<int>& g_NL_angular,
   std::vector<double>& r12)
 {
-  const int size_x12 = N * MN;
+  const std::size_t size_x12 =
+    static_cast<std::size_t>(N) * static_cast<std::size_t>(MN);
   std::vector<double> position_copy(position);
   double* g_x = position_copy.data();
   double* g_y = position_copy.data() + N;
@@ -316,17 +320,25 @@ void find_neighbor_list_large_box(
           apply_mic_small_box(ebox, x12, y12, z12);
           const double distance_square = x12 * x12 + y12 * y12 + z12 * z12;
           if (distance_square < rc_radial * rc_radial) {
-            g_NL_radial[count_radial * N + n1] = n2;
-            g_x12_radial[count_radial * N + n1] = x12;
-            g_y12_radial[count_radial * N + n1] = y12;
-            g_z12_radial[count_radial * N + n1] = z12;
+            if (count_radial < MN) {
+              const std::size_t slot =
+                static_cast<std::size_t>(count_radial) * N + n1;
+              g_NL_radial[slot] = n2;
+              g_x12_radial[slot] = x12;
+              g_y12_radial[slot] = y12;
+              g_z12_radial[slot] = z12;
+            }
             count_radial++;
           }
           if (distance_square < rc_angular * rc_angular) {
-            g_NL_angular[count_angular * N + n1] = n2;
-            g_x12_angular[count_angular * N + n1] = x12;
-            g_y12_angular[count_angular * N + n1] = y12;
-            g_z12_angular[count_angular * N + n1] = z12;
+            if (count_angular < MN) {
+              const std::size_t slot =
+                static_cast<std::size_t>(count_angular) * N + n1;
+              g_NL_angular[slot] = n2;
+              g_x12_angular[slot] = x12;
+              g_y12_angular[slot] = y12;
+              g_z12_angular[slot] = z12;
+            }
             count_angular++;
           }
         }
@@ -335,11 +347,18 @@ void find_neighbor_list_large_box(
     g_NN_radial[n1] = count_radial;
     g_NN_angular[n1] = count_angular;
   }
+
+  int required_capacity = 0;
+  for (int n = 0; n < N; ++n) {
+    required_capacity = std::max(required_capacity, g_NN_radial[n]);
+    required_capacity = std::max(required_capacity, g_NN_angular[n]);
+  }
+  return required_capacity;
 }
 
 } // namespace
 
-void find_neighbor_list_small_box(
+int find_neighbor_list_small_box(
   const double rc_radial,
   const double rc_angular,
   const int N,
@@ -352,18 +371,25 @@ void find_neighbor_list_small_box(
   std::vector<int>& g_NL_radial,
   std::vector<int>& g_NN_angular,
   std::vector<int>& g_NL_angular,
-  std::vector<double>& r12)
+  std::vector<double>& r12,
+  const bool report_required_capacity)
 {
   bool is_small_box = get_expanded_box(rc_radial, box.data(), num_cells, ebox);
 
   if (!is_small_box) {
-    find_neighbor_list_large_box(
+    const int required_capacity = find_neighbor_list_large_box(
       rc_radial, rc_angular, N, MN, box, position, num_cells, ebox, g_NN_radial, g_NL_radial,
       g_NN_angular, g_NL_angular, r12);
-    return;
+    if (required_capacity > MN && !report_required_capacity) {
+      throw std::runtime_error(
+        "neighbor capacity exceeded: required " + std::to_string(required_capacity) +
+        ", available " + std::to_string(MN));
+    }
+    return required_capacity;
   }
 
-  const int size_x12 = N * MN;
+  const std::size_t size_x12 =
+    static_cast<std::size_t>(N) * static_cast<std::size_t>(MN);
   const double* g_x = position.data();
   const double* g_y = position.data() + N;
   const double* g_z = position.data() + N * 2;
@@ -428,17 +454,25 @@ void find_neighbor_list_small_box(
 
         double distance_square = x12 * x12 + y12 * y12 + z12 * z12;
         if (distance_square < rc_radial_sq) {
-          g_NL_radial[count_radial * N + n1] = n2;
-          g_x12_radial[count_radial * N + n1] = x12;
-          g_y12_radial[count_radial * N + n1] = y12;
-          g_z12_radial[count_radial * N + n1] = z12;
+          if (count_radial < MN) {
+            const std::size_t slot =
+              static_cast<std::size_t>(count_radial) * N + n1;
+            g_NL_radial[slot] = n2;
+            g_x12_radial[slot] = x12;
+            g_y12_radial[slot] = y12;
+            g_z12_radial[slot] = z12;
+          }
           count_radial++;
         }
         if (distance_square < rc_angular_sq) {
-          g_NL_angular[count_angular * N + n1] = n2;
-          g_x12_angular[count_angular * N + n1] = x12;
-          g_y12_angular[count_angular * N + n1] = y12;
-          g_z12_angular[count_angular * N + n1] = z12;
+          if (count_angular < MN) {
+            const std::size_t slot =
+              static_cast<std::size_t>(count_angular) * N + n1;
+            g_NL_angular[slot] = n2;
+            g_x12_angular[slot] = x12;
+            g_y12_angular[slot] = y12;
+            g_z12_angular[slot] = z12;
+          }
           count_angular++;
         }
       }
@@ -446,4 +480,16 @@ void find_neighbor_list_small_box(
     g_NN_radial[n1] = count_radial;
     g_NN_angular[n1] = count_angular;
   }
+
+  int required_capacity = 0;
+  for (int n = 0; n < N; ++n) {
+    required_capacity = std::max(required_capacity, g_NN_radial[n]);
+    required_capacity = std::max(required_capacity, g_NN_angular[n]);
+  }
+  if (required_capacity > MN && !report_required_capacity) {
+    throw std::runtime_error(
+      "neighbor capacity exceeded: required " + std::to_string(required_capacity) +
+      ", available " + std::to_string(MN));
+  }
+  return required_capacity;
 }
