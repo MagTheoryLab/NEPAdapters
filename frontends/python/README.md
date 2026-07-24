@@ -2,11 +2,11 @@
 
 本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。面向使用者的安装、快速开始和 API 指南见 [Python 接口指南](../../docs/python.md)；本页保留 frontend 契约和开发构建说明。
 
-发布设计只使用一个 `nep-adapters` distribution。当前 PyPI 尚无正式包，需要从源码安装。计划中的 Linux x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS 和 Windows wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
+发布只使用一个 `nep-adapters` distribution。Linux x86_64 和 Windows x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS x86_64 和 arm64 wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
 
 ## 运行时检查与错误
 
-`inspect_model(path)` 返回 `ModelInfo`，统一提供模型类型、元素、cutoff、descriptor 维度、能力名和模型 SHA256。`backend_status("cpu" | "cuda")` 返回 `BackendStatus`；CUDA 状态包含扩展是否安装、运行时是否可用、原因、设备列表和当前可用显存。
+`inspect_model(path)` 返回 `ModelInfo`，统一提供模型类型、元素、cutoff、descriptor 维度、能力名和模型 SHA256。`backend_status("cpu" | "cuda")` 返回 `BackendStatus`；CUDA 状态包含扩展是否安装、运行时是否可用、原因、设备列表和当前可用显存，并通过实际核函数验证计算链路。
 
 公共 Python 入口统一抛出 `NepAdaptersError` 子类：`InvalidInputError`、`UnsupportedModelError`、`BackendUnavailableError`、`ModelLoadError`、`BackendRuntimeError`、`OutOfMemoryError` 和 `CancelledError`。每个异常都带稳定的 `code`，以及适用时的 `backend`、`operation`；调用方不应匹配完整错误文案。
 
@@ -156,23 +156,29 @@ ctest --test-dir .build/python -L python --output-on-failure
 python -m build --wheel
 ```
 
-wheel 配置默认关闭 CUDA 和 qNEP PPPM/cuFFT，但 CPU 扩展始终启用 OpenMP。源码默认构建适用于本机开发；正式 Linux 发布由 CI 显式启用 CUDA 并生成 combined wheel。独立 CMake 安装仍默认保留开发库、头文件、OpenMP 和 package metadata。
+源码构建会自动查找 NVCC：找到时生成 combined CPU+CUDA wheel，找不到时生成
+CPU wheel。qNEP PPPM/cuFFT 默认关闭，CPU 扩展始终启用 OpenMP。正式发布由
+CI 显式指定多架构集合；独立 CMake 安装仍默认保留开发库、头文件、OpenMP
+和 package metadata。
 
 本地 combined CPU+CUDA wheel：
 
 ```sh
-NEP_CUDA=1 python -m build --wheel
+python -m build --wheel
 ```
 
-直接从源码安装 GPU 版使用短开关：
+直接从源码安装：
 
 ```sh
-NEP_CUDA=1 pip install .
+pip install .
 ```
 
-不传 `CMAKE_CUDA_ARCHITECTURES` 时使用 `native`。默认 `pip install .` 只构建
-启用 OpenMP 的 CPU 扩展，不会探测 CUDA。macOS 源码构建需要先执行
-`brew install libomp`；CMake 会自动读取 Homebrew 安装路径。
+自动检测依次读取 `CUDACXX`、`CUDAToolkit_ROOT`、`CUDA_PATH`、
+`CUDA_HOME` 和 `PATH`。找到 NVCC 后启用 CUDA；不传
+`CMAKE_CUDA_ARCHITECTURES` 时使用 `native`，只编译构建机器的 GPU 架构。
+找不到 NVCC 时只构建启用 OpenMP 的 CPU 扩展。`NEP_CUDA=1` 可强制启用
+CUDA，并在工具链缺失时明确失败；`NEP_CUDA=0` 可强制 CPU-only。macOS
+源码构建需要先执行 `brew install libomp`。
 
 高级用法仍可通过
 `--config-settings=cmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON` 显式传递 CMake
@@ -182,13 +188,13 @@ combined wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或�
 
 CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型通过 `nep_gpu` 执行 `calculate_charge()` 和 `descriptors()`；普通 `calculate()` 对 charge 模型保持 fail-closed。
 
-发布 wheel 不使用 `native`，而是同时嵌入 V100、T4、A100、A10/RTX 30 和
-RTX 4090 的 SASS，并保留 `compute_89` PTX：
+发布 wheel 不使用 `native`，而是嵌入 `sm_60` 与 `sm_89` SASS，并保留
+`compute_60` PTX。其他受驱动支持的 GPU 架构可通过 PTX 即时编译运行，
+但可能产生首次加载开销或一定性能损失：
 
 ```sh
-CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual' \
-python -m build --wheel \
-  -Ccmake.define.NEP_ADAPTERS_ENABLE_CUDA=ON
+CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual' \
+python -m build --wheel
 ```
 
 发布 wheel 必须在目标 manylinux 构建镜像中编译。`auditwheel repair` 可以补充平台 tag 或允许的动态库，但不能降低较新宿主编译器引入的 GLIBC/GLIBCXX 符号版本。

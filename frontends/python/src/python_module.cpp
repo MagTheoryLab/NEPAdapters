@@ -927,12 +927,28 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
       return out;
     }
     py::list devices;
+    int first_usable_device = -1;
+    std::string first_probe_failure;
     for (int index = 0; index < device_count; ++index) {
       cudaDeviceProp properties{};
       const cudaError_t property_status =
           cudaGetDeviceProperties(&properties, index);
       if (property_status != cudaSuccess) {
+        if (first_probe_failure.empty()) {
+          first_probe_failure =
+              "device " + std::to_string(index) + " query failed: " +
+              cudaGetErrorString(property_status);
+        }
         cudaGetLastError();
+        continue;
+      }
+      std::string probe_detail;
+      if (!nep_adapters::probe_cuda_device(index, probe_detail)) {
+        if (first_probe_failure.empty()) {
+          first_probe_failure =
+              "device " + std::to_string(index) + " (" + properties.name +
+              "): " + probe_detail;
+        }
         continue;
       }
       py::dict device;
@@ -942,14 +958,26 @@ PYBIND11_MODULE(NEP_ADAPTERS_PYTHON_MODULE_NAME, module) {
       device["minor"] = properties.minor;
       device["total_memory_bytes"] = properties.totalGlobalMem;
       devices.append(device);
+      if (first_usable_device < 0) {
+        first_usable_device = index;
+      }
     }
     out["devices"] = devices;
     out["available"] = py::len(devices) > 0;
-    out["reason"] = py::len(devices) > 0 ? "available" : "no_device";
-    out["detail"] = py::len(devices) > 0
-        ? "CUDA runtime and at least one device are available."
-        : "CUDA runtime reported no usable devices.";
-    if (py::len(devices) > 0 && cudaSetDevice(0) == cudaSuccess) {
+    if (py::len(devices) > 0) {
+      out["reason"] = "available";
+      out["detail"] =
+          "CUDA allocation, kernel launch, synchronization, and copyback "
+          "passed on at least one device.";
+    } else if (device_count > 0 && !first_probe_failure.empty()) {
+      out["reason"] = "kernel_probe_failed";
+      out["detail"] = first_probe_failure;
+    } else {
+      out["reason"] = "no_device";
+      out["detail"] = "CUDA runtime reported no usable devices.";
+    }
+    if (first_usable_device >= 0 &&
+        cudaSetDevice(first_usable_device) == cudaSuccess) {
       std::size_t free_bytes = 0;
       std::size_t total_bytes = 0;
       if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {

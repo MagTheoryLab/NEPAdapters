@@ -72,7 +72,7 @@ ctest --test-dir .build/cuda -L cuda --output-on-failure
 
 ## Python：直接安装
 
-当前 PyPI 没有正式发布包。最简单的 CPU 安装方式是：
+在仓库根目录直接从源码安装：
 
 ```sh
 python -m pip install .
@@ -84,13 +84,11 @@ python -m pip install .
 python -m pip install '.[ase]'
 ```
 
-启用 CUDA：
-
-```sh
-NEP_CUDA=1 python -m pip install .
-```
-
-默认源码安装不会自动探测 CUDA。`NEP_CUDA=1` 是 `-DNEP_ADAPTERS_ENABLE_CUDA=ON` 的短开关，CUDA 加载失败也不会回退到 CPU。
+源码安装会查找 `CUDACXX`、`CUDAToolkit_ROOT`、`CUDA_PATH`、
+`CUDA_HOME` 和 `PATH` 中的 NVCC。找到时自动构建 CPU+CUDA，并在未指定
+`CMAKE_CUDA_ARCHITECTURES` 时使用 `native`；找不到时只构建 CPU。
+`NEP_CUDA=1` 强制启用 CUDA，`NEP_CUDA=0` 强制 CPU-only。CUDA 加载失败
+不会回退到 CPU。
 
 ## Python：CMake 开发构建
 
@@ -158,7 +156,7 @@ cmake --build /path/to/lammps/.build/nep-adapters-cpu --target lmp -j2
 | 选项 | 默认值 | 说明 |
 |---|---:|---|
 | `NEP_ADAPTERS_ENABLE_CPU` | `ON` | 构建 CPU engine |
-| `NEP_ADAPTERS_ENABLE_CUDA` | `OFF` | 构建 CUDA engine；`NEP_CUDA=1` 可改变默认值 |
+| `NEP_ADAPTERS_ENABLE_CUDA` | `OFF` | Python 源码安装会自动探测；独立 CMake 用该选项显式启用 |
 | `NEP_ADAPTERS_ENABLE_PYTHON` | `OFF` | 构建 Python frontend |
 | `NEP_ADAPTERS_ENABLE_LAMMPS` | `OFF` | 构建 LAMMPS frontend/plugin |
 | `NEP_ADAPTERS_BUILD_TESTS` | `ON` | 注册正确性测试 |

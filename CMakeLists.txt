@@ -1,18 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-set(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT OFF)
-if(DEFINED ENV{NEP_CUDA})
-  string(TOUPPER "$ENV{NEP_CUDA}" NEP_ADAPTERS_CUDA_ENV)
-  if(NEP_ADAPTERS_CUDA_ENV MATCHES "^(1|ON|TRUE|YES)$")
-    set(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT ON)
-  elseif(NOT NEP_ADAPTERS_CUDA_ENV MATCHES "^(0|OFF|FALSE|NO)$")
-    message(FATAL_ERROR
-      "NEP_CUDA must be one of 1/0, ON/OFF, TRUE/FALSE, or YES/NO.")
-  endif()
-  unset(NEP_ADAPTERS_CUDA_ENV)
-endif()
+include(cmake/NEPAdaptersCUDAAutoDetect.cmake)
+nep_adapters_resolve_cuda_default(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT)
 option(NEP_ADAPTERS_ENABLE_CUDA
-  "Enable the CUDA engine; NEP_CUDA=1 provides a source-install shortcut"
+  "Enable CUDA; auto-detects nvcc unless NEP_CUDA or this option is set"
   ${NEP_ADAPTERS_ENABLE_CUDA_DEFAULT})
 unset(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT)
 option(

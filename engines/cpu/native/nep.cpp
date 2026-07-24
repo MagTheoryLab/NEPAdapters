@@ -6927,7 +6927,7 @@ void add_spin_gradient_lammps_single_center_nonchiral(
         double gw1 = grad_weight[1];
         double gw2 = grad_weight[2];
         double gw3 = grad_weight[3];
-#if defined(_OPENMP)
+#if defined(_OPENMP) && !defined(_MSC_VER)
 #pragma omp simd reduction(+:gw0, gw1, gw2, gw3)
 #endif
         for (int k = 0; k < width; ++k) {
@@ -7464,7 +7464,7 @@ void add_spin_gradient(
         double gw1 = grad_weight[1];
         double gw2 = grad_weight[2];
         double gw3 = grad_weight[3];
-#if defined(_OPENMP)
+#if defined(_OPENMP) && !defined(_MSC_VER)
 #pragma omp simd reduction(+:gw0, gw1, gw2, gw3)
 #endif
         for (int k = 0; k < width; ++k) {
@@ -7788,8 +7788,9 @@ void apply_spin_ann_for_lammps(
   const bool use_parallel_atoms,
   const int num_threads)
 {
+  double reduced_potential = 0.0;
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(num_threads) reduction(+:total_potential) if (use_parallel_atoms)
+#pragma omp parallel for schedule(static) num_threads(num_threads) reduction(+:reduced_potential) if (use_parallel_atoms)
 #endif
   for (int ii = 0; ii < inum; ++ii) {
     const int atom = ilist[ii];
@@ -7802,7 +7803,7 @@ void apply_spin_ann_for_lammps(
       annmb.dim, annmb.num_neurons1, annmb.w0[mapped_type], annmb.b0[mapped_type],
       annmb.w1[mapped_type], annmb.b1, q, F, Fp_local, latent, false, nullptr);
     const double energy = F + spin_baseline[static_cast<std::size_t>(mapped_type)];
-    total_potential += energy;
+    reduced_potential += energy;
     if (potential) {
       potential[atom] += energy;
     }
@@ -7811,6 +7812,7 @@ void apply_spin_ann_for_lammps(
         Fp_local[d] * paramb.q_scaler[d];
     }
   }
+  total_potential += reduced_potential;
 }
 
 void find_spin_force_for_lammps(
@@ -7906,8 +7908,9 @@ bool compute_spin_lammps_fused_center(
   const bool use_parallel = false;
 #endif
 
+  double reduced_potential = 0.0;
 #if defined(_OPENMP)
-#pragma omp parallel num_threads(num_threads) if (use_parallel) reduction(+:total_potential)
+#pragma omp parallel num_threads(num_threads) if (use_parallel) reduction(+:reduced_potential)
 #endif
   {
 #if defined(_OPENMP)
@@ -8211,7 +8214,7 @@ bool compute_spin_lammps_fused_center(
         annmb.dim, annmb.num_neurons1, annmb.w0[mapped_type], annmb.b0[mapped_type],
         annmb.w1[mapped_type], annmb.b1, q_full, F, Fp_local, latent, false, nullptr);
       const double energy = F + spin_baseline[static_cast<std::size_t>(mapped_type)];
-      total_potential += energy;
+      reduced_potential += energy;
       if (potential) {
         potential[atom] += energy;
       }
@@ -8233,6 +8236,7 @@ bool compute_spin_lammps_fused_center(
       add_spin_phase_breakdown(*phase, thread_phase);
     }
   }
+  total_potential += reduced_potential;
   return true;
 }
 

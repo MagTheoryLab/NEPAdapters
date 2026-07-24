@@ -6,7 +6,6 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <vector>
 
 namespace nep_adapters::cuda_backend {
@@ -27,82 +26,6 @@ enum class SpinVirialMode : int {
   neighbor_owned,
   center_and_neighbor_float_sink,
 };
-
-template <typename Launch>
-void dispatch_spin_virial_mode(
-    SpinVirialMode virial_mode,
-    const Launch& launch) {
-  switch (virial_mode) {
-    case SpinVirialMode::disabled:
-      launch(std::integral_constant<SpinVirialMode, SpinVirialMode::disabled>{});
-      break;
-    case SpinVirialMode::center_owned:
-      launch(std::integral_constant<SpinVirialMode, SpinVirialMode::center_owned>{});
-      break;
-    case SpinVirialMode::neighbor_owned:
-      launch(std::integral_constant<
-             SpinVirialMode,
-             SpinVirialMode::neighbor_owned>{});
-      break;
-    case SpinVirialMode::center_and_neighbor_float_sink:
-      launch(std::integral_constant<
-             SpinVirialMode,
-             SpinVirialMode::center_and_neighbor_float_sink>{});
-      break;
-  }
-}
-
-template <typename Launch>
-void dispatch_spin_transfer_mode(bool enabled, const Launch& launch) {
-  if (enabled) {
-    launch(std::true_type{});
-  } else {
-    launch(std::false_type{});
-  }
-}
-
-template <typename Launch>
-void dispatch_spin_channels(int channels, const Launch& launch) {
-  switch (channels) {
-    case 1:
-      launch(std::integral_constant<int, 1>{});
-      break;
-    case 2:
-      launch(std::integral_constant<int, 2>{});
-      break;
-    case 3:
-      launch(std::integral_constant<int, 3>{});
-      break;
-    case 4:
-      launch(std::integral_constant<int, 4>{});
-      break;
-    default:
-      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
-  }
-}
-
-template <typename Launch>
-void dispatch_spin_lmax(int l_max, const Launch& launch) {
-  switch (l_max) {
-    case 0:
-      launch(std::integral_constant<int, 0>{});
-      break;
-    case 1:
-      launch(std::integral_constant<int, 1>{});
-      break;
-    case 2:
-      launch(std::integral_constant<int, 2>{});
-      break;
-    case 3:
-      launch(std::integral_constant<int, 3>{});
-      break;
-    case 4:
-      launch(std::integral_constant<int, 4>{});
-      break;
-    default:
-      throw std::runtime_error("CUDA spin core supports l_max from 0 to 4");
-  }
-}
 
 template <int C, int LMax>
 struct SpinStaticLayout {
@@ -215,6 +138,273 @@ class PhaseTimer {
 #include "spin_onsite_descriptors.cuh"
 #include "spin_onsite_forces.cuh"
 
+template <int C, int LMax, bool Chiral>
+void launch_spin_descriptor_core(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view) {
+  build_spin_descriptor_core_streaming<
+      C,
+      LMax,
+      Chiral><<<atom_count, 128>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          protocol.num_types,
+          protocol.spin_basis_size,
+          static_cast<float>(protocol.spin_cutoff_radial),
+          box,
+          view.types,
+          view.positions_soa3,
+          view.spins_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          model_view.descriptor_coefficients,
+          static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+          view.spin_density_rho0,
+          view.spin_density_raw1,
+          view.spin_density_angular2,
+          view.spin_density_angular3,
+          view.spin_density_angular4,
+          view.spin_density_geom,
+          view.spin_density_rho0_dot,
+          view.spin_density_raw1_dot,
+          view.spin_chiral_polar,
+          view.spin_chiral_octupoles_raw,
+          view.spin_chiral_hexadecapoles_raw,
+          view.descriptors);
+}
+
+template <int C, int LMax>
+void launch_spin_descriptor_shape(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  if (protocol.spin_chiral != 0) {
+    launch_spin_descriptor_core<C, LMax, true>(
+        protocol, atom_count, box, model_view, view);
+    const int threads = 128;
+    const int work_items = atom_count * C;
+    const int blocks = (work_items + threads - 1) / threads;
+    build_spin_chiral_descriptors_f32<C><<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        layout,
+        view.spins_soa3,
+        view.spin_density_geom,
+        view.spin_density_raw1,
+        view.spin_chiral_polar,
+        view.spin_chiral_octupoles_raw,
+        view.spin_chiral_hexadecapoles_raw,
+        view.spin_chiral_chirals,
+        view.descriptors);
+  } else {
+    launch_spin_descriptor_core<C, LMax, false>(
+        protocol, atom_count, box, model_view, view);
+  }
+}
+
+template <int C>
+void launch_spin_descriptor_lmax(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  switch (protocol.spin_l_max) {
+    case 0:
+      launch_spin_descriptor_shape<C, 0>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 1:
+      launch_spin_descriptor_shape<C, 1>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 2:
+      launch_spin_descriptor_shape<C, 2>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 3:
+      launch_spin_descriptor_shape<C, 3>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 4:
+      launch_spin_descriptor_shape<C, 4>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports l_max from 0 to 4");
+  }
+}
+
+void launch_spin_descriptors(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  switch (protocol.spin_compress) {
+    case 1:
+      launch_spin_descriptor_lmax<1>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 2:
+      launch_spin_descriptor_lmax<2>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 3:
+      launch_spin_descriptor_lmax<3>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 4:
+      launch_spin_descriptor_lmax<4>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
+  }
+}
+
+template <
+    int C,
+    int LMax,
+    SpinVirialMode VirialMode,
+    bool AccumulateSpinTransfer>
+void launch_spin_density_force_shape(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view) {
+  constexpr int AtomsPerWarp = 4;
+  constexpr int EdgesPerAtomBatch = 8;
+  const int tile_blocks = (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+  accumulate_spin_density_forces_tile_f32<
+      C,
+      LMax,
+      VirialMode,
+      AccumulateSpinTransfer,
+      AtomsPerWarp,
+      EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        protocol.num_types,
+        protocol.spin_basis_size,
+        static_cast<float>(protocol.spin_cutoff_radial),
+        box,
+        view.types,
+        view.positions_soa3,
+        view.spins_soa3,
+        view.nn_radial,
+        view.nl_radial_slot_major,
+        view.fp,
+        model_view.descriptor_coefficients,
+        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+        view.spin_density_rho0,
+        view.spin_density_angular2,
+        view.spin_density_angular3,
+        view.spin_density_angular4,
+        view.spin_density_geom,
+        view.spin_density_rho0_dot,
+        view.spin_density_raw1,
+        view.spin_density_raw1_dot,
+        view.force_soa3,
+        view.mforce_soa3,
+        view.virial_soa9,
+        view.per_atom_virial_float_soa9,
+        view.spin_transfer_soa9);
+}
+
+template <int C, int LMax, SpinVirialMode VirialMode>
+void launch_spin_density_force_transfer(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    bool accumulate_spin_transfer) {
+  if (accumulate_spin_transfer) {
+    launch_spin_density_force_shape<C, LMax, VirialMode, true>(
+        protocol, atom_count, box, model_view, view);
+  } else {
+    launch_spin_density_force_shape<C, LMax, VirialMode, false>(
+        protocol, atom_count, box, model_view, view);
+  }
+}
+
+template <int C, int LMax>
+void launch_spin_density_force_virial(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
+#define NEP_LAUNCH_DENSITY_FORCE_VIRIAL(mode)                              \
+  launch_spin_density_force_transfer<C, LMax, SpinVirialMode::mode>(       \
+      protocol, atom_count, box, model_view, view, accumulate_spin_transfer)
+  switch (virial_mode) {
+    case SpinVirialMode::disabled:
+      NEP_LAUNCH_DENSITY_FORCE_VIRIAL(disabled);
+      break;
+    case SpinVirialMode::center_owned:
+      NEP_LAUNCH_DENSITY_FORCE_VIRIAL(center_owned);
+      break;
+    case SpinVirialMode::neighbor_owned:
+      NEP_LAUNCH_DENSITY_FORCE_VIRIAL(neighbor_owned);
+      break;
+    case SpinVirialMode::center_and_neighbor_float_sink:
+      NEP_LAUNCH_DENSITY_FORCE_VIRIAL(center_and_neighbor_float_sink);
+      break;
+  }
+#undef NEP_LAUNCH_DENSITY_FORCE_VIRIAL
+}
+
+template <int C>
+void launch_spin_density_force_lmax(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
+#define NEP_LAUNCH_DENSITY_FORCE_LMAX(lmax)                              \
+  launch_spin_density_force_virial<C, lmax>(                             \
+      protocol, atom_count, box, model_view, view, virial_mode,          \
+      accumulate_spin_transfer)
+  switch (protocol.spin_l_max) {
+    case 0:
+      NEP_LAUNCH_DENSITY_FORCE_LMAX(0);
+      break;
+    case 1:
+      NEP_LAUNCH_DENSITY_FORCE_LMAX(1);
+      break;
+    case 2:
+      NEP_LAUNCH_DENSITY_FORCE_LMAX(2);
+      break;
+    case 3:
+      NEP_LAUNCH_DENSITY_FORCE_LMAX(3);
+      break;
+    case 4:
+      NEP_LAUNCH_DENSITY_FORCE_LMAX(4);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports l_max from 0 to 4");
+  }
+#undef NEP_LAUNCH_DENSITY_FORCE_LMAX
+}
+
 void launch_spin_density_forces(
     const ModelProtocol& protocol,
     int atom_count,
@@ -223,63 +413,122 @@ void launch_spin_density_forces(
     const DeviceWorkspaceView& view,
     SpinVirialMode virial_mode,
     bool accumulate_spin_transfer) {
-  const auto launch_channels = [&](auto channel_tag) {
-    constexpr int C = decltype(channel_tag)::value;
-    const auto launch_lmax = [&](auto lmax_tag) {
-      constexpr int LMax = decltype(lmax_tag)::value;
-      const auto launch_virial = [&](auto virial_tag) {
-        constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
-        const auto launch_transfer = [&](auto transfer_tag) {
-          constexpr int AtomsPerWarp = 4;
-          constexpr int EdgesPerAtomBatch = 8;
-          constexpr bool AccumulateSpinTransfer =
-              decltype(transfer_tag)::value;
-          const int tile_blocks =
-              (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
-          accumulate_spin_density_forces_tile_f32<
-              C,
-              LMax,
-              VirialMode,
-              AccumulateSpinTransfer,
-              AtomsPerWarp,
-              EdgesPerAtomBatch><<<tile_blocks, 32>>>(
-                atom_count,
-                static_cast<int>(view.atom_capacity),
-                protocol.struct_descriptor_dim,
-                protocol.num_types,
-                protocol.spin_basis_size,
-                static_cast<float>(protocol.spin_cutoff_radial),
-                box,
-                view.types,
-                view.positions_soa3,
-                view.spins_soa3,
-                view.nn_radial,
-                view.nl_radial_slot_major,
-                view.fp,
-                model_view.descriptor_coefficients,
-                static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-                view.spin_density_rho0,
-                view.spin_density_angular2,
-                view.spin_density_angular3,
-                view.spin_density_angular4,
-                view.spin_density_geom,
-                view.spin_density_rho0_dot,
-                view.spin_density_raw1,
-                view.spin_density_raw1_dot,
-                view.force_soa3,
-                view.mforce_soa3,
-                view.virial_soa9,
-                view.per_atom_virial_float_soa9,
-                view.spin_transfer_soa9);
-        };
-        dispatch_spin_transfer_mode(
-            accumulate_spin_transfer, launch_transfer);
-      };
-      dispatch_spin_virial_mode(virial_mode, launch_virial);
-    };
-    dispatch_spin_lmax(protocol.spin_l_max, launch_lmax);
-  };
-  dispatch_spin_channels(protocol.spin_compress, launch_channels);
+#define NEP_LAUNCH_DENSITY_FORCE_CHANNELS(channels)                       \
+  launch_spin_density_force_lmax<channels>(                               \
+      protocol, atom_count, box, model_view, view, virial_mode,           \
+      accumulate_spin_transfer)
+  switch (protocol.spin_compress) {
+    case 1:
+      NEP_LAUNCH_DENSITY_FORCE_CHANNELS(1);
+      break;
+    case 2:
+      NEP_LAUNCH_DENSITY_FORCE_CHANNELS(2);
+      break;
+    case 3:
+      NEP_LAUNCH_DENSITY_FORCE_CHANNELS(3);
+      break;
+    case 4:
+      NEP_LAUNCH_DENSITY_FORCE_CHANNELS(4);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
+  }
+#undef NEP_LAUNCH_DENSITY_FORCE_CHANNELS
+}
+
+template <int C, SpinVirialMode VirialMode, bool AccumulateSpinTransfer>
+void launch_spin_chiral_force_shape(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  constexpr int AtomsPerWarp = 8;
+  constexpr int EdgesPerAtomBatch = 4;
+  const int tile_blocks = (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
+  accumulate_spin_chiral_forces_tile_f32<
+      C,
+      VirialMode,
+      AccumulateSpinTransfer,
+      AtomsPerWarp,
+      EdgesPerAtomBatch><<<tile_blocks, 32>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        protocol.num_types,
+        protocol.spin_basis_size,
+        layout,
+        static_cast<float>(protocol.spin_cutoff_radial),
+        box,
+        view.types,
+        view.positions_soa3,
+        view.spins_soa3,
+        view.nn_radial,
+        view.nl_radial_slot_major,
+        view.fp,
+        model_view.descriptor_coefficients,
+        static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+        view.spin_density_geom,
+        view.spin_density_raw1,
+        view.spin_chiral_polar,
+        view.spin_chiral_octupoles_raw,
+        view.spin_chiral_hexadecapoles_raw,
+        view.spin_chiral_chirals,
+        view.force_soa3,
+        view.mforce_soa3,
+        view.virial_soa9,
+        view.per_atom_virial_float_soa9,
+        view.spin_transfer_soa9);
+}
+
+template <int C, SpinVirialMode VirialMode>
+void launch_spin_chiral_force_transfer(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout,
+    bool accumulate_spin_transfer) {
+  if (accumulate_spin_transfer) {
+    launch_spin_chiral_force_shape<C, VirialMode, true>(
+        protocol, atom_count, box, model_view, view, layout);
+  } else {
+    launch_spin_chiral_force_shape<C, VirialMode, false>(
+        protocol, atom_count, box, model_view, view, layout);
+  }
+}
+
+template <int C>
+void launch_spin_chiral_force_virial(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout,
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer) {
+#define NEP_LAUNCH_CHIRAL_FORCE_VIRIAL(mode)                              \
+  launch_spin_chiral_force_transfer<C, SpinVirialMode::mode>(             \
+      protocol, atom_count, box, model_view, view, layout,                \
+      accumulate_spin_transfer)
+  switch (virial_mode) {
+    case SpinVirialMode::disabled:
+      NEP_LAUNCH_CHIRAL_FORCE_VIRIAL(disabled);
+      break;
+    case SpinVirialMode::center_owned:
+      NEP_LAUNCH_CHIRAL_FORCE_VIRIAL(center_owned);
+      break;
+    case SpinVirialMode::neighbor_owned:
+      NEP_LAUNCH_CHIRAL_FORCE_VIRIAL(neighbor_owned);
+      break;
+    case SpinVirialMode::center_and_neighbor_float_sink:
+      NEP_LAUNCH_CHIRAL_FORCE_VIRIAL(center_and_neighbor_float_sink);
+      break;
+  }
+#undef NEP_LAUNCH_CHIRAL_FORCE_VIRIAL
 }
 
 void launch_spin_chiral_forces(
@@ -291,57 +540,27 @@ void launch_spin_chiral_forces(
     SpinVirialMode virial_mode,
     bool accumulate_spin_transfer) {
   const SpinCoreLayout layout = make_spin_core_layout(protocol);
-  const auto launch_channels = [&](auto channel_tag) {
-    constexpr int C = decltype(channel_tag)::value;
-    const auto launch_virial = [&](auto virial_tag) {
-      constexpr SpinVirialMode VirialMode = decltype(virial_tag)::value;
-      const auto launch_transfer = [&](auto transfer_tag) {
-        constexpr int AtomsPerWarp = 8;
-        constexpr int EdgesPerAtomBatch = 4;
-        constexpr bool AccumulateSpinTransfer =
-            decltype(transfer_tag)::value;
-        const int tile_blocks =
-            (atom_count + AtomsPerWarp - 1) / AtomsPerWarp;
-        accumulate_spin_chiral_forces_tile_f32<
-            C,
-            VirialMode,
-            AccumulateSpinTransfer,
-            AtomsPerWarp,
-            EdgesPerAtomBatch><<<tile_blocks, 32>>>(
-              atom_count,
-              static_cast<int>(view.atom_capacity),
-              protocol.struct_descriptor_dim,
-              protocol.num_types,
-              protocol.spin_basis_size,
-              layout,
-              static_cast<float>(protocol.spin_cutoff_radial),
-              box,
-              view.types,
-              view.positions_soa3,
-              view.spins_soa3,
-              view.nn_radial,
-              view.nl_radial_slot_major,
-              view.fp,
-              model_view.descriptor_coefficients,
-              static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-              view.spin_density_geom,
-              view.spin_density_raw1,
-              view.spin_chiral_polar,
-              view.spin_chiral_octupoles_raw,
-              view.spin_chiral_hexadecapoles_raw,
-              view.spin_chiral_chirals,
-              view.force_soa3,
-              view.mforce_soa3,
-              view.virial_soa9,
-              view.per_atom_virial_float_soa9,
-              view.spin_transfer_soa9);
-      };
-      dispatch_spin_transfer_mode(
-          accumulate_spin_transfer, launch_transfer);
-    };
-    dispatch_spin_virial_mode(virial_mode, launch_virial);
-  };
-  dispatch_spin_channels(protocol.spin_compress, launch_channels);
+#define NEP_LAUNCH_CHIRAL_FORCE_CHANNELS(channels)                        \
+  launch_spin_chiral_force_virial<channels>(                              \
+      protocol, atom_count, box, model_view, view, layout, virial_mode,   \
+      accumulate_spin_transfer)
+  switch (protocol.spin_compress) {
+    case 1:
+      NEP_LAUNCH_CHIRAL_FORCE_CHANNELS(1);
+      break;
+    case 2:
+      NEP_LAUNCH_CHIRAL_FORCE_CHANNELS(2);
+      break;
+    case 3:
+      NEP_LAUNCH_CHIRAL_FORCE_CHANNELS(3);
+      break;
+    case 4:
+      NEP_LAUNCH_CHIRAL_FORCE_CHANNELS(4);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
+  }
+#undef NEP_LAUNCH_CHIRAL_FORCE_CHANNELS
 }
 
 }  // namespace
@@ -410,68 +629,8 @@ void build_spin_descriptors_on_device(
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
   if (atom_count > 0) {
-    const auto launch_channels = [&](auto channel_tag) {
-      constexpr int C = decltype(channel_tag)::value;
-      const auto launch_lmax = [&](auto lmax_tag) {
-        constexpr int LMax = decltype(lmax_tag)::value;
-        const auto launch_core = [&](auto chiral_tag) {
-          constexpr bool Chiral = decltype(chiral_tag)::value;
-          build_spin_descriptor_core_streaming<
-              C,
-              LMax,
-              Chiral><<<atom_count, 128>>>(
-                  atom_count,
-                  static_cast<int>(view.atom_capacity),
-                  protocol.struct_descriptor_dim,
-                  protocol.num_types,
-                  protocol.spin_basis_size,
-                  static_cast<float>(protocol.spin_cutoff_radial),
-                  box,
-                  view.types,
-                  view.positions_soa3,
-                  view.spins_soa3,
-                  view.nn_radial,
-                  view.nl_radial_slot_major,
-                  model_view.descriptor_coefficients,
-                  static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-                  view.spin_density_rho0,
-                  view.spin_density_raw1,
-                  view.spin_density_angular2,
-                  view.spin_density_angular3,
-                  view.spin_density_angular4,
-                  view.spin_density_geom,
-                  view.spin_density_rho0_dot,
-                  view.spin_density_raw1_dot,
-                  view.spin_chiral_polar,
-                  view.spin_chiral_octupoles_raw,
-                  view.spin_chiral_hexadecapoles_raw,
-                  view.descriptors);
-        };
-        if (protocol.spin_chiral != 0) {
-          launch_core(std::true_type{});
-          const int threads = 128;
-          const int work_items = atom_count * C;
-          const int blocks = (work_items + threads - 1) / threads;
-          build_spin_chiral_descriptors_f32<C><<<blocks, threads>>>(
-              atom_count,
-              static_cast<int>(view.atom_capacity),
-              protocol.struct_descriptor_dim,
-              layout,
-              view.spins_soa3,
-              view.spin_density_geom,
-              view.spin_density_raw1,
-              view.spin_chiral_polar,
-              view.spin_chiral_octupoles_raw,
-              view.spin_chiral_hexadecapoles_raw,
-              view.spin_chiral_chirals,
-              view.descriptors);
-        } else {
-          launch_core(std::false_type{});
-        }
-      };
-      dispatch_spin_lmax(protocol.spin_l_max, launch_lmax);
-    };
-    dispatch_spin_channels(protocol.spin_compress, launch_channels);
+    launch_spin_descriptors(
+        protocol, atom_count, box, model_view, view, layout);
   }
   check_cuda(cudaGetLastError(), "build spin descriptors kernel launch failed");
 }

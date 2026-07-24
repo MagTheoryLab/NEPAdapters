@@ -11,6 +11,19 @@ version = "1.0.0"
 description = "NEP runtime adapters for Python and LAMMPS frontends"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "engines/cpu/native/LICENSE.NEP_CPU" }
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "numpy",
 ]

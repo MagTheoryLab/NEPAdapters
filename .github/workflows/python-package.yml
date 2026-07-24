@@ -6,17 +6,22 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: Existing tag to build, or empty for the current ref
+        description: Existing tag to validate/build, or empty for the current ref
         required: false
         default: ""
         type: string
       build_gpu:
-        description: Build combined Linux CPU+CUDA wheels
+        description: Build combined Linux and Windows CPU+CUDA wheels
         required: false
         default: true
         type: boolean
-      publish_pypi:
-        description: Publish the complete package set to PyPI
+      windows_cuda_only:
+        description: Build only the Windows CPython 3.10 CPU+CUDA validation wheel
+        required: false
+        default: false
+        type: boolean
+      linux_cuda_only:
+        description: Build only the Linux CPython 3.10 CPU+CUDA wheel
         required: false
         default: false
         type: boolean
@@ -34,13 +39,16 @@ env:
 jobs:
   sdist:
     name: Source distribution
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ env.TARGET_REF }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -61,20 +69,25 @@ jobs:
               raise SystemExit(f"release tag {actual!r} must equal {expected!r}")
           PY
       - name: Build and verify sdist
+        env:
+          NEP_CUDA: "0"
         run: |
           python -m pip install --upgrade pip build twine
           python -m build --sdist
           python -m twine check dist/*
           python -m pip install dist/*.tar.gz
           python -c "import nep_adapters"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: python-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
   cpu_wheels:
-    name: Platform wheels (${{ matrix.label }})
+    name: CPU wheels (${{ matrix.label }})
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -83,28 +96,30 @@ jobs:
           - os: macos-15-intel
             label: macos-x86_64
             archs: x86_64
-          - os: macos-latest
+            macos_target: "14.0"
+          - os: macos-14
             label: macos-arm64
             archs: arm64
-          - os: windows-2022
-            label: windows-x86_64
-            archs: AMD64
+            macos_target: "14.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ env.TARGET_REF }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build platform wheels
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
+          CIBW_ENVIRONMENT: NEP_CUDA=0
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_BEFORE_ALL_MACOS: brew install libomp
+          CIBW_ENVIRONMENT_MACOS: >-
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}
       - name: Audit platform wheel contents
         run: python tools/check_wheel_contents.py --variant cpu --wheel-dir wheelhouse
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: python-platform-${{ matrix.label }}
           path: wheelhouse/*.whl
@@ -113,61 +128,115 @@ jobs:
   gpu_wheels:
     name: Combined CPU+CUDA wheels (Linux x86_64)
     if: >-
-      github.event_name == 'release' ||
+      (github.event_name == 'release' ||
       inputs.tag_name != '' ||
       inputs.build_gpu ||
-      inputs.publish_pypi
+      inputs.linux_cuda_only) &&
+      !inputs.windows_cuda_only
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ env.TARGET_REF }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build combined wheels
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS_LINUX: x86_64
-          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          CIBW_BUILD: >-
+            ${{ inputs.linux_cuda_only &&
+            'cp310-manylinux_x86_64' ||
+            'cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64' }}
           CIBW_BEFORE_ALL_LINUX: |
             set -euxo pipefail
             dnf install -y dnf-plugins-core
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
-            dnf install -y cuda-toolkit-12-4
+            dnf install -y gcc-toolset-13-gcc-c++ cuda-compiler-12-4 cuda-cudart-devel-12-4
             ln -sfn /usr/local/cuda-12.4 /usr/local/cuda
           CIBW_ENVIRONMENT_LINUX: >-
             PATH=/usr/local/cuda/bin:$PATH
+            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             CUDACXX=/usr/local/cuda/bin/nvcc
-            CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
-            -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
-            -DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual"
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            CMAKE_ARGS="-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
+            -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
           CIBW_TEST_COMMAND_LINUX: >-
             NEP_ADAPTERS_EXPECT_GPU_MODULE=1
             python {project}/frontends/python/tests/test_wheel_install.py
       - name: Audit combined wheel contents
         run: python tools/check_wheel_contents.py --variant combined --wheel-dir wheelhouse
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: python-combined-linux-x86_64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  windows_cuda_wheels:
+    name: Combined CPU+CUDA wheels (Windows x86_64)
+    if: >-
+      (github.event_name == 'release' ||
+      inputs.tag_name != '' ||
+      inputs.build_gpu ||
+      inputs.windows_cuda_only) &&
+      !inputs.linux_cuda_only
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_REF }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install CUDA 12.4
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: "12.4.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+      - name: Build combined wheel
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
+        env:
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BUILD: >-
+            ${{ inputs.windows_cuda_only &&
+            'cp310-win_amd64' ||
+            'cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64' }}
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            CMAKE_GENERATOR="Visual Studio 17 2022"
+            CUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+            CMAKE_ARGS="-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
+            -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
+          CIBW_TEST_ENVIRONMENT_WINDOWS: NEP_ADAPTERS_EXPECT_GPU_MODULE=1
+      - name: Audit combined wheel contents
+        run: python tools/check_wheel_contents.py --variant combined --wheel-dir wheelhouse
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-combined-windows-x86_64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
   release_assets:
     name: Attach packages to GitHub release
-    needs: [sdist, cpu_wheels, gpu_wheels]
+    needs: [sdist, cpu_wheels, gpu_wheels, windows_cuda_wheels]
     if: >-
       always() &&
-      (github.event_name == 'release' || inputs.tag_name != '') &&
+      github.event_name == 'release' &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      needs.gpu_wheels.result == 'success'
+      needs.gpu_wheels.result == 'success' &&
+      needs.windows_cuda_wheels.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: python-*
           path: dist
@@ -181,28 +250,29 @@ jobs:
 
   publish_pypi:
     name: Publish packages to PyPI
-    needs: [sdist, cpu_wheels, gpu_wheels]
+    needs: [sdist, cpu_wheels, gpu_wheels, windows_cuda_wheels]
     if: >-
       always() &&
-      (github.event_name == 'release' || inputs.publish_pypi) &&
+      github.event_name == 'release' &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      needs.gpu_wheels.result == 'success'
+      needs.gpu_wheels.result == 'success' &&
+      needs.windows_cuda_wheels.result == 'success'
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: python-sdist
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: python-platform-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         if: needs.gpu_wheels.result == 'success'
         with:
           pattern: python-combined-*
