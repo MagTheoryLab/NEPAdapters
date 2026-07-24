@@ -20,6 +20,11 @@ on:
         required: false
         default: false
         type: boolean
+      linux_cuda_only:
+        description: Build only the Linux CPython 3.10 CPU+CUDA wheel
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -34,7 +39,9 @@ env:
 jobs:
   sdist:
     name: Source distribution
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_cuda_only
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -76,7 +83,9 @@ jobs:
 
   cpu_wheels:
     name: Platform wheels (${{ matrix.label }})
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows_cuda_only
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -121,7 +130,8 @@ jobs:
     if: >-
       (github.event_name == 'release' ||
       inputs.tag_name != '' ||
-      inputs.build_gpu) &&
+      inputs.build_gpu ||
+      inputs.linux_cuda_only) &&
       !inputs.windows_cuda_only
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +146,10 @@ jobs:
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS_LINUX: x86_64
-          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+          CIBW_BUILD: >-
+            ${{ inputs.linux_cuda_only &&
+            'cp310-manylinux_x86_64' ||
+            'cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64' }}
           CIBW_BEFORE_ALL_LINUX: |
             set -euxo pipefail
             dnf install -y dnf-plugins-core
@@ -152,7 +165,7 @@ jobs:
             CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
             -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
             -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            -DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;89-virtual"
+            -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
           CIBW_TEST_COMMAND_LINUX: >-
             NEP_ADAPTERS_EXPECT_GPU_MODULE=1
             python {project}/frontends/python/tests/test_wheel_install.py
@@ -168,7 +181,8 @@ jobs:
     name: Combined CPU+CUDA wheel (Windows x86_64, CPython 3.10)
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      (inputs.build_gpu || inputs.windows_cuda_only)
+      (inputs.build_gpu || inputs.windows_cuda_only) &&
+      !inputs.linux_cuda_only
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
