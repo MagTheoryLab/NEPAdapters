@@ -19,6 +19,75 @@
 #  error "NEP_ADAPTERS_CUDA_TEST_MODEL_PATH must be defined"
 #endif
 
+namespace {
+
+nep_adapters::cuda_backend::ModelProtocol parse_protocol_case(
+    const std::string& name,
+    const std::string& cutoff,
+    const std::string& n_max,
+    const std::string& basis_size,
+    const std::string& l_max,
+    const std::string& ann,
+    const std::string& version = "nep4 1 C",
+    const std::string& zbl = "") {
+  const std::string path =
+      (std::filesystem::temp_directory_path() /
+       ("nep_adapters_" + name + ".nep"))
+          .string();
+  std::ofstream out(path);
+  out << version << '\n';
+  if (!zbl.empty()) {
+    out << zbl << '\n';
+  }
+  out << cutoff << '\n'
+      << n_max << '\n'
+      << basis_size << '\n'
+      << l_max << '\n'
+      << ann << '\n';
+  out.close();
+  return nep_adapters::cuda_backend::parse_model_protocol(path);
+}
+
+bool protocol_case_rejected(
+    const std::string& name,
+    const std::string& cutoff,
+    const std::string& n_max,
+    const std::string& basis_size,
+    const std::string& l_max,
+    const std::string& ann,
+    const std::string& version = "nep4 1 C",
+    const std::string& zbl = "") {
+  try {
+    (void)parse_protocol_case(
+        name, cutoff, n_max, basis_size, l_max, ann, version, zbl);
+  } catch (const std::exception&) {
+    return true;
+  }
+  return false;
+}
+
+bool protocol_case_unsupported(
+    const std::string& name,
+    const std::string& cutoff,
+    const std::string& n_max,
+    const std::string& basis_size,
+    const std::string& l_max,
+    const std::string& ann,
+    const std::string& version = "nep4 1 C",
+    const std::string& zbl = "") {
+  try {
+    (void)parse_protocol_case(
+        name, cutoff, n_max, basis_size, l_max, ann, version, zbl);
+  } catch (const nep_adapters::cuda_backend::UnsupportedModelProtocol&) {
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+  return false;
+}
+
+}  // namespace
+
 int main() {
   if (!nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
@@ -112,7 +181,7 @@ int main() {
         << "cutoff 5 4 8 6\n"
         << "n_max 1 1\n"
         << "basis_size 2 2\n"
-        << "l_max 2 2 1 1 0 1\n"
+        << "l_max 3 2 1 1\n"
         << "ANN 7 0\n";
     for (int value = 1; value <= 139; ++value) {
       out << value << "\n";
@@ -137,7 +206,7 @@ int main() {
       nep_adapters::cuda_backend::parse_model_protocol(protocol_model_path);
   if (protocol.version != 4 || protocol.hidden_neurons != 7 ||
       protocol.body_channels.channel_count() != 6 ||
-      protocol.body_channels.abc_count() != 8 ||
+      protocol.body_channels.abc_count() != 15 ||
       protocol.ann_parameter_count != 113 ||
       protocol.descriptor_parameter_count != 12 ||
       protocol.model_parameter_count != 125 ||
@@ -229,7 +298,7 @@ int main() {
       workspace_boxes == nullptr || workspace_boxes->element_count != 18 ||
       fp == nullptr || fp->element_count != 56 ||
       descriptors == nullptr || descriptors->element_count != 56 ||
-      sum_fxyz == nullptr || sum_fxyz->element_count != 64 ||
+      sum_fxyz == nullptr || sum_fxyz->element_count != 120 ||
       r12_angular == nullptr || r12_angular->element_count != 32 ||
       f12x == nullptr || f12x->element_count != 32 ||
       nl_angular == nullptr || nl_angular->element_count != 32) {
@@ -482,10 +551,167 @@ int main() {
     out << "nep4_spin1 1 C\n";
   }
   if (nepa_load_model("cuda", spin_model_path.c_str(), &model) !=
-      NEPA_STATUS_RUNTIME_ERROR) {
+          NEPA_STATUS_RUNTIME_ERROR) {
     if (model != nullptr) {
       nepa_free_model(model);
     }
+    return EXIT_FAILURE;
+  }
+
+  const auto compact_l_max = parse_protocol_case(
+      "compact_l_max",
+      "cutoff 5 4 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 1",
+      "ANN 1 0");
+  if (compact_l_max.body_channels.channel_count() != 5 ||
+      !compact_l_max.body_channels.has_q_222 ||
+      compact_l_max.body_channels.has_q_1111) {
+    return EXIT_FAILURE;
+  }
+  const auto legacy_l_max = parse_protocol_case(
+      "legacy_l_max",
+      "cutoff 5 4 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 2 1",
+      "ANN 1 0");
+  if (legacy_l_max.body_channels.channel_count() != 6 ||
+      !legacy_l_max.body_channels.has_q_222 ||
+      !legacy_l_max.body_channels.has_q_1111) {
+    return EXIT_FAILURE;
+  }
+  const auto hybrid_l_max = parse_protocol_case(
+      "hybrid_l_max",
+      "cutoff 5 4 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 2 0 1 1 1 1",
+      "ANN 1 0");
+  if (hybrid_l_max.body_channels.channel_count() != 9 ||
+      !hybrid_l_max.body_channels.has_q_222 ||
+      hybrid_l_max.body_channels.has_q_1111 ||
+      !hybrid_l_max.body_channels.has_q_112 ||
+      !hybrid_l_max.body_channels.has_q_123 ||
+      !hybrid_l_max.body_channels.has_q_233 ||
+      !hybrid_l_max.body_channels.has_q_134) {
+    return EXIT_FAILURE;
+  }
+  const auto boundary_protocol = parse_protocol_case(
+      "range_boundaries",
+      "cutoff 100 100 8 6",
+      "n_max 12 8",
+      "basis_size 16 12",
+      "l_max 8 0 0",
+      "ANN 120 0");
+  if (boundary_protocol.n_max_radial != 12 ||
+      boundary_protocol.n_max_angular != 8 ||
+      boundary_protocol.basis_size_radial != 16 ||
+      boundary_protocol.basis_size_angular != 12 ||
+      boundary_protocol.body_channels.l_max_3body != 8 ||
+      boundary_protocol.hidden_neurons != 120) {
+    return EXIT_FAILURE;
+  }
+  std::string too_many_types = "nep4 119";
+  for (int type = 0; type < 119; ++type) {
+    too_many_types += " C";
+  }
+  if (!protocol_case_rejected(
+          "bad_q_flag",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 1 0 2",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "too_many_l_max_fields",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 1 0 0 0 0 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "n_max_radial_range",
+          "cutoff 5 4 8 6",
+          "n_max 13 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "n_max_angular_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 9",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "basis_radial_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 17 0",
+          "l_max 4 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "basis_angular_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 13",
+          "l_max 4 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "l_max_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 9 0 0",
+          "ANN 1 0") ||
+      !protocol_case_rejected(
+          "ann_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 121 0") ||
+      !protocol_case_rejected(
+          "type_count_range",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 1 0",
+          too_many_types) ||
+      !protocol_case_rejected(
+          "angular_descriptor_limit",
+          "cutoff 5 4 8 6",
+          "n_max 0 8",
+          "basis_size 0 0",
+          "l_max 8 1 1 1 1 1 1",
+          "ANN 1 0") ||
+      !protocol_case_unsupported(
+          "type_dependent_cutoff",
+          "cutoff 5 4 6 3 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 1 0",
+          "nep4 2 C H") ||
+      !protocol_case_unsupported(
+          "typewise_zbl",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 1 0",
+          "nep4_zbl 1 C",
+          "zbl 1 2 0.7") ||
+      !protocol_case_unsupported(
+          "two_hidden_layers",
+          "cutoff 5 4 8 6",
+          "n_max 0 0",
+          "basis_size 0 0",
+          "l_max 4 0 0",
+          "ANN 32 16")) {
     return EXIT_FAILURE;
   }
 

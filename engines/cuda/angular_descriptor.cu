@@ -1,3 +1,4 @@
+#include "angular_harmonics.cuh"
 #include "device_operations.hpp"
 #include "simulation_box_device.cuh"
 
@@ -13,7 +14,7 @@ namespace nep_adapters::cuda_backend {
 namespace {
 
 constexpr float kPi = 3.1415927f;
-constexpr int kAngularOrderTile = 3;
+constexpr int kLowAngularOrderTile = 3;
 constexpr int kPreferredDescriptorBlockSize = 128;
 constexpr int kSharedPressureBlockSize = 32;
 constexpr std::size_t kDefaultDynamicSharedMemoryBytes = 48 * 1024;
@@ -270,7 +271,7 @@ __device__ __forceinline__ void flush_radial_type_run(
   }
 }
 
-template <bool HasAngular>
+template <bool HasAngular, int AngularComponents, int AngularOrderTile>
 __device__ __forceinline__ void build_structural_descriptor_core(
     int atom,
     int atom_stride,
@@ -405,16 +406,16 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   const int angular_order_count = n_max_angular + 1;
 
   for (int n_base = 0; n_base < angular_order_count;
-       n_base += kAngularOrderTile) {
+       n_base += AngularOrderTile) {
     const int active_orders =
-        n_base + kAngularOrderTile <= angular_order_count
-            ? kAngularOrderTile
+        n_base + AngularOrderTile <= angular_order_count
+            ? AngularOrderTile
             : angular_order_count - n_base;
-    float s[kAngularOrderTile][24];
+    float s[AngularOrderTile][AngularComponents];
 #pragma unroll
-    for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+    for (int tile = 0; tile < AngularOrderTile; ++tile) {
 #pragma unroll
-      for (int abc = 0; abc < 24; ++abc) {
+      for (int abc = 0; abc < AngularComponents; ++abc) {
         s[tile][abc] = 0.0f;
       }
     }
@@ -457,7 +458,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
                           (r * angular_rcinv - 1.0f) -
                       1.0f;
       const float half_fc = 0.5f * fc;
-      float gn[kAngularOrderTile] = {0.0f};
+      float gn[AngularOrderTile] = {0.0f};
       float t_minus_2 = 1.0f;
       float t_minus_1 = x;
       const int coefficient_base =
@@ -474,7 +475,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
           fn = (t + 1.0f) * half_fc;
         }
 #pragma unroll
-        for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+        for (int tile = 0; tile < AngularOrderTile; ++tile) {
           if (tile < active_orders) {
             const int coefficient_index =
                 coefficient_base + tile * (basis_size_angular + 1) + k;
@@ -488,7 +489,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
       const float y12 = dy * rinv;
       const float z12 = dz * rinv;
 #pragma unroll
-      for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+      for (int tile = 0; tile < AngularOrderTile; ++tile) {
         if (tile < active_orders) {
           if (l_max_3body >= 1) {
             accumulate_s_l1(x12, y12, z12, gn[tile], s[tile]);
@@ -502,12 +503,30 @@ __device__ __forceinline__ void build_structural_descriptor_core(
           if (l_max_3body >= 4) {
             accumulate_s_l4(x12, y12, z12, gn[tile], s[tile]);
           }
+          if constexpr (AngularComponents > 24) {
+            if (l_max_3body >= 5) {
+              angular_harmonics::accumulate_order<5>(
+                  x12, y12, z12, gn[tile], s[tile]);
+            }
+            if (l_max_3body >= 6) {
+              angular_harmonics::accumulate_order<6>(
+                  x12, y12, z12, gn[tile], s[tile]);
+            }
+            if (l_max_3body >= 7) {
+              angular_harmonics::accumulate_order<7>(
+                  x12, y12, z12, gn[tile], s[tile]);
+            }
+            if (l_max_3body >= 8) {
+              angular_harmonics::accumulate_order<8>(
+                  x12, y12, z12, gn[tile], s[tile]);
+            }
+          }
         }
       }
     }
 
 #pragma unroll
-    for (int tile = 0; tile < kAngularOrderTile; ++tile) {
+    for (int tile = 0; tile < AngularOrderTile; ++tile) {
       if (tile >= active_orders) {
         continue;
       }
@@ -515,7 +534,7 @@ __device__ __forceinline__ void build_structural_descriptor_core(
       const float* s_order = s[tile];
       for (int abc = 0; abc < abc_count; ++abc) {
         const int s_index = atom + atom_stride * (n * abc_count + abc);
-        sum_fxyz[s_index] = abc < 24 ? s_order[abc] : 0.0f;
+        sum_fxyz[s_index] = s_order[abc];
       }
 
       if (l_max_3body >= 1) {
@@ -558,6 +577,40 @@ __device__ __forceinline__ void build_structural_descriptor_core(
               atom_stride,
               descriptor_index,
               find_q_l4(s_order),
+              descriptors);
+        }
+      }
+      if constexpr (AngularComponents > 24) {
+        if (l_max_3body >= 5) {
+          write_descriptor_value(
+              atom,
+              atom_stride,
+              radial_dim + 4 * angular_order_count + n,
+              angular_harmonics::invariant<5>(s_order),
+              descriptors);
+        }
+        if (l_max_3body >= 6) {
+          write_descriptor_value(
+              atom,
+              atom_stride,
+              radial_dim + 5 * angular_order_count + n,
+              angular_harmonics::invariant<6>(s_order),
+              descriptors);
+        }
+        if (l_max_3body >= 7) {
+          write_descriptor_value(
+              atom,
+              atom_stride,
+              radial_dim + 6 * angular_order_count + n,
+              angular_harmonics::invariant<7>(s_order),
+              descriptors);
+        }
+        if (l_max_3body >= 8) {
+          write_descriptor_value(
+              atom,
+              atom_stride,
+              radial_dim + 7 * angular_order_count + n,
+              angular_harmonics::invariant<8>(s_order),
               descriptors);
         }
       }
@@ -643,7 +696,11 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   }
 }
 
-template <bool Batched, bool HasAngular>
+template <
+    bool Batched,
+    bool HasAngular,
+    int AngularComponents,
+    int AngularOrderTile>
 __global__ void build_descriptor_core_from_positions(
     int atom_count,
     int atom_stride,
@@ -706,7 +763,10 @@ __global__ void build_descriptor_core_from_positions(
         pbc_flags3);
   }
 
-  build_structural_descriptor_core<HasAngular>(
+  build_structural_descriptor_core<
+      HasAngular,
+      AngularComponents,
+      AngularOrderTile>(
       atom,
       atom_stride,
       descriptor_dim,
@@ -768,8 +828,8 @@ void build_descriptor_core_from_positions_on_device(
     require(protocol.cutoff_angular > 0.0, "angular cutoff must be positive");
     require(protocol.neighbor_capacity_angular > 0,
             "angular neighbor capacity must be positive");
-    require(protocol.body_channels.l_max_3body <= 4,
-            "angular descriptor kernel supports l_max_3body <= 4");
+    require(protocol.body_channels.l_max_3body <= 8,
+            "angular descriptor kernel supports l_max_3body <= 8");
   }
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView workspace_view = workspace.view();
@@ -847,18 +907,32 @@ void build_descriptor_core_from_positions_on_device(
   }
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    const auto launch = [&](auto batched_tag, auto has_angular_tag) {
+    const auto launch = [&](
+                            auto batched_tag,
+                            auto has_angular_tag,
+                            auto components_tag,
+                            auto order_tile_tag) {
       constexpr bool kBatched = decltype(batched_tag)::value;
       constexpr bool kHasAngular = decltype(has_angular_tag)::value;
+      constexpr int kAngularComponents = decltype(components_tag)::value;
+      constexpr int kAngularOrderTile = decltype(order_tile_tag)::value;
       if (needs_shared_memory_optin) {
         check_cuda(
             cudaFuncSetAttribute(
-                build_descriptor_core_from_positions<kBatched, kHasAngular>,
+                build_descriptor_core_from_positions<
+                    kBatched,
+                    kHasAngular,
+                    kAngularComponents,
+                    kAngularOrderTile>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
                 static_cast<int>(shared_bytes)),
             "configure descriptor core shared memory");
       }
-      build_descriptor_core_from_positions<kBatched, kHasAngular>
+      build_descriptor_core_from_positions<
+          kBatched,
+          kHasAngular,
+          kAngularComponents,
+          kAngularOrderTile>
           <<<blocks, threads, shared_bytes>>>(
           atom_count,
           static_cast<int>(workspace_view.atom_capacity),
@@ -899,17 +973,67 @@ void build_descriptor_core_from_positions_on_device(
           workspace_view.descriptors);
     };
 
+    const auto launch_for_topology =
+        [&](auto batched_tag, auto has_angular_tag) {
+          if constexpr (!decltype(has_angular_tag)::value) {
+            launch(
+                batched_tag,
+                has_angular_tag,
+                std::integral_constant<int, 24>{},
+                std::integral_constant<int, kLowAngularOrderTile>{});
+          } else {
+            if (protocol.body_channels.l_max_3body <= 4) {
+              launch(
+                  batched_tag,
+                  has_angular_tag,
+                  std::integral_constant<int, 24>{},
+                  std::integral_constant<int, kLowAngularOrderTile>{});
+              return;
+            }
+            switch (protocol.body_channels.l_max_3body) {
+              case 5:
+                launch(
+                    batched_tag,
+                    has_angular_tag,
+                    std::integral_constant<int, 35>{},
+                    std::integral_constant<int, 2>{});
+                break;
+              case 6:
+                launch(
+                    batched_tag,
+                    has_angular_tag,
+                    std::integral_constant<int, 48>{},
+                    std::integral_constant<int, 2>{});
+                break;
+              case 7:
+                launch(
+                    batched_tag,
+                    has_angular_tag,
+                    std::integral_constant<int, 63>{},
+                    std::integral_constant<int, 1>{});
+                break;
+              case 8:
+                launch(
+                    batched_tag,
+                    has_angular_tag,
+                    std::integral_constant<int, 80>{},
+                    std::integral_constant<int, 1>{});
+                break;
+            }
+          }
+        };
+
     if (topology == DescriptorCoreTopology::batched_multi_box) {
       if (has_angular) {
-        launch(std::true_type{}, std::true_type{});
+        launch_for_topology(std::true_type{}, std::true_type{});
       } else {
-        launch(std::true_type{}, std::false_type{});
+        launch_for_topology(std::true_type{}, std::false_type{});
       }
     } else {
       if (has_angular) {
-        launch(std::false_type{}, std::true_type{});
+        launch_for_topology(std::false_type{}, std::true_type{});
       } else {
-        launch(std::false_type{}, std::false_type{});
+        launch_for_topology(std::false_type{}, std::false_type{});
       }
     }
   }

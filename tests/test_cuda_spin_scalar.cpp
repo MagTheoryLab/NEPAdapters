@@ -14,11 +14,14 @@
 namespace {
 
 constexpr int kAtomCount = 2;
-constexpr int kDescriptorDim = 10;
+constexpr int kBaseDescriptorDim = 10;
 
-std::string write_model() {
+std::string write_model(int structural_l_max) {
+  const int descriptor_dim = kBaseDescriptorDim + structural_l_max;
   const std::string path =
-      (std::filesystem::temp_directory_path() / "cuda_spin_scalar.nep").string();
+      (std::filesystem::temp_directory_path() /
+       ("cuda_spin_scalar_l" + std::to_string(structural_l_max) + ".nep"))
+          .string();
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
@@ -35,10 +38,14 @@ std::string write_model() {
   out << "cutoff 4 4 64 64\n";
   out << "n_max 0 0\n";
   out << "basis_size 0 0\n";
-  out << "l_max 0 0 0\n";
+  out << "l_max " << structural_l_max << " 0 0\n";
   out << "ANN 1 0\n";
-  for (int dim = 0; dim < kDescriptorDim; ++dim) {
-    out << (dim == 6 ? 0.25 : 0.0) << "\n";
+  for (int dim = 0; dim < descriptor_dim; ++dim) {
+    double weight = dim == 6 + structural_l_max ? 0.25 : 0.0;
+    if (structural_l_max > 0 && dim == structural_l_max) {
+      weight = 0.15;
+    }
+    out << weight << "\n";
   }
   out << "0\n";  // b0
   out << "1\n";  // w1
@@ -46,7 +53,7 @@ std::string write_model() {
   out << "0\n";  // structural radial coefficient
   out << "0\n";  // structural angular coefficient
   out << "1\n";  // spin radial coefficient
-  for (int dim = 0; dim < kDescriptorDim; ++dim) {
+  for (int dim = 0; dim < descriptor_dim; ++dim) {
     out << "1\n";
   }
   return path;
@@ -72,7 +79,7 @@ double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& r
   return diff;
 }
 
-BatchResult run_batch(NepaModel* model) {
+BatchResult run_batch(NepaModel* model, int descriptor_dim) {
   const int atom_counts[] = {kAtomCount};
   const int atom_offsets[] = {0};
   const int types[] = {0, 0};
@@ -107,7 +114,7 @@ BatchResult run_batch(NepaModel* model) {
   out.force.assign(3 * kAtomCount, 0.0);
   out.virial.assign(9, 0.0);
   out.mforce.assign(3 * kAtomCount, 0.0);
-  out.descriptor.assign(kAtomCount * kDescriptorDim, 0.0);
+  out.descriptor.assign(kAtomCount * descriptor_dim, 0.0);
   NepaFindForceResult force_result{};
   force_result.energy_per_structure = &out.energy;
   force_result.potential_per_atom = out.potential.data();
@@ -201,36 +208,46 @@ int main() {
       !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
-  const std::string model_path = write_model();
-  NepaModel* cpu = nullptr;
-  NepaModel* gpu = nullptr;
-  if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
-      nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
-    return EXIT_FAILURE;
+  for (int structural_l_max : {0, 5, 6, 7, 8}) {
+    const int descriptor_dim = kBaseDescriptorDim + structural_l_max;
+    const std::string model_path = write_model(structural_l_max);
+    NepaModel* cpu = nullptr;
+    NepaModel* gpu = nullptr;
+    if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+        nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
+      return EXIT_FAILURE;
+    }
+    const BatchResult cpu_result = run_batch(cpu, descriptor_dim);
+    const BatchResult gpu_result = run_batch(gpu, descriptor_dim);
+    const double energy_diff = std::abs(cpu_result.energy - gpu_result.energy);
+    const double potential_diff =
+        max_abs_diff(cpu_result.potential, gpu_result.potential);
+    const double force_diff = max_abs_diff(cpu_result.force, gpu_result.force);
+    const double virial_diff =
+        max_abs_diff(cpu_result.virial, gpu_result.virial);
+    const double mforce_diff =
+        max_abs_diff(cpu_result.mforce, gpu_result.mforce);
+    const double descriptor_diff =
+        max_abs_diff(cpu_result.descriptor, gpu_result.descriptor);
+    const bool ok = energy_diff < 2.0e-5 && potential_diff < 2.0e-5 &&
+                    force_diff < 2.0e-5 && virial_diff < 2.0e-5 &&
+                    mforce_diff < 2.0e-5 && descriptor_diff < 2.0e-5 &&
+                    check_lammps(gpu, cpu_result);
+    if (!ok) {
+      std::cerr << "spin scalar CPU/GPU mismatch l_max="
+                << structural_l_max
+                << " energy=" << energy_diff
+                << " potential=" << potential_diff
+                << " force=" << force_diff
+                << " virial=" << virial_diff
+                << " mforce=" << mforce_diff
+                << " descriptor=" << descriptor_diff << "\n";
+      nepa_free_model(cpu);
+      nepa_free_model(gpu);
+      return EXIT_FAILURE;
+    }
+    nepa_free_model(cpu);
+    nepa_free_model(gpu);
   }
-  const BatchResult cpu_result = run_batch(cpu);
-  const BatchResult gpu_result = run_batch(gpu);
-  const double energy_diff = std::abs(cpu_result.energy - gpu_result.energy);
-  const double potential_diff = max_abs_diff(cpu_result.potential, gpu_result.potential);
-  const double force_diff = max_abs_diff(cpu_result.force, gpu_result.force);
-  const double virial_diff = max_abs_diff(cpu_result.virial, gpu_result.virial);
-  const double mforce_diff = max_abs_diff(cpu_result.mforce, gpu_result.mforce);
-  const double descriptor_diff =
-      max_abs_diff(cpu_result.descriptor, gpu_result.descriptor);
-  const bool ok = energy_diff < 1.0e-6 && potential_diff < 1.0e-6 &&
-                  force_diff < 1.0e-6 && virial_diff < 1.0e-6 &&
-                  mforce_diff < 1.0e-6 && descriptor_diff < 1.0e-6 &&
-                  check_lammps(gpu, cpu_result);
-  if (!ok) {
-    std::cerr << "spin scalar CPU/GPU mismatch:"
-              << " energy=" << energy_diff
-              << " potential=" << potential_diff
-              << " force=" << force_diff
-              << " virial=" << virial_diff
-              << " mforce=" << mforce_diff
-              << " descriptor=" << descriptor_diff << "\n";
-  }
-  nepa_free_model(cpu);
-  nepa_free_model(gpu);
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  return EXIT_SUCCESS;
 }

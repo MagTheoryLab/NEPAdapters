@@ -346,7 +346,7 @@ double elapsed_seconds(
 void run_batch(NepaModel* model, const System& system) {
   const int atom_counts[] = {system.atom_count};
   const int atom_offsets[] = {0};
-  const int pbc[] = {0, 0, 0};
+  const int pbc[] = {1, 1, 1};
   std::vector<double> energy(1, 0.0);
   std::vector<double> potential(static_cast<std::size_t>(system.atom_count), 0.0);
   std::vector<double> force(static_cast<std::size_t>(system.atom_count) * 3, 0.0);
