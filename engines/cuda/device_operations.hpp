@@ -130,6 +130,29 @@ __device__ __forceinline__ void atomic_add_spin_transfer_float(
   }
 }
 
+__device__ __forceinline__ unsigned match_any_active(
+    unsigned active_mask,
+    int value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  return __match_any_sync(active_mask, value);
+#else
+  const unsigned lane_mask = 1u << (threadIdx.x & 31);
+  unsigned peer_mask = 0u;
+  unsigned remaining = active_mask;
+  while (remaining != 0u) {
+    const int leader = __ffs(static_cast<int>(remaining)) - 1;
+    const int leader_value = __shfl_sync(active_mask, value, leader);
+    const unsigned group_mask =
+        __ballot_sync(active_mask, value == leader_value);
+    if ((group_mask & lane_mask) != 0u) {
+      peer_mask = group_mask;
+    }
+    remaining &= ~group_mask;
+  }
+  return peer_mask;
+#endif
+}
+
 __device__ __forceinline__ void
 atomic_add_force_and_per_atom_virial_float_warp_aggregated(
     unsigned active_mask,
@@ -143,7 +166,7 @@ atomic_add_force_and_per_atom_virial_float_warp_aggregated(
     float fz,
     double* force_soa3,
     float* virial_soa9) {
-  const unsigned peer_mask = __match_any_sync(active_mask, atom);
+  const unsigned peer_mask = match_any_active(active_mask, atom);
   const int lane = threadIdx.x & 31;
   const int leader = __ffs(static_cast<int>(peer_mask)) - 1;
   if ((peer_mask & (peer_mask - 1u)) == 0u) {
