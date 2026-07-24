@@ -215,6 +215,141 @@ class PhaseTimer {
 #include "spin_onsite_descriptors.cuh"
 #include "spin_onsite_forces.cuh"
 
+template <int C, int LMax, bool Chiral>
+void launch_spin_descriptor_core(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view) {
+  build_spin_descriptor_core_streaming<
+      C,
+      LMax,
+      Chiral><<<atom_count, 128>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          protocol.num_types,
+          protocol.spin_basis_size,
+          static_cast<float>(protocol.spin_cutoff_radial),
+          box,
+          view.types,
+          view.positions_soa3,
+          view.spins_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          model_view.descriptor_coefficients,
+          static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+          view.spin_density_rho0,
+          view.spin_density_raw1,
+          view.spin_density_angular2,
+          view.spin_density_angular3,
+          view.spin_density_angular4,
+          view.spin_density_geom,
+          view.spin_density_rho0_dot,
+          view.spin_density_raw1_dot,
+          view.spin_chiral_polar,
+          view.spin_chiral_octupoles_raw,
+          view.spin_chiral_hexadecapoles_raw,
+          view.descriptors);
+}
+
+template <int C, int LMax>
+void launch_spin_descriptor_shape(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  if (protocol.spin_chiral != 0) {
+    launch_spin_descriptor_core<C, LMax, true>(
+        protocol, atom_count, box, model_view, view);
+    const int threads = 128;
+    const int work_items = atom_count * C;
+    const int blocks = (work_items + threads - 1) / threads;
+    build_spin_chiral_descriptors_f32<C><<<blocks, threads>>>(
+        atom_count,
+        static_cast<int>(view.atom_capacity),
+        protocol.struct_descriptor_dim,
+        layout,
+        view.spins_soa3,
+        view.spin_density_geom,
+        view.spin_density_raw1,
+        view.spin_chiral_polar,
+        view.spin_chiral_octupoles_raw,
+        view.spin_chiral_hexadecapoles_raw,
+        view.spin_chiral_chirals,
+        view.descriptors);
+  } else {
+    launch_spin_descriptor_core<C, LMax, false>(
+        protocol, atom_count, box, model_view, view);
+  }
+}
+
+template <int C>
+void launch_spin_descriptor_lmax(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  switch (protocol.spin_l_max) {
+    case 0:
+      launch_spin_descriptor_shape<C, 0>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 1:
+      launch_spin_descriptor_shape<C, 1>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 2:
+      launch_spin_descriptor_shape<C, 2>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 3:
+      launch_spin_descriptor_shape<C, 3>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 4:
+      launch_spin_descriptor_shape<C, 4>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports l_max from 0 to 4");
+  }
+}
+
+void launch_spin_descriptors(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    const SpinCoreLayout& layout) {
+  switch (protocol.spin_compress) {
+    case 1:
+      launch_spin_descriptor_lmax<1>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 2:
+      launch_spin_descriptor_lmax<2>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 3:
+      launch_spin_descriptor_lmax<3>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    case 4:
+      launch_spin_descriptor_lmax<4>(
+          protocol, atom_count, box, model_view, view, layout);
+      break;
+    default:
+      throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
+  }
+}
+
 void launch_spin_density_forces(
     const ModelProtocol& protocol,
     int atom_count,
@@ -410,68 +545,8 @@ void build_spin_descriptors_on_device(
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
   if (atom_count > 0) {
-    const auto launch_channels = [&](auto channel_tag) {
-      constexpr int C = decltype(channel_tag)::value;
-      const auto launch_lmax = [&](auto lmax_tag) {
-        constexpr int LMax = decltype(lmax_tag)::value;
-        const auto launch_core = [&](auto chiral_tag) {
-          constexpr bool Chiral = decltype(chiral_tag)::value;
-          build_spin_descriptor_core_streaming<
-              C,
-              LMax,
-              Chiral><<<atom_count, 128>>>(
-                  atom_count,
-                  static_cast<int>(view.atom_capacity),
-                  protocol.struct_descriptor_dim,
-                  protocol.num_types,
-                  protocol.spin_basis_size,
-                  static_cast<float>(protocol.spin_cutoff_radial),
-                  box,
-                  view.types,
-                  view.positions_soa3,
-                  view.spins_soa3,
-                  view.nn_radial,
-                  view.nl_radial_slot_major,
-                  model_view.descriptor_coefficients,
-                  static_cast<int>(protocol.ordinary_descriptor_parameter_count),
-                  view.spin_density_rho0,
-                  view.spin_density_raw1,
-                  view.spin_density_angular2,
-                  view.spin_density_angular3,
-                  view.spin_density_angular4,
-                  view.spin_density_geom,
-                  view.spin_density_rho0_dot,
-                  view.spin_density_raw1_dot,
-                  view.spin_chiral_polar,
-                  view.spin_chiral_octupoles_raw,
-                  view.spin_chiral_hexadecapoles_raw,
-                  view.descriptors);
-        };
-        if (protocol.spin_chiral != 0) {
-          launch_core(std::true_type{});
-          const int threads = 128;
-          const int work_items = atom_count * C;
-          const int blocks = (work_items + threads - 1) / threads;
-          build_spin_chiral_descriptors_f32<C><<<blocks, threads>>>(
-              atom_count,
-              static_cast<int>(view.atom_capacity),
-              protocol.struct_descriptor_dim,
-              layout,
-              view.spins_soa3,
-              view.spin_density_geom,
-              view.spin_density_raw1,
-              view.spin_chiral_polar,
-              view.spin_chiral_octupoles_raw,
-              view.spin_chiral_hexadecapoles_raw,
-              view.spin_chiral_chirals,
-              view.descriptors);
-        } else {
-          launch_core(std::false_type{});
-        }
-      };
-      dispatch_spin_lmax(protocol.spin_l_max, launch_lmax);
-    };
-    dispatch_spin_channels(protocol.spin_compress, launch_channels);
+    launch_spin_descriptors(
+        protocol, atom_count, box, model_view, view, layout);
   }
   check_cuda(cudaGetLastError(), "build spin descriptors kernel launch failed");
 }
