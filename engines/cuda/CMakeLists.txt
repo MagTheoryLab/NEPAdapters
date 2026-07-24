@@ -20,6 +20,7 @@ target_sources(nep_adapters_cuda PRIVATE
   device_output.cu
   qnep_charge.cu
   radial_force.cu
+  runtime_probe.cu
   spin_onsite.cu
   spin_onsite_descriptors.cuh
   spin_onsite_forces.cuh
@@ -36,6 +37,7 @@ set_source_files_properties(
   device_output.cu
   qnep_charge.cu
   radial_force.cu
+  runtime_probe.cu
   spin_onsite.cu
   zbl_force.cu
   PROPERTIES LANGUAGE CUDA)
