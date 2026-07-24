@@ -200,7 +200,7 @@ jobs:
           CIBW_BUILD: cp310-win_amd64
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_GENERATOR="Visual Studio 17 2022"
-            CMAKE_GENERATOR_TOOLSET=version=14.39
+            CMAKE_GENERATOR_TOOLSET="version=14.39"
             CUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
             CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
             -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
