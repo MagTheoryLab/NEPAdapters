@@ -341,6 +341,47 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         nep_adapters_lammps_spin_cpu_plugin_test PROPERTIES
         LABELS "smoke;frontend;lammps;plugin;spin;cpu;real_lammps"
         DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
+
+      if(MPI_CXX_FOUND AND MPIEXEC_EXECUTABLE)
+        set(_nep_adapters_mpiexec_numproc_flag "${MPIEXEC_NUMPROC_FLAG}")
+        if(NOT _nep_adapters_mpiexec_numproc_flag)
+          set(_nep_adapters_mpiexec_numproc_flag "-np")
+        endif()
+        foreach(_mpi_ranks IN ITEMS 2 4 8)
+          if(MPIEXEC_MAX_NUMPROCS AND
+             _mpi_ranks GREATER MPIEXEC_MAX_NUMPROCS)
+            continue()
+          endif()
+          set(_mpi_test_name
+            "nep_adapters_lammps_spin_cpu_mpi_${_mpi_ranks}_test")
+          add_test(
+            NAME "${_mpi_test_name}"
+            COMMAND
+              "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
+              --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+              --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
+              --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+              --structure
+                "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
+              --reference
+                "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
+              --pair-style nep/cpu
+              --mpiexec "${MPIEXEC_EXECUTABLE}"
+              "--mpiexec-numproc-flag=${_nep_adapters_mpiexec_numproc_flag}"
+              --mpi-ranks "${_mpi_ranks}"
+              --work-dir
+                "${CMAKE_BINARY_DIR}/lammps_spin_cpu_mpi_${_mpi_ranks}_smoke"
+          )
+          set_tests_properties(
+            "${_mpi_test_name}" PROPERTIES
+            LABELS
+              "smoke;frontend;lammps;plugin;spin;cpu;mpi;mpi_${_mpi_ranks};real_lammps"
+            PROCESSORS "${_mpi_ranks}"
+            ENVIRONMENT "OMP_NUM_THREADS=1"
+            DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
+        endforeach()
+      endif()
     endif()
 
     if(TARGET nepadaptersgpuplugin AND Kokkos_ENABLE_CUDA)

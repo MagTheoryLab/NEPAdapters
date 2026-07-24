@@ -66,6 +66,20 @@ class LammpsSpinSmokeTest(unittest.TestCase):
     command = smoke.lammps_command("lmp", "nep/cpu", "in.spin", 2, "mpirun")
     self.assertEqual(command[:4], ["mpirun", "-np", "2", "lmp"])
 
+  def test_multi_rank_command_uses_configured_numproc_flag(self):
+    command = smoke.lammps_command(
+        "lmp", "nep/cpu", "in.spin", 4, "mpiexec", "-n"
+    )
+    self.assertEqual(command[:4], ["mpiexec", "-n", "4", "lmp"])
+
+  def test_mpi_processor_counts_reads_lammps_grid(self):
+    screen = """
+LAMMPS (22 Jul 2025)
+  1 by 2 by 4 MPI processor grid
+  1 by 2 by 4 MPI processor grid
+"""
+    self.assertEqual(smoke.mpi_processor_counts(screen), [8, 8])
+
   def test_committed_structure_is_valid(self):
     path = ROOT / "tests/fixtures/spin_chiral_protocol/lammps_structure.json"
     structure = smoke.read_structure(path)

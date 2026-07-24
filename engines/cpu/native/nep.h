@@ -339,6 +339,7 @@ public:
   DFTD3 dftd3;
   std::vector<int> NN_radial, NL_radial, NN_angular, NL_angular;
   std::vector<double> r12;
+  int dftd3_neighbor_capacity = 0;
   std::vector<double> Fp;
   std::vector<double> sum_fxyz;
   std::vector<double> ann_q_group;
@@ -386,6 +387,10 @@ public:
   int lammps_touched_stamp = 0;
   void update_potential(double* parameters, ANN& ann);
   void allocate_memory(const int N);
+  int build_dftd3_neighbor_list(
+    const int N,
+    const std::vector<double>& box,
+    const std::vector<double>& position);
 
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   std::vector<double> gn_radial;   // tabulated gn_radial functions

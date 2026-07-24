@@ -202,6 +202,51 @@ bool check_dftd3(
   return true;
 }
 
+bool check_dftd3_adaptive_neighbor_capacity(NepaModel* model) {
+  cpu_test::Frame frame;
+  frame.types = {0};
+  frame.positions_aos3 = {0.0, 0.0, 0.0};
+  frame.box[0] = 1.5;
+  frame.box[4] = 1.5;
+  frame.box[8] = 1.5;
+  OwnedBatch batch = repeat_frame(frame, 1);
+
+  double energy = 0.0;
+  double potential = 0.0;
+  std::array<double, 3> force{};
+  std::array<double, 9> virial{};
+  std::array<double, 9> atom_virial{};
+  NepaDftd3Parameters parameters{"pbe", 12.0, 10.0};
+  NepaDftd3Result result{
+      &energy, &potential, force.data(), virial.data(), atom_virial.data()};
+
+  // This periodic one-atom cell has more than 1000 images inside the DFT-D3
+  // cutoff. Run twice to cover both capacity growth and workspace reuse.
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    const NepaStatus status =
+        nepa_compute_dftd3_batch(model, &batch.view, &parameters, &result);
+    if (status != NEPA_STATUS_OK) {
+      std::cerr << "adaptive DFT-D3 neighbor build failed: "
+                << nepa_last_error_message() << '\n';
+      return false;
+    }
+    if (!std::isfinite(energy) || !std::isfinite(potential) ||
+        !std::all_of(force.begin(), force.end(), [](double value) {
+          return std::isfinite(value);
+        }) ||
+        !std::all_of(virial.begin(), virial.end(), [](double value) {
+          return std::isfinite(value);
+        }) ||
+        !std::all_of(atom_virial.begin(), atom_virial.end(), [](double value) {
+          return std::isfinite(value);
+        })) {
+      std::cerr << "adaptive DFT-D3 result is not finite\n";
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -266,6 +311,8 @@ int main() {
        -3.1912470020934411, 1.660220811599584e-05,
        -4.2010820579579154e-06, 1.6602208116219175e-05,
        5.3416236155363208});
+  const bool adaptive_capacity_ok =
+      check_dftd3_adaptive_neighbor_capacity(model);
 
   std::vector<double> energy(2), force(24);
   NepaFindForceResult force_result{};
@@ -280,8 +327,11 @@ int main() {
   if (!capability_ok) std::cerr << "DFT-D3 capability check failed\n";
   if (!pure_ok) std::cerr << "pure DFT-D3 check failed\n";
   if (!combined_ok) std::cerr << "combined DFT-D3 check failed\n";
+  if (!adaptive_capacity_ok) {
+    std::cerr << "adaptive DFT-D3 capacity check failed\n";
+  }
   if (!cancel_ok) std::cerr << "cancellation check failed\n";
-  return capability_ok && pure_ok && combined_ok && cancel_ok
+  return capability_ok && pure_ok && combined_ok && adaptive_capacity_ok && cancel_ok
       ? EXIT_SUCCESS
       : EXIT_FAILURE;
 }

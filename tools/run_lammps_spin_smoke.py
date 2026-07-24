@@ -107,17 +107,42 @@ def write_input(path, plugin, model, structure, pair_style, plugin_load_mode):
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def lammps_command(lmp, pair_style, input_path, mpi_ranks, mpiexec):
+def lammps_command(
+    lmp,
+    pair_style,
+    input_path,
+    mpi_ranks,
+    mpiexec,
+    mpiexec_numproc_flag="-np",
+):
     command = []
     if mpi_ranks > 1:
         if not mpiexec:
             raise ValueError("--mpiexec is required when --mpi-ranks is greater than 1")
-        command.extend([mpiexec, "-np", str(mpi_ranks)])
+        if not mpiexec_numproc_flag:
+            raise ValueError(
+                "--mpiexec-numproc-flag is required when --mpi-ranks is greater than 1"
+            )
+        command.extend([mpiexec, mpiexec_numproc_flag, str(mpi_ranks)])
     command.append(lmp)
     if pair_style in {"nep/gpu", "nep/gpu/kk"}:
         command.extend(["-k", "on", "g", "1"])
     command.extend(["-in", input_path, "-log", "log.lammps"])
     return command
+
+
+def mpi_processor_counts(screen):
+    counts = []
+    for line in screen.splitlines():
+        fields = line.strip().split()
+        if (
+            len(fields) == 8
+            and fields[1] == "by"
+            and fields[3] == "by"
+            and fields[5:] == ["MPI", "processor", "grid"]
+        ):
+            counts.append(int(fields[0]) * int(fields[2]) * int(fields[4]))
+    return counts
 
 
 def flatten(values):
@@ -212,6 +237,7 @@ def main():
     )
     parser.add_argument("--work-dir", default="build-lammps-spin-smoke")
     parser.add_argument("--mpiexec", default="")
+    parser.add_argument("--mpiexec-numproc-flag", default="-np")
     parser.add_argument("--mpi-ranks", type=int, default=1)
     parser.add_argument("--energy-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--force-tolerance", type=float, default=1.0e-8)
@@ -251,10 +277,19 @@ def main():
             input_path.name,
             args.mpi_ranks,
             args.mpiexec,
+            args.mpiexec_numproc_flag,
         ),
         work_dir,
         env=run_env,
     )
+    observed_mpi_ranks = mpi_processor_counts(screen)
+    if not observed_mpi_ranks:
+        raise RuntimeError("LAMMPS output did not report an MPI processor grid")
+    if any(count != args.mpi_ranks for count in observed_mpi_ranks):
+        raise RuntimeError(
+            "LAMMPS did not use the requested MPI rank count: "
+            f"requested={args.mpi_ranks}, observed={observed_mpi_ranks}"
+        )
     (work_dir / "screen.out").write_text(screen, encoding="utf-8")
     payload = {
         "lmp": args.lmp,
@@ -262,6 +297,7 @@ def main():
         "model": args.model,
         "pair_style": args.pair_style,
         "mpi_ranks": args.mpi_ranks,
+        "observed_mpi_ranks": observed_mpi_ranks,
         "result": compare(
             structure,
             reference,

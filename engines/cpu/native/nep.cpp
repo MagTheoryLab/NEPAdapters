@@ -8883,6 +8883,42 @@ void NEP::allocate_memory(const int N)
   }
 }
 
+int NEP::build_dftd3_neighbor_list(
+  const int N,
+  const std::vector<double>& box,
+  const std::vector<double>& position)
+{
+  int capacity = dftd3_neighbor_capacity > 0
+    ? dftd3_neighbor_capacity
+    : MN;
+  while (true) {
+    const std::size_t atom_count = static_cast<std::size_t>(N);
+    if (atom_count > std::numeric_limits<std::size_t>::max() /
+                       static_cast<std::size_t>(capacity)) {
+      throw std::overflow_error("DFT-D3 neighbor workspace size overflow");
+    }
+    const std::size_t edge_capacity = atom_count * static_cast<std::size_t>(capacity);
+    if (edge_capacity > std::numeric_limits<std::size_t>::max() / 6) {
+      throw std::overflow_error("DFT-D3 displacement workspace size overflow");
+    }
+
+    NN_radial.resize(atom_count);
+    NL_radial.resize(edge_capacity);
+    NN_angular.resize(atom_count);
+    NL_angular.resize(edge_capacity);
+    r12.resize(edge_capacity * 6);
+
+    const int required_capacity = find_neighbor_list_small_box(
+      dftd3.rc_radial, dftd3.rc_angular, N, capacity, box, position, num_cells, ebox,
+      NN_radial, NL_radial, NN_angular, NL_angular, r12, true);
+    if (required_capacity <= capacity) {
+      dftd3_neighbor_capacity = capacity;
+      return capacity;
+    }
+    capacity = required_capacity;
+  }
+}
+
 void NEP::compute(
   const std::vector<int>& type,
   const std::vector<double>& box,
@@ -9461,12 +9497,11 @@ void NEP::compute_with_dftd3(
 {
   compute(type, box, position, potential, force, virial);
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
   set_dftd3_para_all(xc, rc_potential, rc_coordination_number);
 
-  find_neighbor_list_small_box(
-    dftd3.rc_radial, dftd3.rc_angular, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const int neighbor_capacity =
+    build_dftd3_neighbor_list(static_cast<int>(N), box, position);
+  const std::size_t size_x12 = N * static_cast<std::size_t>(neighbor_capacity);
   find_dftd3_coordination_number(
     dftd3, N, NN_angular.data(), NL_angular.data(), type.data(), r12.data() + size_x12 * 3,
     r12.data() + size_x12 * 4, r12.data() + size_x12 * 5);
@@ -9496,7 +9531,6 @@ void NEP::compute_dftd3(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9529,9 +9563,9 @@ void NEP::compute_dftd3(
 
   set_dftd3_para_all(xc, rc_potential, rc_coordination_number);
 
-  find_neighbor_list_small_box(
-    dftd3.rc_radial, dftd3.rc_angular, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const int neighbor_capacity =
+    build_dftd3_neighbor_list(static_cast<int>(N), box, position);
+  const std::size_t size_x12 = N * static_cast<std::size_t>(neighbor_capacity);
   find_dftd3_coordination_number(
     dftd3, N, NN_angular.data(), NL_angular.data(), type.data(), r12.data() + size_x12 * 3,
     r12.data() + size_x12 * 4, r12.data() + size_x12 * 5);

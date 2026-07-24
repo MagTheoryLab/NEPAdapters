@@ -28,13 +28,15 @@ spin 模型没有单独的 `nep/spin/cpu` 或 `nep/spin/gpu` 名称。仍使用 
 |---|---|
 | ordinary NEP / CPU plugin | 支持；普通 MPI 1/2/4 ranks smoke 已覆盖能量、力、每原子能量和 virial |
 | ordinary NEP / CUDA Kokkos plugin | 支持 |
-| spin NEP / CPU plugin | 单 rank 真实 LAMMPS 门禁已覆盖能量、力、磁力、virial 和 spin 读回 |
+| spin NEP / CPU plugin | CTest 始终注册单 rank；检测到 MPI launcher 时，根据可用进程数额外注册 2/4/8 ranks；Sai DSPRHBM 单节点 1/2/4/8 ranks（每 rank 2 个 OpenMP 线程）已完成逐原子正确性对照和短程 dynspin 验证 |
 | spin NEP / CUDA Kokkos plugin | 单 rank 在常规 CTest；Sai V100 单节点 1/2/4/8 MPI ranks 已做专项正确性和 TSPIN/dynspin 验证 |
 | qNEP / CUDA Kokkos plugin | **不支持**；运行时明确拒绝，需要独立的 ghost/charge 数据流 |
 | ordinary NEP / CPU builtin | 已在干净 LAMMPS 源码副本中完成编译和无 plugin baseline smoke |
 | ordinary NEP / CUDA Kokkos builtin | 已在 RTX 4090 / CUDA 12.8 上完成干净构建和无 plugin baseline smoke |
 
-边界要区分清楚：CUDA spin MPI 多 rank 不是“没测试”，而是已经完成过 1/2/4/8 ranks 专项验证；当前仓库常规 CTest 仍只自动注册单 rank spin plugin case。CPU spin MPI 尚没有同等级的正式门禁，因此不要把“CUDA spin MPI 已验证”扩大成“所有 spin MPI 都支持”。
+边界要区分清楚：CPU 和 CUDA spin 均已完成单节点 1/2/4/8 ranks 专项验证；CPU CTest 在检测到 MPI launcher 时会根据 `MPIEXEC_MAX_NUMPROCS` 自动注册最多 2/4/8 ranks，CUDA CTest 当前仍只自动注册单 rank。上述结果不等同于多节点 MPI 已验证。
+
+只运行已注册的多 rank 门禁可使用 `ctest -L mpi --output-on-failure`。在 Slurm 平台上，CTest 不负责申请计算资源，应先进入满足最大 rank 数的作业分配，再在作业内执行该命令。
 
 qNEP CUDA batch API 可用，不表示 qNEP LAMMPS Kokkos 可用。两者输入和跨 rank/ghost 数据契约不同。
 
