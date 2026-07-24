@@ -33,7 +33,7 @@ int parse_int(const std::string& token) {
 double parse_double(const std::string& token) {
   std::size_t consumed = 0;
   const double value = std::stod(token, &consumed);
-  if (consumed != token.size()) {
+  if (consumed != token.size() || !std::isfinite(value)) {
     throw std::runtime_error("invalid double token");
   }
   return value;
@@ -81,8 +81,12 @@ std::vector<std::string> next_tokens(std::ifstream& input) {
   return {};
 }
 
-bool flag_from_token(const std::string& token) {
-  return parse_int(token) != 0;
+bool boolean_flag_from_token(const std::string& token, const char* name) {
+  const int value = parse_int(token);
+  if (value != 0 && value != 1) {
+    throw std::runtime_error(std::string(name) + " must be 0 or 1");
+  }
+  return value != 0;
 }
 
 void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
@@ -125,10 +129,19 @@ void parse_zbl(
   if ((tokens.size() != 3 && tokens.size() != 4) || tokens[0] != "zbl") {
     throw std::runtime_error("expected zbl line");
   }
+  if (tokens.size() == 4) {
+    throw UnsupportedModelProtocol(
+        "CUDA backend does not support typewise ZBL cutoffs");
+  }
 
   protocol.zbl_inner = parse_double(tokens[1]);
   protocol.zbl_outer = parse_double(tokens[2]);
   protocol.flexible_zbl = (protocol.zbl_inner == 0.0 && protocol.zbl_outer == 0.0);
+  if (!protocol.flexible_zbl &&
+      (protocol.zbl_inner < 0.0 ||
+       protocol.zbl_outer <= protocol.zbl_inner)) {
+    throw std::runtime_error("invalid ZBL cutoff range");
+  }
 }
 
 // Mirrors the ordinary NEP4/NEP5 protocol in torchnep/src/force/nep.cu.
@@ -143,33 +156,40 @@ void parse_cutoff(
 
   const int per_type_tokens = 2 * protocol.num_types + 3;
   const bool uniform_cutoff = tokens.size() == 5;
-  const bool per_type_cutoff = static_cast<int>(tokens.size()) == per_type_tokens;
+  const bool per_type_cutoff =
+      protocol.num_types > 1 &&
+      static_cast<int>(tokens.size()) == per_type_tokens;
   if (!uniform_cutoff && !per_type_cutoff) {
     throw std::runtime_error("invalid cutoff line");
   }
-
-  protocol.cutoff_radial = 0.0;
-  protocol.cutoff_angular = 0.0;
-  if (uniform_cutoff) {
-    protocol.cutoff_radial = parse_double(tokens[1]);
-    protocol.cutoff_angular = parse_double(tokens[2]);
-    protocol.max_neighbors_radial = parse_int(tokens[3]);
-    protocol.max_neighbors_angular = parse_int(tokens[4]);
-  } else {
-    for (int type = 0; type < protocol.num_types; ++type) {
-      protocol.cutoff_radial =
-          std::max(protocol.cutoff_radial, parse_double(tokens[1 + 2 * type]));
-      protocol.cutoff_angular =
-          std::max(protocol.cutoff_angular, parse_double(tokens[2 + 2 * type]));
-    }
-    protocol.max_neighbors_radial = parse_int(tokens[1 + 2 * protocol.num_types]);
-    protocol.max_neighbors_angular = parse_int(tokens[2 + 2 * protocol.num_types]);
+  if (per_type_cutoff) {
+    throw UnsupportedModelProtocol(
+        "CUDA backend does not support type-dependent radial/angular cutoffs");
   }
 
-  protocol.neighbor_capacity_radial =
-      static_cast<int>(std::ceil(protocol.max_neighbors_radial * 1.25));
-  protocol.neighbor_capacity_angular =
-      static_cast<int>(std::ceil(protocol.max_neighbors_angular * 1.25));
+  protocol.cutoff_radial = parse_double(tokens[1]);
+  protocol.cutoff_angular = parse_double(tokens[2]);
+  protocol.max_neighbors_radial = parse_int(tokens[3]);
+  protocol.max_neighbors_angular = parse_int(tokens[4]);
+  if (protocol.cutoff_radial <= 0.0 || protocol.cutoff_radial > 100.0 ||
+      protocol.cutoff_angular <= 0.0 || protocol.cutoff_angular > 100.0) {
+    throw std::runtime_error("cutoffs must be within (0, 100]");
+  }
+  if (protocol.max_neighbors_radial <= 0 ||
+      protocol.max_neighbors_angular <= 0) {
+    throw std::runtime_error("maximum neighbor counts must be positive");
+  }
+
+  const double radial_capacity =
+      std::ceil(static_cast<double>(protocol.max_neighbors_radial) * 1.25);
+  const double angular_capacity =
+      std::ceil(static_cast<double>(protocol.max_neighbors_angular) * 1.25);
+  if (radial_capacity > std::numeric_limits<int>::max() ||
+      angular_capacity > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("maximum neighbor count is too large");
+  }
+  protocol.neighbor_capacity_radial = static_cast<int>(radial_capacity);
+  protocol.neighbor_capacity_angular = static_cast<int>(angular_capacity);
   protocol.cutoff_max =
       std::max({protocol.cutoff_radial, protocol.cutoff_angular, protocol.zbl_outer});
 }
@@ -197,25 +217,37 @@ void parse_basis_size(
 void parse_l_max(
     const std::vector<std::string>& tokens,
     ModelProtocol& protocol) {
-  if (tokens.size() < 4 || tokens[0] != "l_max") {
+  if (tokens.size() < 2 || tokens.size() > 8 || tokens[0] != "l_max") {
     throw std::runtime_error("expected l_max line");
   }
 
   BodyChannelConfig body;
   body.l_max_3body = parse_int(tokens[1]);
-  body.has_q_222 = flag_from_token(tokens[2]);
-  body.has_q_1111 = flag_from_token(tokens[3]);
+  if (tokens.size() >= 3) {
+    // GPUMD nep.txt historically encoded q222 as 0/2 and still emits 2
+    // when newer q112/q123/q233/q134 fields are present. Treat only this
+    // position as a legacy 0/1/2 field; all other switches are strict bools.
+    const int q222 = parse_int(tokens[2]);
+    if (q222 < 0 || q222 > 2) {
+      throw std::runtime_error("has_q_222 must be 0, 1, or legacy value 2");
+    }
+    body.has_q_222 = q222 != 0;
+  }
+  if (tokens.size() >= 4) {
+    body.has_q_1111 =
+        boolean_flag_from_token(tokens[3], "has_q_1111");
+  }
   if (tokens.size() >= 5) {
-    body.has_q_112 = flag_from_token(tokens[4]);
+    body.has_q_112 = boolean_flag_from_token(tokens[4], "has_q_112");
   }
   if (tokens.size() >= 6) {
-    body.has_q_123 = flag_from_token(tokens[5]);
+    body.has_q_123 = boolean_flag_from_token(tokens[5], "has_q_123");
   }
   if (tokens.size() >= 7) {
-    body.has_q_233 = flag_from_token(tokens[6]);
+    body.has_q_233 = boolean_flag_from_token(tokens[6], "has_q_233");
   }
   if (tokens.size() >= 8) {
-    body.has_q_134 = flag_from_token(tokens[7]);
+    body.has_q_134 = boolean_flag_from_token(tokens[7], "has_q_134");
   }
   protocol.body_channels = body;
 }
@@ -227,8 +259,50 @@ void parse_ann(
     throw std::runtime_error("expected ANN line");
   }
   protocol.hidden_neurons = parse_int(tokens[1]);
-  if (protocol.hidden_neurons <= 0 || parse_int(tokens[2]) != 0) {
-    throw std::runtime_error("invalid ANN line");
+  if (protocol.hidden_neurons <= 0 || protocol.hidden_neurons > 120) {
+    throw std::runtime_error("first ANN hidden layer must be within 1..120");
+  }
+  if (parse_int(tokens[2]) != 0) {
+    throw UnsupportedModelProtocol(
+        "CUDA backend does not support two-hidden-layer ANN models");
+  }
+}
+
+void validate_model_ranges(const ModelProtocol& protocol) {
+  if (protocol.n_max_radial < 0 || protocol.n_max_radial > 12) {
+    throw std::runtime_error("n_max_radial must be within 0..12");
+  }
+  if (protocol.n_max_angular < 0 || protocol.n_max_angular > 8) {
+    throw std::runtime_error("n_max_angular must be within 0..8");
+  }
+  if (protocol.basis_size_radial < 0 || protocol.basis_size_radial > 16) {
+    throw std::runtime_error("basis_size_radial must be within 0..16");
+  }
+  if (protocol.basis_size_angular < 0 || protocol.basis_size_angular > 12) {
+    throw std::runtime_error("basis_size_angular must be within 0..12");
+  }
+
+  const BodyChannelConfig& body = protocol.body_channels;
+  if (body.l_max_3body < 0 || body.l_max_3body > 8) {
+    throw std::runtime_error("l_max_3body must be within 0..8");
+  }
+  if ((body.has_q_222 || body.has_q_112) && body.l_max_3body < 2) {
+    throw std::runtime_error("q222/q112 require l_max_3body >= 2");
+  }
+  if (body.has_q_1111 && body.l_max_3body < 1) {
+    throw std::runtime_error("q1111 requires l_max_3body >= 1");
+  }
+  if ((body.has_q_123 || body.has_q_233) && body.l_max_3body < 3) {
+    throw std::runtime_error("q123/q233 require l_max_3body >= 3");
+  }
+  if (body.has_q_134 && body.l_max_3body < 4) {
+    throw std::runtime_error("q134 requires l_max_3body >= 4");
+  }
+  const int angular_dim =
+      (protocol.n_max_angular + 1) * body.channel_count();
+  if (angular_dim > 90) {
+    throw std::runtime_error(
+        "number of structural angular descriptors must not exceed 90");
   }
 }
 
@@ -409,7 +483,7 @@ ModelProtocol parse_model_header(std::ifstream& input) {
 
   parse_version_tag(tokens[0], protocol);
   protocol.num_types = parse_int(tokens[1]);
-  if (protocol.num_types <= 0 ||
+  if (protocol.num_types <= 0 || protocol.num_types > 118 ||
       static_cast<int>(tokens.size()) != 2 + protocol.num_types) {
     throw std::runtime_error("invalid type count in model header");
   }
@@ -431,6 +505,7 @@ ModelProtocol parse_model_header(std::ifstream& input) {
   parse_basis_size(next_tokens(input), protocol);
   parse_l_max(next_tokens(input), protocol);
   parse_ann(next_tokens(input), protocol);
+  validate_model_ranges(protocol);
   finalize_counts(protocol);
   return protocol;
 }

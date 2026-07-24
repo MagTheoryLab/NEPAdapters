@@ -85,7 +85,7 @@ bool supports_cuda_force_protocol(
            protocol.zbl_inner >= 0.0 &&
            protocol.zbl_outer > protocol.zbl_inner &&
            protocol.zbl_outer <= protocol.cutoff_radial)) &&
-         body.l_max_3body <= 4;
+         body.l_max_3body <= 8;
 }
 
 bool supports_cuda_descriptor_protocol(
@@ -94,7 +94,7 @@ bool supports_cuda_descriptor_protocol(
     return true;
   }
   return protocol.version == 4 && protocol.charge_mode > 0 &&
-         protocol.spin_mode == 0 && protocol.body_channels.l_max_3body <= 4;
+         protocol.spin_mode == 0 && protocol.body_channels.l_max_3body <= 8;
 }
 
 bool needs_angular_terms(

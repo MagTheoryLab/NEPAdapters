@@ -1,3 +1,4 @@
+#include "angular_harmonics.cuh"
 #include "device_operations.hpp"
 #include "simulation_box_device.cuh"
 
@@ -551,6 +552,29 @@ __device__ __forceinline__ float regular_weight(int alpha) {
   }
 }
 
+__device__ __forceinline__ int regular_channel_extended(int alpha) {
+  if (alpha < 24) {
+    return regular_channel(alpha);
+  }
+  if (alpha < 35) {
+    return 4;
+  }
+  if (alpha < 48) {
+    return 5;
+  }
+  if (alpha < 63) {
+    return 6;
+  }
+  return 7;
+}
+
+__device__ __forceinline__ float regular_weight_extended(int alpha) {
+  const int channel = regular_channel_extended(alpha);
+  const int first_component = (channel + 1) * (channel + 1) - 1;
+  const float multiplicity = alpha == first_component ? 2.0f : 4.0f;
+  return multiplicity * angular_harmonics::kC3B[alpha];
+}
+
 __device__ __forceinline__ void add_pull_scales(
     const AngularPullScales& source,
     float* target) {
@@ -572,6 +596,7 @@ __device__ __forceinline__ void add_pull_scales(
   }
 }
 
+template <int AngularComponents>
 __device__ __noinline__ void build_angular_pull(
     int l_max_3body,
     int has_q_222,
@@ -584,12 +609,19 @@ __device__ __noinline__ void build_angular_pull(
     const float* fp_channels,
     float* pull) {
   const int abc_count = (l_max_3body + 1) * (l_max_3body + 1) - 1;
+  if constexpr (AngularComponents == 24) {
 #pragma unroll
-  for (int alpha = 0; alpha < 24; ++alpha) {
-    pull[alpha] = alpha < abc_count
-        ? regular_weight(alpha) * sum[alpha] *
-              fp_channels[regular_channel(alpha)]
-        : 0.0f;
+    for (int alpha = 0; alpha < AngularComponents; ++alpha) {
+      pull[alpha] = alpha < abc_count
+          ? regular_weight(alpha) * sum[alpha] *
+                fp_channels[regular_channel(alpha)]
+          : 0.0f;
+    }
+  } else {
+    for (int alpha = 0; alpha < abc_count; ++alpha) {
+      pull[alpha] = regular_weight_extended(alpha) * sum[alpha] *
+          fp_channels[regular_channel_extended(alpha)];
+    }
   }
 
   int channel = l_max_3body;
@@ -912,6 +944,150 @@ __device__ __forceinline__ void contract_angular_pull_n(
   }
 }
 
+__device__ __forceinline__ void contract_extended_pull(
+    const float* owned_pull,
+    int owned_n_stride,
+    int active_n_count,
+    int warp_width,
+    int alpha,
+    const float* gn,
+    const float* gnp,
+    float& gn_scale,
+    float& gnp_scale) {
+  constexpr unsigned kFullWarpMask = 0xffffffffu;
+  const int round = alpha / warp_width;
+  const int source_lane = alpha - round * warp_width;
+  gn_scale = 0.0f;
+  gnp_scale = 0.0f;
+  for (int n = 0; n < active_n_count; ++n) {
+    const float pull = __shfl_sync(
+        kFullWarpMask,
+        owned_pull[round * owned_n_stride + n],
+        source_lane,
+        warp_width);
+    gn_scale += pull * gn[n];
+    gnp_scale += pull * gnp[n];
+  }
+}
+
+template <int L>
+__device__ __noinline__ void accumulate_extended_order(
+    const float* owned_pull,
+    int owned_n_stride,
+    int active_n_count,
+    int warp_width,
+    const float* gn,
+    const float* gnp,
+    float rinv,
+    const float* unit,
+    float* force) {
+  constexpr int kStart = L * L - 1;
+  const float x = unit[0];
+  const float y = unit[1];
+  const float z = unit[2];
+  float z_pow[L + 1] = {1.0f};
+#pragma unroll
+  for (int power = 1; power <= L; ++power) {
+    z_pow[power] = z * z_pow[power - 1];
+  }
+
+  float real_part = 1.0f;
+  float imag_part = 0.0f;
+  for (int n1 = 0; n1 <= L; ++n1) {
+    const int n2_start = (L + n1) % 2 == 0 ? 0 : 1;
+    float z_factor = 0.0f;
+    float dz_factor = 0.0f;
+#pragma unroll
+    for (int n2 = n2_start; n2 <= L - n1; n2 += 2) {
+      const float coefficient =
+          angular_harmonics::z_coefficient<L>(n1, n2);
+      z_factor += coefficient * z_pow[n2];
+      if (n2 > 0) {
+        dz_factor +=
+            coefficient * static_cast<float>(n2) * z_pow[n2 - 1];
+      }
+    }
+
+    if (n1 == 0) {
+      float gn_scale = 0.0f;
+      float gnp_scale = 0.0f;
+      contract_extended_pull(
+          owned_pull,
+          owned_n_stride,
+          active_n_count,
+          warp_width,
+          kStart,
+          gn,
+          gnp,
+          gn_scale,
+          gnp_scale);
+      add_unit_spherical_derivative_accumulated(
+          gn_scale,
+          gnp_scale,
+          z_factor,
+          0.0f,
+          0.0f,
+          dz_factor,
+          rinv,
+          unit,
+          force);
+      continue;
+    }
+
+    const float previous_real = real_part;
+    const float previous_imag = imag_part;
+    angular_harmonics::complex_product(
+        x, y, real_part, imag_part);
+    const float scale = static_cast<float>(n1);
+
+    float real_gn_scale = 0.0f;
+    float real_gnp_scale = 0.0f;
+    contract_extended_pull(
+        owned_pull,
+        owned_n_stride,
+        active_n_count,
+        warp_width,
+        kStart + 2 * n1 - 1,
+        gn,
+        gnp,
+        real_gn_scale,
+        real_gnp_scale);
+    add_unit_spherical_derivative_accumulated(
+        real_gn_scale,
+        real_gnp_scale,
+        z_factor * real_part,
+        z_factor * scale * previous_real,
+        -z_factor * scale * previous_imag,
+        dz_factor * real_part,
+        rinv,
+        unit,
+        force);
+
+    float imag_gn_scale = 0.0f;
+    float imag_gnp_scale = 0.0f;
+    contract_extended_pull(
+        owned_pull,
+        owned_n_stride,
+        active_n_count,
+        warp_width,
+        kStart + 2 * n1,
+        gn,
+        gnp,
+        imag_gn_scale,
+        imag_gnp_scale);
+    add_unit_spherical_derivative_accumulated(
+        imag_gn_scale,
+        imag_gnp_scale,
+        z_factor * imag_part,
+        z_factor * scale * previous_imag,
+        z_factor * scale * previous_real,
+        dz_factor * imag_part,
+        rinv,
+        unit,
+        force);
+  }
+}
+
 template <bool Enabled>
 struct AngularVirialOutput;
 
@@ -1052,7 +1228,8 @@ template <
     bool FloatVirialSink,
     int NCount,
     int AtomsPerWarp,
-    int EdgesPerAtomBatch>
+    int EdgesPerAtomBatch,
+    bool ExtendedAngular>
 __global__ void accumulate_angular_forces_pull_tile(
     int atom_count,
     int atom_stride,
@@ -1085,8 +1262,9 @@ __global__ void accumulate_angular_forces_pull_tile(
     double* __restrict__ force_soa3,
     double* __restrict__ virial_soa9,
     int virial_to_neighbor) {
-  constexpr int kAngularComponents = 24;
-  constexpr int kMaxFpChannels = 10;
+  constexpr int kAngularComponents =
+      ExtendedAngular ? angular_harmonics::kMaxAngularComponents : 24;
+  constexpr int kMaxFpChannels = ExtendedAngular ? 14 : 10;
   constexpr int kAlphaRounds =
       (kAngularComponents + EdgesPerAtomBatch - 1) / EdgesPerAtomBatch;
   constexpr int kSumPerAtom = NCount * kAngularComponents;
@@ -1137,12 +1315,17 @@ __global__ void accumulate_angular_forces_pull_tile(
   __shared__ float tile_fp[AtomsPerWarp * kFpPerAtom];
   __shared__ float tile_pull[AtomsPerWarp * kSumPerAtom];
 
-  for (int flat = lane; flat < AtomsPerWarp * kSumPerAtom;
+  const int active_sum_per_atom =
+      NCount * (ExtendedAngular ? abc_count : kAngularComponents);
+  for (int flat = lane; flat < AtomsPerWarp * active_sum_per_atom;
        flat += blockDim.x) {
     const int local_atom = flat % AtomsPerWarp;
-    const int component = flat / AtomsPerWarp;
-    const int n = component / kAngularComponents;
-    const int alpha = component - n * kAngularComponents;
+    const int active_component = flat / AtomsPerWarp;
+    const int active_abc_count =
+        ExtendedAngular ? abc_count : kAngularComponents;
+    const int n = active_component / active_abc_count;
+    const int alpha = active_component - n * active_abc_count;
+    const int component = n * kAngularComponents + alpha;
     const int candidate_atom = atom_base + local_atom;
     const int source_atom = use_center_grouping
         ? tile_atoms[local_atom]
@@ -1151,25 +1334,35 @@ __global__ void accumulate_angular_forces_pull_tile(
         ? sum_fxyz[source_atom + atom_stride * (n * abc_count + alpha)]
         : 0.0f;
   }
-  for (int flat = lane; flat < AtomsPerWarp * kFpPerAtom;
+  const int active_fp_per_atom =
+      NCount * (ExtendedAngular ? channel_count : kMaxFpChannels);
+  for (int flat = lane; flat < AtomsPerWarp * active_fp_per_atom;
        flat += blockDim.x) {
     const int local_atom = flat % AtomsPerWarp;
-    const int component = flat / AtomsPerWarp;
-    const int n = component / kMaxFpChannels;
-    const int channel = component - n * kMaxFpChannels;
+    const int active_component = flat / AtomsPerWarp;
+    const int active_channel_count =
+        ExtendedAngular ? channel_count : kMaxFpChannels;
+    const int n = active_component / active_channel_count;
+    const int channel = active_component - n * active_channel_count;
+    const int component = n * kMaxFpChannels + channel;
     const int candidate_atom = atom_base + local_atom;
     const int source_atom = use_center_grouping
         ? tile_atoms[local_atom]
         : (candidate_atom < atom_count ? candidate_atom : atom_count - 1);
     const int descriptor = radial_dim + channel * NCount + n;
-    tile_fp[local_atom * kFpPerAtom + component] = channel < channel_count
-        ? fp[source_atom + atom_stride * descriptor]
-        : 0.0f;
+    if constexpr (ExtendedAngular) {
+      tile_fp[local_atom * kFpPerAtom + component] =
+          fp[source_atom + atom_stride * descriptor];
+    } else {
+      tile_fp[local_atom * kFpPerAtom + component] = channel < channel_count
+          ? fp[source_atom + atom_stride * descriptor]
+          : 0.0f;
+    }
   }
   __syncthreads();
 
   for (int n = edge_lane; n < NCount; n += EdgesPerAtomBatch) {
-    build_angular_pull(
+    build_angular_pull<kAngularComponents>(
         l_max_3body,
         has_q_222,
         has_q_1111,
@@ -1183,9 +1376,12 @@ __global__ void accumulate_angular_forces_pull_tile(
   }
   __syncthreads();
 
+  const int active_alpha_rounds = ExtendedAngular
+      ? (abc_count + EdgesPerAtomBatch - 1) / EdgesPerAtomBatch
+      : kAlphaRounds;
   float owned_pull[kAlphaRounds][NCount];
 #pragma unroll
-  for (int round = 0; round < kAlphaRounds; ++round) {
+  for (int round = 0; round < active_alpha_rounds; ++round) {
     const int alpha = round * EdgesPerAtomBatch + edge_lane;
 #pragma unroll
     for (int n = 0; n < NCount; ++n) {
@@ -1282,29 +1478,108 @@ __global__ void accumulate_angular_forces_pull_tile(
     }
 
     float f12[3] = {0.0f, 0.0f, 0.0f};
+    if constexpr (!ExtendedAngular) {
 #pragma unroll
-    for (int round = 0; round < kAlphaRounds; ++round) {
+      for (int round = 0; round < active_alpha_rounds; ++round) {
 #pragma unroll
-      for (int source = 0; source < EdgesPerAtomBatch; ++source) {
-        const int alpha = round * EdgesPerAtomBatch + source;
-        float gn_scale = 0.0f;
-        float gnp_scale = 0.0f;
-        contract_angular_pull_n<NCount, EdgesPerAtomBatch>(
-            owned_pull[round],
-            source,
+        for (int source = 0; source < EdgesPerAtomBatch; ++source) {
+          const int alpha = round * EdgesPerAtomBatch + source;
+          float gn_scale = 0.0f;
+          float gnp_scale = 0.0f;
+          contract_angular_pull_n<NCount, EdgesPerAtomBatch>(
+              owned_pull[round],
+              source,
+              gn,
+              gnp,
+              gn_scale,
+              gnp_scale);
+          if (alpha < abc_count) {
+            accumulate_angular_component(
+                alpha,
+                gn_scale,
+                gnp_scale,
+                rinv,
+                unit,
+                f12);
+          }
+        }
+      }
+    } else {
+      constexpr int kLowAlphaRounds =
+          (24 + EdgesPerAtomBatch - 1) / EdgesPerAtomBatch;
+#pragma unroll
+      for (int round = 0; round < kLowAlphaRounds; ++round) {
+#pragma unroll
+        for (int source = 0; source < EdgesPerAtomBatch; ++source) {
+          const int alpha = round * EdgesPerAtomBatch + source;
+          if (alpha < 24) {
+            float gn_scale = 0.0f;
+            float gnp_scale = 0.0f;
+            contract_angular_pull_n<NCount, EdgesPerAtomBatch>(
+                owned_pull[round],
+                source,
+                gn,
+                gnp,
+                gn_scale,
+                gnp_scale);
+            accumulate_angular_component(
+                alpha,
+                gn_scale,
+                gnp_scale,
+                rinv,
+                unit,
+                f12);
+          }
+        }
+      }
+      const float* owned_pull_flat = &owned_pull[0][0];
+      if (l_max_3body >= 5) {
+        accumulate_extended_order<5>(
+            owned_pull_flat,
+            NCount,
+            NCount,
+            EdgesPerAtomBatch,
             gn,
             gnp,
-            gn_scale,
-            gnp_scale);
-        if (alpha < abc_count) {
-          accumulate_angular_component(
-              alpha,
-              gn_scale,
-              gnp_scale,
-              rinv,
-              unit,
-              f12);
-        }
+            rinv,
+            unit,
+            f12);
+      }
+      if (l_max_3body >= 6) {
+        accumulate_extended_order<6>(
+            owned_pull_flat,
+            NCount,
+            NCount,
+            EdgesPerAtomBatch,
+            gn,
+            gnp,
+            rinv,
+            unit,
+            f12);
+      }
+      if (l_max_3body >= 7) {
+        accumulate_extended_order<7>(
+            owned_pull_flat,
+            NCount,
+            NCount,
+            EdgesPerAtomBatch,
+            gn,
+            gnp,
+            rinv,
+            unit,
+            f12);
+      }
+      if (l_max_3body >= 8) {
+        accumulate_extended_order<8>(
+            owned_pull_flat,
+            NCount,
+            NCount,
+            EdgesPerAtomBatch,
+            gn,
+            gnp,
+            rinv,
+            unit,
+            f12);
       }
     }
 
@@ -1390,7 +1665,8 @@ template <
     bool AccumulateVirial,
     bool FloatVirialSink,
     int NCount,
-    int EdgesPerAtomBatch>
+    int EdgesPerAtomBatch,
+    bool ExtendedAngular>
 void launch_angular_pull_tile(
     const ModelProtocol& protocol,
     int atom_count,
@@ -1413,7 +1689,8 @@ void launch_angular_pull_tile(
       FloatVirialSink,
       NCount,
       kAtomsPerWarp,
-      EdgesPerAtomBatch>
+      EdgesPerAtomBatch,
+      ExtendedAngular>
       <<<tile_blocks, kAngularForceThreads>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
@@ -1451,8 +1728,8 @@ void launch_angular_pull_tile(
           virial_to_neighbor ? 1 : 0);
 }
 
-template <bool AccumulateVirial, bool FloatVirialSink>
-void dispatch_angular_pull_tile(
+template <bool AccumulateVirial, bool FloatVirialSink, bool ExtendedAngular>
+void dispatch_angular_pull_tile_shape(
     const ModelProtocol& protocol,
     int atom_count,
     const DeviceModelView& model_view,
@@ -1461,59 +1738,77 @@ void dispatch_angular_pull_tile(
   switch (protocol.n_max_angular) {
     case 0:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 1, 4>(
+          AccumulateVirial, FloatVirialSink, 1, 4, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 1:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 2, 4>(
+          AccumulateVirial, FloatVirialSink, 2, 4, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 2:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 3, 8>(
+          AccumulateVirial, FloatVirialSink, 3, 8, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 3:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 4, 8>(
+          AccumulateVirial, FloatVirialSink, 4, 8, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 4:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 5, 8>(
+          AccumulateVirial, FloatVirialSink, 5, 8, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 5:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 6, 8>(
+          AccumulateVirial, FloatVirialSink, 6, 8, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 6:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 7, 16>(
+          AccumulateVirial, FloatVirialSink, 7, 16, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 7:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 8, 16>(
+          AccumulateVirial, FloatVirialSink, 8, 16, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
     case 8:
       launch_angular_pull_tile<
-          AccumulateVirial, FloatVirialSink, 9, 16>(
+          AccumulateVirial, FloatVirialSink, 9, 16, ExtendedAngular>(
           protocol, atom_count, model_view, view,
           virial_to_neighbor);
       break;
   }
+}
+
+template <bool AccumulateVirial, bool FloatVirialSink>
+void dispatch_angular_pull_tile(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    bool virial_to_neighbor) {
+  if (protocol.body_channels.l_max_3body <= 4) {
+    dispatch_angular_pull_tile_shape<
+        AccumulateVirial, FloatVirialSink, false>(
+        protocol, atom_count, model_view, view, virial_to_neighbor);
+    return;
+  }
+  dispatch_angular_pull_tile_shape<
+      AccumulateVirial, FloatVirialSink, true>(
+      protocol, atom_count, model_view, view, virial_to_neighbor);
 }
 
 void validate_angular_force_inputs(
@@ -1526,8 +1821,8 @@ void validate_angular_force_inputs(
   require(protocol.n_max_angular >= 0 && protocol.n_max_angular <= 8,
           "angular force kernel supports n_max_angular 0..8");
   require(protocol.body_channels.l_max_3body >= 1 &&
-              protocol.body_channels.l_max_3body <= 4,
-          "angular force kernel supports l_max_3body 1..4");
+              protocol.body_channels.l_max_3body <= 8,
+          "angular force kernel supports l_max_3body 1..8");
   require(!protocol.body_channels.has_q_222 ||
               protocol.body_channels.l_max_3body >= 2,
           "q222 angular force requires l_max_3body >= 2");

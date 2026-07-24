@@ -219,7 +219,7 @@ BatchStorage make_batch(const Options& options) {
   storage.types.assign(static_cast<std::size_t>(total_atoms), 0);
   storage.positions.resize(static_cast<std::size_t>(total_atoms) * 3);
   storage.boxes.resize(static_cast<std::size_t>(options.structures) * 9, 0.0);
-  storage.pbc.assign(static_cast<std::size_t>(options.structures) * 3, 0);
+  storage.pbc.assign(static_cast<std::size_t>(options.structures) * 3, 1);
   storage.energy.assign(static_cast<std::size_t>(options.structures), 0.0);
   storage.potential.assign(static_cast<std::size_t>(total_atoms), 0.0);
   storage.forces.assign(static_cast<std::size_t>(total_atoms) * 3, 0.0);

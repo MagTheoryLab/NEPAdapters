@@ -259,6 +259,41 @@ bool compare_prediction(
   return true;
 }
 
+bool check_cuda_finite_difference(
+    const Case& test_case,
+    const std::string& model_path,
+    const Prediction& base) {
+  constexpr double kEpsilon = 1.0e-4;
+  constexpr double kTolerance = 8.0e-3;
+  for (std::size_t coordinate = 0;
+       coordinate < test_case.positions.size();
+       ++coordinate) {
+    std::vector<double> plus = test_case.positions;
+    std::vector<double> minus = test_case.positions;
+    plus[coordinate] += kEpsilon;
+    minus[coordinate] -= kEpsilon;
+    const double e_plus =
+        evaluate_single(
+            "cuda", model_path, plus, test_case.type_cycle).energy[0];
+    const double e_minus =
+        evaluate_single(
+            "cuda", model_path, minus, test_case.type_cycle).energy[0];
+    const double finite_difference =
+        -(e_plus - e_minus) / (2.0 * kEpsilon);
+    const double difference =
+        std::abs(base.forces[coordinate] - finite_difference);
+    if (difference > kTolerance) {
+      std::cerr << test_case.name
+                << " CUDA finite-difference mismatch coordinate="
+                << coordinate << " force=" << base.forces[coordinate]
+                << " fd=" << finite_difference
+                << " difference=" << difference << "\n";
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string values_text(const std::vector<double>& values) {
   std::string text;
   for (double value : values) {
@@ -341,7 +376,7 @@ std::vector<Case> make_cases() {
       static_cast<std::size_t>(kWideDescriptorDim + 2) *
               kWideHiddenNeurons +
           1,
-      66,
+      17,
       kWideDescriptorDim);
   constexpr int kSharedPressureTypes = 8;
   constexpr int kSharedPressureHiddenNeurons = 120;
@@ -354,7 +389,7 @@ std::vector<Case> make_cases() {
           kSharedPressureTypes * 18,
       kSharedPressureDescriptorDim);
 
-  return {
+  std::vector<Case> cases = {
       {
           "radial",
           "nep4 1 C\n"
@@ -420,9 +455,9 @@ std::vector<Case> make_cases() {
           "wide_descriptor",
           "nep4 1 C\n"
           "cutoff 5 1 8 1\n"
-          "n_max 64 0\n"
+          "n_max 12 3\n"
           "basis_size 0 0\n"
-          "l_max 0 0 0\n"
+          "l_max 8 2 1 1 1 1\n"
           "ANN 3 0\n" +
               values_text(wide_descriptor_values),
           {0.20, 0.20, 0.20, 11.40, 1.90, 1.00, 2.40, 0.50, 0.30},
@@ -442,6 +477,30 @@ std::vector<Case> make_cases() {
           kSharedPressureTypes,
       },
   };
+  for (int l_max = 5; l_max <= 8; ++l_max) {
+    const int descriptor_dim = 1 + l_max;
+    constexpr int kHiddenNeurons = 3;
+    const std::vector<double> values = generated_model_values(
+        static_cast<std::size_t>(descriptor_dim + 2) * kHiddenNeurons + 1,
+        3,
+        descriptor_dim);
+    cases.push_back(
+        {
+            "angular_l" + std::to_string(l_max),
+            "nep4 1 C\n"
+            "cutoff 0.5 4 1 8\n"
+            "n_max 0 0\n"
+            "basis_size 0 1\n"
+            "l_max " +
+                std::to_string(l_max) +
+                " 0 0\n"
+                "ANN 3 0\n" +
+                values_text(values),
+            {0.20, 0.20, 0.20, 11.40, 1.90, 1.00, 2.40, 0.50, 0.30},
+            8.0e-3,
+        });
+  }
+  return cases;
 }
 
 }  // namespace
@@ -465,6 +524,10 @@ int main() {
         test_case.positions,
         test_case.type_cycle);
     if (!compare_prediction(test_case, cpu, cuda)) {
+      return EXIT_FAILURE;
+    }
+    if (test_case.name == "angular_l8" &&
+        !check_cuda_finite_difference(test_case, model_path, cuda)) {
       return EXIT_FAILURE;
     }
 
