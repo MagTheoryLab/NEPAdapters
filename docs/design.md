@@ -97,7 +97,7 @@ engine SPI 面向 engine 实现者，位于 `engine.hpp`；它不是面向应用
 
 ## 打包策略
 
-Python 发布设计只有一个 `nep-adapters` distribution 和一个版本序列；当前 PyPI 尚无正式包。计划中的 Linux x86_64 wheel 同时包含独立的 `nep_cpu` 与 `nep_gpu` 扩展；macOS 和 Windows 没有受支持的 CUDA 运行面，只包含 `nep_cpu`。所有平台都不包含 LAMMPS。
+Python 只发布一个 `nep-adapters` distribution，并使用一个版本序列。Linux x86_64 和 Windows x86_64 wheel 同时包含独立的 `nep_cpu` 与 `nep_gpu` 扩展；macOS x86_64 和 arm64 wheel 只包含 `nep_cpu`。所有平台的 Python wheel 都不包含 LAMMPS。
 
 导入包或选择 `backend="cpu"` 不加载 CUDA；只有显式选择 `backend="cuda"` 才加载 GPU 模块。CUDA 加载或模型能力失败时直接报错，不允许切换到 CPU。`auto` 属于 NepTrainKit 等调用方策略，不进入 backend registry。
 
@@ -109,7 +109,7 @@ LAMMPS integration 由源码仓库单独构建：
 - plugin 与 builtin 是同一 frontend implementation 的两种装配方式，不能演化成两套 pair 逻辑；
 - LAMMPS 只链接 runtime/engine，不依赖 Python。
 
-Linux combined wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须 fail-closed。CUDA Runtime 静态链接，wheel 不打包动态 `libcudart`、`libcuda` 或 `libcufft`。
+Linux 和 Windows combined wheel 默认关闭 qNEP PPPM/cuFFT。实验性 PPPM 只有显式编译才存在；未启用时请求 PPPM 必须明确报错。CUDA Runtime 静态链接，wheel 不打包动态 `libcudart`、`libcuda` 或 `libcufft`。
 
 ## CPU 基准
 

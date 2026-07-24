@@ -9,27 +9,32 @@ Python frontend 提供两层接口：
 
 ## 安装
 
-当前 PyPI 没有正式发布包，请在仓库根目录从源码安装。
-
-CPU + ASE：
+仅使用 NumPy 接口：
 
 ```sh
-python -m pip install '.[ase]'
+python -m pip install nep-adapters
 ```
 
-仅 NumPy 接口：
+同时使用 ASE：
+
+```sh
+python -m pip install 'nep-adapters[ase]'
+```
+
+预编译 wheel 支持 CPython 3.10–3.14。Linux x86_64 和 Windows x86_64
+wheel 同时包含 CPU 与 CUDA 后端，不需要另外安装 CUDA Toolkit；使用 CUDA
+仍需兼容的 NVIDIA 驱动和 GPU。macOS x86_64 与 arm64 wheel 只包含 CPU
+后端。
+
+从源码安装时，构建系统会自动查找 NVCC：找到时构建 CPU+CUDA，找不到时
+只构建 CPU。
 
 ```sh
 python -m pip install .
 ```
 
-CUDA：
-
-```sh
-NEP_CUDA=1 python -m pip install .
-```
-
-要求 Python 3.10+。NumPy 是必需依赖，ASE 是可选依赖。
+`NEP_CUDA=1` 和 `NEP_CUDA=0` 可分别强制源码构建启用或禁用 CUDA。
+NumPy 是必需依赖，ASE 是可选依赖。
 
 ## 第一次计算
 
@@ -83,7 +88,7 @@ cuda = backend_status("cuda")
 print(cuda.available, cuda.reason)
 ```
 
-`inspect_model()` 不执行预测，可用于在 UI 或批处理开始前确认模型类型、元素、cutoff、能力和 SHA256。`backend_status("cuda")` 会报告扩展、运行时、设备和显存状态。
+`inspect_model()` 不执行预测，可用于在 UI 或批处理开始前确认模型类型、元素、cutoff、能力和 SHA256。`backend_status("cuda")` 会报告扩展、运行时、设备和显存状态，并通过一次内存分配、核函数启动、同步和结果回传验证 CUDA 计算链路。
 
 ## 普通 NEP 批计算
 

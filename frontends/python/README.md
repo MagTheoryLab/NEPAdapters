@@ -2,11 +2,11 @@
 
 本目录提供 pybind11 绑定、NumPy 高层接口和可选 ASE 适配。面向使用者的安装、快速开始和 API 指南见 [Python 接口指南](../../docs/python.md)；本页保留 frontend 契约和开发构建说明。
 
-发布设计只使用一个 `nep-adapters` distribution。当前 PyPI 尚无正式包，需要从源码安装。计划中的 Linux x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS 和 Windows wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
+发布只使用一个 `nep-adapters` distribution。Linux x86_64 和 Windows x86_64 wheel 同时包含 CPU 与 CUDA 扩展；macOS x86_64 和 arm64 wheel 只包含 CPU 扩展。只有显式选择 `backend="cuda"` 时才按需加载 `nep_gpu`；`auto` 由上层应用实现，不是 NEPAdapters 后端名。
 
 ## 运行时检查与错误
 
-`inspect_model(path)` 返回 `ModelInfo`，统一提供模型类型、元素、cutoff、descriptor 维度、能力名和模型 SHA256。`backend_status("cpu" | "cuda")` 返回 `BackendStatus`；CUDA 状态包含扩展是否安装、运行时是否可用、原因、设备列表和当前可用显存。
+`inspect_model(path)` 返回 `ModelInfo`，统一提供模型类型、元素、cutoff、descriptor 维度、能力名和模型 SHA256。`backend_status("cpu" | "cuda")` 返回 `BackendStatus`；CUDA 状态包含扩展是否安装、运行时是否可用、原因、设备列表和当前可用显存，并通过实际核函数验证计算链路。
 
 公共 Python 入口统一抛出 `NepAdaptersError` 子类：`InvalidInputError`、`UnsupportedModelError`、`BackendUnavailableError`、`ModelLoadError`、`BackendRuntimeError`、`OutOfMemoryError` 和 `CancelledError`。每个异常都带稳定的 `code`，以及适用时的 `backend`、`operation`；调用方不应匹配完整错误文案。
 
@@ -188,8 +188,9 @@ combined wheel 同时包含 `nep_cpu` 和 `nep_gpu`。导入 `nep_adapters` 或�
 
 CUDA 接受已实现的 NEP4/NEP5 协议。NEP3 模型传给 `backend="cuda"` 会明确报不支持。qNEP direct 模型通过 `nep_gpu` 执行 `calculate_charge()` 和 `descriptors()`；普通 `calculate()` 对 charge 模型保持 fail-closed。
 
-发布 wheel 不使用 `native`，而是同时嵌入 V100、T4、A100、A10/RTX 30 和
-RTX 4090 的 SASS，并保留 `compute_89` PTX：
+发布 wheel 不使用 `native`，而是嵌入 `sm_60` 与 `sm_89` SASS，并保留
+`compute_60` PTX。其他受驱动支持的 GPU 架构可通过 PTX 即时编译运行，
+但可能产生首次加载开销或一定性能损失：
 
 ```sh
 CMAKE_ARGS='-DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual' \

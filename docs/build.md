@@ -72,7 +72,7 @@ ctest --test-dir .build/cuda -L cuda --output-on-failure
 
 ## Python：直接安装
 
-当前 PyPI 没有正式发布包。直接从源码安装：
+在仓库根目录直接从源码安装：
 
 ```sh
 python -m pip install .
