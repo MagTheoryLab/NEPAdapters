@@ -11,12 +11,12 @@ on:
         default: ""
         type: string
       build_gpu:
-        description: Build combined Linux CPU+CUDA wheels and the Windows CPython 3.10 CUDA wheel
+        description: Build combined Linux and Windows CPU+CUDA wheels
         required: false
         default: true
         type: boolean
       windows_cuda_only:
-        description: Build only the Windows CPython 3.10 CPU+CUDA wheel
+        description: Build only the Windows CPython 3.10 CPU+CUDA validation wheel
         required: false
         default: false
         type: boolean
@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   cpu_wheels:
-    name: Platform wheels (${{ matrix.label }})
+    name: CPU wheels (${{ matrix.label }})
     if: >-
       github.event_name != 'workflow_dispatch' ||
       (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
@@ -101,9 +101,6 @@ jobs:
             label: macos-arm64
             archs: arm64
             macos_target: "14.0"
-          - os: windows-2022
-            label: windows-x86_64
-            archs: AMD64
     steps:
       - uses: actions/checkout@v6
         with:
@@ -179,11 +176,13 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
-  windows_cuda_wheel:
-    name: Combined CPU+CUDA wheel (Windows x86_64, CPython 3.10)
+  windows_cuda_wheels:
+    name: Combined CPU+CUDA wheels (Windows x86_64)
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.build_gpu || inputs.windows_cuda_only) &&
+      (github.event_name == 'release' ||
+      inputs.tag_name != '' ||
+      inputs.build_gpu ||
+      inputs.windows_cuda_only) &&
       !inputs.linux_cuda_only
     runs-on: windows-2022
     steps:
@@ -205,7 +204,10 @@ jobs:
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS_WINDOWS: AMD64
-          CIBW_BUILD: cp310-win_amd64
+          CIBW_BUILD: >-
+            ${{ inputs.windows_cuda_only &&
+            'cp310-win_amd64' ||
+            'cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64' }}
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_GENERATOR="Visual Studio 17 2022"
             CUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
@@ -216,19 +218,20 @@ jobs:
         run: python tools/check_wheel_contents.py --variant combined --wheel-dir wheelhouse
       - uses: actions/upload-artifact@v6
         with:
-          name: python-combined-windows-x86_64-cp310
+          name: python-combined-windows-x86_64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   release_assets:
     name: Attach packages to GitHub release
-    needs: [sdist, cpu_wheels, gpu_wheels]
+    needs: [sdist, cpu_wheels, gpu_wheels, windows_cuda_wheels]
     if: >-
       always() &&
       github.event_name == 'release' &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      needs.gpu_wheels.result == 'success'
+      needs.gpu_wheels.result == 'success' &&
+      needs.windows_cuda_wheels.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -247,13 +250,14 @@ jobs:
 
   publish_pypi:
     name: Publish packages to PyPI
-    needs: [sdist, cpu_wheels, gpu_wheels]
+    needs: [sdist, cpu_wheels, gpu_wheels, windows_cuda_wheels]
     if: >-
       always() &&
       github.event_name == 'release' &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
-      needs.gpu_wheels.result == 'success'
+      needs.gpu_wheels.result == 'success' &&
+      needs.windows_cuda_wheels.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
