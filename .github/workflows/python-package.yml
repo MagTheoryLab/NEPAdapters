@@ -69,6 +69,8 @@ jobs:
               raise SystemExit(f"release tag {actual!r} must equal {expected!r}")
           PY
       - name: Build and verify sdist
+        env:
+          NEP_CUDA: "0"
         run: |
           python -m pip install --upgrade pip build twine
           python -m build --sdist
@@ -113,6 +115,7 @@ jobs:
       - name: Build platform wheels
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
+          CIBW_ENVIRONMENT: NEP_CUDA=0
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_BEFORE_ALL_MACOS: brew install libomp
           CIBW_ENVIRONMENT_MACOS: >-
@@ -162,8 +165,7 @@ jobs:
             CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             CUDACXX=/usr/local/cuda/bin/nvcc
             CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
-            -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
+            CMAKE_ARGS="-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
             -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
           CIBW_TEST_COMMAND_LINUX: >-
@@ -207,8 +209,7 @@ jobs:
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_GENERATOR="Visual Studio 17 2022"
             CUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
-            CMAKE_ARGS="-DNEP_ADAPTERS_ENABLE_CUDA=ON
-            -DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
+            CMAKE_ARGS="-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
             -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
           CIBW_TEST_ENVIRONMENT_WINDOWS: NEP_ADAPTERS_EXPECT_GPU_MODULE=1
       - name: Audit combined wheel contents

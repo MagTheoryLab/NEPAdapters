@@ -16,7 +16,7 @@ NEPAdapters 是统一的 NEP 推理运行时：同一个模型可以通过 Pytho
 
 ## Python 快速开始
 
-PyPI 目前还没有可直接安装的正式包，请从源码安装。CPU 版本：
+PyPI 目前还没有可直接安装的正式包，请从源码安装：
 
 ```sh
 git clone <NEPAdapters repository URL>
@@ -42,11 +42,16 @@ print(atoms.get_potential_energy())
 print(atoms.get_forces())
 ```
 
-CUDA 源码安装需要 CUDA Toolkit，并且必须显式启用：
+源码安装会查找 `CUDACXX`、`CUDAToolkit_ROOT`、`CUDA_PATH`、
+`CUDA_HOME` 和 `PATH` 中的 NVCC。检测到 CUDA Toolkit 时自动构建
+CPU+CUDA，否则只构建 CPU：
 
 ```sh
-NEP_CUDA=1 python -m pip install .
+python -m pip install .
 ```
+
+本机源码构建不指定 `CMAKE_CUDA_ARCHITECTURES` 时使用 `native`，只为当前
+GPU 编译。`NEP_CUDA=1` 和 `NEP_CUDA=0` 可分别强制启用或禁用 CUDA。
 
 选择 `backend="cuda"` 才会加载 GPU 扩展；失败时不会改用 CPU。更多 NumPy batch、qNEP、spin、descriptor 和错误处理示例见 [Python 接口指南](docs/python.md)。
 
@@ -62,7 +67,9 @@ cmake --build .build/release -j2
 ctest --test-dir .build/release --output-on-failure
 ```
 
-默认只启用 CPU。Python、CUDA 和 LAMMPS 都需要显式打开；完整组合、安装命令和选项默认值见 [构建与安装](docs/build.md)。
+Python 源码安装会自动查找 NVCC；独立 CMake 和 LAMMPS 构建仍按目标显式
+打开 CUDA，避免有 Toolkit 的机器意外改变 CPU-only 构建。完整组合、安装命令
+和选项默认值见 [构建与安装](docs/build.md)。
 
 ## LAMMPS 安装方式
 
