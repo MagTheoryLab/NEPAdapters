@@ -255,7 +255,6 @@ jobs:
       needs.cpu_wheels.result == 'success' &&
       needs.gpu_wheels.result == 'success'
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: read
       id-token: write
