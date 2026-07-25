@@ -25,6 +25,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_pypi_only:
+        description: Publish packages already attached to the specified GitHub release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -41,7 +46,8 @@ jobs:
     name: Source distribution
     if: >-
       github.event_name != 'workflow_dispatch' ||
-      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only &&
+      !inputs.publish_pypi_only)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -87,7 +93,8 @@ jobs:
     name: CPU wheels (${{ matrix.label }})
     if: >-
       github.event_name != 'workflow_dispatch' ||
-      (!inputs.windows_cuda_only && !inputs.linux_cuda_only)
+      (!inputs.windows_cuda_only && !inputs.linux_cuda_only &&
+      !inputs.publish_pypi_only)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -132,7 +139,8 @@ jobs:
       inputs.tag_name != '' ||
       inputs.build_gpu ||
       inputs.linux_cuda_only) &&
-      !inputs.windows_cuda_only
+      !inputs.windows_cuda_only &&
+      !inputs.publish_pypi_only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -183,7 +191,8 @@ jobs:
       inputs.tag_name != '' ||
       inputs.build_gpu ||
       inputs.windows_cuda_only) &&
-      !inputs.linux_cuda_only
+      !inputs.linux_cuda_only &&
+      !inputs.publish_pypi_only
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
@@ -253,27 +262,47 @@ jobs:
     needs: [sdist, cpu_wheels, gpu_wheels, windows_cuda_wheels]
     if: >-
       always() &&
-      github.event_name == 'release' &&
+      ((github.event_name == 'release' &&
       needs.sdist.result == 'success' &&
       needs.cpu_wheels.result == 'success' &&
       needs.gpu_wheels.result == 'success' &&
-      needs.windows_cuda_wheels.result == 'success'
+      needs.windows_cuda_wheels.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.publish_pypi_only &&
+      inputs.tag_name != ''))
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nep-adapters
     permissions:
       contents: read
       id-token: write
     steps:
+      - name: Download packages from existing GitHub release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_pypi_only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+        run: |
+          mkdir -p dist
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir dist \
+            --pattern '*.whl' \
+            --pattern '*.tar.gz'
       - uses: actions/download-artifact@v7
+        if: github.event_name == 'release'
         with:
           name: python-sdist
           path: dist
       - uses: actions/download-artifact@v7
+        if: github.event_name == 'release'
         with:
           pattern: python-platform-*
           path: dist
           merge-multiple: true
       - uses: actions/download-artifact@v7
-        if: needs.gpu_wheels.result == 'success'
+        if: github.event_name == 'release' && needs.gpu_wheels.result == 'success'
         with:
           pattern: python-combined-*
           path: dist
