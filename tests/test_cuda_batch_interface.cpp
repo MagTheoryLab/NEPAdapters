@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <string>
 
 #ifndef NEP_ADAPTERS_CUDA_TEST_MODEL_PATH
 #  error "NEP_ADAPTERS_CUDA_TEST_MODEL_PATH must be defined"
@@ -17,6 +18,12 @@ int main() {
   if (nepa_load_model("cuda", NEP_ADAPTERS_CUDA_TEST_MODEL_PATH, &model) !=
           NEPA_STATUS_OK ||
       model == nullptr) {
+    return EXIT_FAILURE;
+  }
+  NepaModelInfo model_info{};
+  if (nepa_model_info(model, &model_info) != NEPA_STATUS_OK ||
+      model_info.num_types <= 0) {
+    nepa_free_model(model);
     return EXIT_FAILURE;
   }
 
@@ -60,6 +67,23 @@ int main() {
       nepa_free_model(model);
       return EXIT_FAILURE;
     }
+  }
+
+  types[0] = -1;
+  const NepaStatus negative_type_status =
+      nepa_find_force_batch(model, &batch, &result);
+  const std::string negative_type_error = nepa_last_error_message();
+  types[0] = model_info.num_types;
+  const NepaStatus high_type_status =
+      nepa_find_force_batch(model, &batch, &result);
+  const std::string high_type_error = nepa_last_error_message();
+  types[0] = 0;
+  if (negative_type_status != NEPA_STATUS_INVALID_ARGUMENT ||
+      high_type_status != NEPA_STATUS_INVALID_ARGUMENT ||
+      negative_type_error.find("model type range") == std::string::npos ||
+      high_type_error.find("model type range") == std::string::npos) {
+    nepa_free_model(model);
+    return EXIT_FAILURE;
   }
 
   result.forces_aos3 = nullptr;

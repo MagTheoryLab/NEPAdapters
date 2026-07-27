@@ -541,26 +541,40 @@ int main() {
         batch_positions.end(),
         second_positions.begin(),
         second_positions.end());
+    const std::vector<double> third_positions = {
+        0.75, 0.40, 0.25,
+        3.30, 0.85, 0.55,
+    };
+    batch_positions.insert(
+        batch_positions.end(),
+        third_positions.begin(),
+        third_positions.end());
     std::vector<double> batch_boxes = triclinic_box();
     const std::vector<double> second_box = orthorhombic_box();
     batch_boxes.insert(batch_boxes.end(), second_box.begin(), second_box.end());
+    const std::vector<double> third_box = {
+        9.0, 1.2, 0.4,
+        0.0, 8.5, 0.8,
+        0.0, 0.0, 8.0,
+    };
+    batch_boxes.insert(batch_boxes.end(), third_box.begin(), third_box.end());
     const Prediction cpu_batch = evaluate_structures_independently(
         "cpu",
         model_path,
-        {3, 3},
-        {0, 3},
+        {3, 3, 2},
+        {0, 3, 6},
         batch_positions,
         batch_boxes,
-        {1, 1, 1, 1, 1, 1},
+        {1, 1, 1, 1, 1, 1, 1, 1, 1},
         test_case.type_cycle);
     const Prediction cuda_batch = evaluate_batch(
         "cuda",
         model_path,
-        {3, 3},
-        {0, 3},
+        {3, 3, 2},
+        {0, 3, 6},
         batch_positions,
         batch_boxes,
-        {1, 1, 1, 1, 1, 1},
+        {1, 1, 1, 1, 1, 1, 1, 1, 1},
         test_case.type_cycle);
     if (!compare_prediction(test_case, cpu_batch, cuda_batch)) {
       return EXIT_FAILURE;

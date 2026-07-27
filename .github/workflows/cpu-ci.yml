@@ -1,0 +1,52 @@
+name: CPU CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Linux CPU build and tests
+    runs-on: ubuntu-24.04
+    env:
+      NEP_CUDA: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build libopenblas-dev
+          python -m pip install --upgrade pip
+          python -m pip install numpy pybind11 ase
+
+      - name: Configure CPU-only build
+        run: |
+          cmake -S . -B .build/ci-cpu -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DNEP_ADAPTERS_ENABLE_CUDA=OFF \
+            -DNEP_ADAPTERS_ENABLE_CPU=ON \
+            -DNEP_ADAPTERS_ENABLE_PYTHON=ON \
+            -DNEP_ADAPTERS_ENABLE_LAMMPS=OFF \
+            -DNEP_ADAPTERS_BUILD_TESTS=ON \
+            -DNEP_ADAPTERS_BUILD_BENCHMARKS=OFF \
+            -DPython3_EXECUTABLE="$(command -v python)"
+
+      - name: Build
+        run: cmake --build .build/ci-cpu --parallel 2
+
+      - name: Test
+        run: ctest --test-dir .build/ci-cpu --output-on-failure --parallel 2

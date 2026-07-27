@@ -357,6 +357,8 @@ class CpuModel final : public Model {
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
+        std::vector<std::string> errors(
+            static_cast<std::size_t>(batch.num_structures));
 #pragma omp parallel num_threads(structure_threads)
         {
           omp_set_num_threads(1);
@@ -367,14 +369,18 @@ class CpuModel final : public Model {
                   process_structure(
                       workers[static_cast<std::size_t>(omp_get_thread_num())],
                       structure);
-            } catch (const std::exception&) {
+            } catch (const std::exception& error) {
+              errors[static_cast<std::size_t>(structure)] = error.what();
               statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
             }
           }
         }
-        for (const NepaStatus status : statuses) {
-          if (status != NEPA_STATUS_OK) {
-            return status;
+        for (std::size_t structure = 0; structure < statuses.size(); ++structure) {
+          if (statuses[structure] != NEPA_STATUS_OK) {
+            if (!errors[structure].empty()) {
+              set_last_error(errors[structure]);
+            }
+            return statuses[structure];
           }
         }
 #endif
@@ -390,7 +396,8 @@ class CpuModel final : public Model {
         }
       }
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
@@ -504,6 +511,8 @@ class CpuModel final : public Model {
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
+        std::vector<std::string> errors(
+            static_cast<std::size_t>(batch.num_structures));
 #pragma omp parallel num_threads(structure_threads)
         {
           omp_set_num_threads(1);
@@ -514,14 +523,18 @@ class CpuModel final : public Model {
                   process_structure(
                       workers[static_cast<std::size_t>(omp_get_thread_num())],
                       structure);
-            } catch (const std::exception&) {
+            } catch (const std::exception& error) {
+              errors[static_cast<std::size_t>(structure)] = error.what();
               statuses[static_cast<std::size_t>(structure)] = NEPA_STATUS_RUNTIME_ERROR;
             }
           }
         }
-        for (const NepaStatus status : statuses) {
-          if (status != NEPA_STATUS_OK) {
-            return status;
+        for (std::size_t structure = 0; structure < statuses.size(); ++structure) {
+          if (statuses[structure] != NEPA_STATUS_OK) {
+            if (!errors[structure].empty()) {
+              set_last_error(errors[structure]);
+            }
+            return statuses[structure];
           }
         }
 #endif
@@ -538,7 +551,8 @@ class CpuModel final : public Model {
       }
 
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
@@ -576,7 +590,8 @@ class CpuModel final : public Model {
             result.dipoles_row_major3 + static_cast<std::size_t>(structure) * 3);
       }
       return NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
@@ -615,7 +630,8 @@ class CpuModel final : public Model {
                 static_cast<std::size_t>(structure) * 6);
       }
       return NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }
@@ -803,7 +819,8 @@ class CpuModel final : public Model {
       *result.total_potential = total_potential;
       std::copy(total_virial, total_virial + 6, result.total_virial6);
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+      set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
     }
   }

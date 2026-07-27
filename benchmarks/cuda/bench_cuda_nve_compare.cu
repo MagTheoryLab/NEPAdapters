@@ -310,7 +310,8 @@ double time_nve(
           static_cast<std::size_t>(total_atoms),
           1));
   workspace_bytes = workspace.summary().total_bytes;
-  nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
+  nep_adapters::cuda_backend::stage_batch_on_device(
+      batch, host.protocol.num_types, workspace);
 
   std::vector<double> host_velocities = make_velocities_soa3(options);
   double* velocities = nullptr;
