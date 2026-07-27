@@ -65,10 +65,9 @@ jobs:
         run: |
           python - <<'PY'
           import os
-          import tomllib
           from pathlib import Path
 
-          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          version = Path("VERSION").read_text().strip()
           expected = f"v{version}"
           actual = os.environ["RELEASE_TAG"]
           if actual != expected:

@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "nep_adapters/version.h"
+
 #if defined(_WIN32) && defined(NEP_ADAPTERS_SHARED)
 #  if defined(NEP_ADAPTERS_BUILDING)
 #    define NEP_ADAPTERS_API __declspec(dllexport)
@@ -12,11 +14,6 @@
 #else
 #  define NEP_ADAPTERS_API
 #endif
-
-#define NEP_ADAPTERS_API_VERSION_MAJOR 1
-#define NEP_ADAPTERS_API_VERSION_MINOR 0
-#define NEP_ADAPTERS_API_VERSION_PATCH 0
-#define NEP_ADAPTERS_VERSION_STRING "1.0.0"
 
 #ifdef __cplusplus
 extern "C" {

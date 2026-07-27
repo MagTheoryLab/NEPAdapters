@@ -1,6 +1,11 @@
 add_library(nep_adapters_python_frontend INTERFACE)
 add_library(NEPAdapters::python_frontend ALIAS nep_adapters_python_frontend)
 
+configure_file(
+  "${PROJECT_SOURCE_DIR}/cmake/NEPAdaptersPythonVersion.py.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/nep_adapters/_version.py"
+  @ONLY)
+
 target_link_libraries(nep_adapters_python_frontend INTERFACE NEPAdapters::nep_adapters)
 
 if(NOT TARGET NEPAdapters::cpu)
@@ -78,6 +83,10 @@ install(
   TARGETS nep_adapters_python_cpu
   LIBRARY DESTINATION nep_adapters
   RUNTIME DESTINATION nep_adapters
+)
+install(
+  FILES "${CMAKE_CURRENT_BINARY_DIR}/nep_adapters/_version.py"
+  DESTINATION nep_adapters
 )
 if(TARGET nep_adapters_python_gpu)
   install(
