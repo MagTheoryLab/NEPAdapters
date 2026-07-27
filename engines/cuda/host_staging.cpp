@@ -11,7 +11,7 @@ constexpr int kLammpsNeighborMask = 0x3fffffff;
 
 void require(bool condition, const char* message) {
   if (!condition) {
-    throw std::runtime_error(message);
+    throw std::invalid_argument(message);
   }
 }
 

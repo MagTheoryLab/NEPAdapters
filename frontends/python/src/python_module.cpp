@@ -201,6 +201,7 @@ struct ModelState {
       : model(model, nepa_free_model) {}
 
   std::mutex mutex;
+  std::mutex computation_mutex;
   std::shared_ptr<NepaModel> model;
 };
 
@@ -288,10 +289,9 @@ class PyModel {
     result.virials_row_major9 = structure_virials.data();
     result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
 
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_force_batch(model.get(), &batch, &result);
+    });
     return py::make_tuple(potentials, forces, virials);
   }
 
@@ -342,10 +342,9 @@ class PyModel {
     result.descriptor.descriptors =
         static_cast<double*>(descriptors.request().ptr);
 
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_evaluate_batch(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_evaluate_batch(model.get(), &batch, &result);
+    });
     return py::make_tuple(potentials, forces, virials, descriptors);
   }
 
@@ -383,10 +382,9 @@ class PyModel {
     result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
     result.charge_per_atom = static_cast<double*>(charges.request().ptr);
     result.bec_per_atom_row_major9 = static_cast<double*>(becs.request().ptr);
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_charge_batch(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_charge_batch(model.get(), &batch, &result);
+    });
     return py::make_tuple(potentials, forces, virials, charges, becs);
   }
 
@@ -411,10 +409,9 @@ class PyModel {
     batch.pbc_flags3 = input.pbc;
     NepaDipoleResult result{};
     result.dipoles_row_major3 = static_cast<double*>(output.request().ptr);
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_dipoles(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_dipoles(model.get(), &batch, &result);
+    });
     return output;
   }
 
@@ -440,10 +437,9 @@ class PyModel {
     NepaPolarizabilityResult result{};
     result.polarizabilities_row_major6 =
         static_cast<double*>(output.request().ptr);
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_polarizabilities(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_polarizabilities(model.get(), &batch, &result);
+    });
     return output;
   }
 
@@ -531,10 +527,9 @@ class PyModel {
     result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
     result.mforces_aos3 = static_cast<double*>(mforces.request().ptr);
 
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_force_batch(model.get(), &batch, &result);
+    });
     return py::make_tuple(potentials, forces, virials, mforces);
   }
 
@@ -574,10 +569,9 @@ class PyModel {
     NepaFindDescriptorResult result{};
     result.descriptors = static_cast<double*>(descriptors.request().ptr);
 
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_descriptors(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_descriptors(model.get(), &batch, &result);
+    });
 
     return descriptors;
   }
@@ -617,10 +611,9 @@ class PyModel {
 
     NepaFindDescriptorResult result{};
     result.descriptors = static_cast<double*>(descriptors.request().ptr);
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_descriptors(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_descriptors(model.get(), &batch, &result);
+    });
     return descriptors;
   }
 
@@ -687,10 +680,9 @@ class PyModel {
     result.virials_row_major9 = static_cast<double*>(virial.request().ptr);
     result.virials_per_atom_row_major9 = nullptr;
 
-    {
-      py::gil_scoped_release release;
-      check_status(nepa_find_force_batch(model.get(), &batch, &result));
-    }
+    run_exclusive([&]() {
+      return nepa_find_force_batch(model.get(), &batch, &result);
+    });
     return py::make_tuple(energy, forces, virial);
   }
 
@@ -748,14 +740,19 @@ class PyModel {
     result.forces_aos3 = static_cast<double*>(forces.request().ptr);
     result.virials_row_major9 = structure_virials.data();
     result.virials_per_atom_row_major9 = static_cast<double*>(virials.request().ptr);
-    {
-      py::gil_scoped_release release;
-      const NepaStatus status = include_nep
+    run_exclusive([&]() {
+      return include_nep
           ? nepa_compute_with_dftd3_batch(model.get(), &batch, &parameters, &result)
           : nepa_compute_dftd3_batch(model.get(), &batch, &parameters, &result);
-      check_status(status);
-    }
+    });
     return py::make_tuple(potentials, forces, virials);
+  }
+
+  template <typename Function>
+  void run_exclusive(Function&& function) {
+    py::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(state_->computation_mutex);
+    check_status(function());
   }
 
   std::shared_ptr<NepaModel> snapshot_model() const {

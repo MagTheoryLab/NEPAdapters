@@ -106,6 +106,20 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
   )
 
   add_test(
+    NAME nep_adapters_python_model_concurrency_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_model_concurrency.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_model_concurrency_test
+    PROPERTIES
+      LABELS "contract;frontend;python;cpu;concurrency"
+      ENVIRONMENT
+        "OMP_NUM_THREADS=1;NEP_ADAPTERS_CPU_THREADS=1;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
+  )
+
+  add_test(
     NAME nep_adapters_python_backend_isolation_test
     COMMAND
       "${Python3_EXECUTABLE}"

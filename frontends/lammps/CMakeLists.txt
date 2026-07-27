@@ -316,6 +316,33 @@ if(NEP_ADAPTERS_BUILD_TESTS)
     endif()
   endif()
 
+  if(Python3_Interpreter_FOUND AND
+     EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
+     EXISTS "${NEP_ADAPTERS_NEP89_MODEL_PATH}" AND
+     TARGET nepadapterscpuplugin AND
+     TARGET nepadaptersgpuplugin AND
+     Kokkos_ENABLE_CUDA)
+    add_test(
+      NAME nep_adapters_lammps_cuda_nep89_regression_test
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tools/run_lammps_nep89_smoke.py"
+        --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+        --cpu-plugin "$<TARGET_FILE:nepadapterscpuplugin>"
+        --gpu-plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
+        --model "${NEP_ADAPTERS_NEP89_MODEL_PATH}"
+        --element Fe
+        --cells 4
+        --lattice-constant 3.6
+        --work-dir "${CMAKE_BINARY_DIR}/lammps_cuda_nep89_regression"
+    )
+    set_tests_properties(
+      nep_adapters_lammps_cuda_nep89_regression_test PROPERTIES
+      LABELS "regression;frontend;lammps;plugin;cuda;kokkos;device;real_lammps;nonspin;nep89;neighbor_stride"
+      DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test;nep_adapters_lammps_gpu_plugin_compile_test"
+      TIMEOUT 600)
+  endif()
+
   set(_nep_adapters_spin_fixture_dir
     "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol")
   if(Python3_Interpreter_FOUND AND

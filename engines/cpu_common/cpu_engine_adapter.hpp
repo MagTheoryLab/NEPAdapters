@@ -146,15 +146,6 @@ class CpuModel final : public Model {
     } else if (result.spin_transfer_per_atom_row_major9 != nullptr) {
       return NEPA_STATUS_UNSUPPORTED;
     }
-    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-      const std::int32_t atom_count = batch.atom_counts[structure];
-      const std::int32_t atom_offset = batch.atom_offsets[structure];
-      if (atom_count <= 0 || atom_offset < 0 ||
-          atom_offset + atom_count > batch.total_atoms) {
-        return NEPA_STATUS_INVALID_ARGUMENT;
-      }
-    }
-
     auto process_structure = [&](
         NativeNep& native,
         const std::int32_t structure) -> NepaStatus {
@@ -852,18 +843,43 @@ class CpuModel final : public Model {
     return NEPA_STATUS_OK;
   }
 
-  static bool valid_batch(const NepaStructureBatch& batch) {
+  bool valid_batch(const NepaStructureBatch& batch) const {
     if (batch.num_structures <= 0 || batch.total_atoms <= 0 ||
         batch.atom_counts == nullptr || batch.atom_offsets == nullptr ||
         batch.types == nullptr || batch.positions_aos3 == nullptr ||
-        batch.boxes_row_major9 == nullptr || batch.pbc_flags3 == nullptr) {
+        batch.boxes_row_major9 == nullptr || batch.pbc_flags3 == nullptr ||
+        nep_.paramb.num_types <= 0) {
       return false;
     }
+    std::vector<unsigned char> covered(
+        static_cast<std::size_t>(batch.total_atoms), 0);
     for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
+      const std::int32_t atom_count = batch.atom_counts[structure];
+      const std::int32_t atom_offset = batch.atom_offsets[structure];
+      if (atom_count <= 0 || atom_offset < 0 ||
+          atom_offset > batch.total_atoms ||
+          atom_count > batch.total_atoms - atom_offset) {
+        return false;
+      }
       for (std::int32_t axis = 0; axis < 3; ++axis) {
         if (batch.pbc_flags3[3 * structure + axis] != 1) {
           return false;
         }
+      }
+      for (std::int32_t local_atom = 0; local_atom < atom_count; ++local_atom) {
+        const std::int32_t atom = atom_offset + local_atom;
+        if (covered[static_cast<std::size_t>(atom)] != 0) {
+          return false;
+        }
+        covered[static_cast<std::size_t>(atom)] = 1;
+      }
+    }
+    for (std::int32_t atom = 0; atom < batch.total_atoms; ++atom) {
+      if (covered[static_cast<std::size_t>(atom)] == 0 ||
+          batch.types[atom] < 0 ||
+          static_cast<std::size_t>(batch.types[atom]) >=
+              nep_.paramb.num_types) {
+        return false;
       }
     }
     return true;

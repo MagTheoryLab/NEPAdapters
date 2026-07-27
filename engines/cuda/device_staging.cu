@@ -36,6 +36,12 @@ void require(bool condition, const char* message) {
   }
 }
 
+void require_argument(bool condition, const char* message) {
+  if (!condition) {
+    throw std::invalid_argument(message);
+  }
+}
+
 bool invert_row_major3(const double* matrix, double* inverse) {
   const double det =
       matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
@@ -783,21 +789,23 @@ void stage_lammps_device_neighbors_on_device(
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace,
     bool check_overflow) {
-  require(input.nlocal >= 0, "negative nlocal");
-  require(input.nall >= input.nlocal, "nall must be at least nlocal");
-  require(input.inum > 0, "device LAMMPS input must have active atoms");
-  require(input.max_neighbors >= 0, "negative max_neighbors");
-  require(input.neighbor_rows > 0, "invalid device neighbor row count");
-  require(input.numneigh_length > 0, "invalid device numneigh length");
-  require(input.ilist != nullptr, "missing device ilist");
-  require(input.numneigh != nullptr, "missing device numneigh");
-  require(input.neighbors != nullptr, "missing device neighbors");
-  require(input.neighbor_atom_stride > 0, "invalid neighbor atom stride");
-  require(input.neighbor_slot_stride > 0, "invalid neighbor slot stride");
-  require(input.types != nullptr, "missing device types");
-  require(input.positions != nullptr, "missing device positions");
-  require(input.position_atom_stride > 0, "invalid position atom stride");
-  require(input.position_component_stride > 0, "invalid position component stride");
+  require_argument(input.nlocal >= 0, "negative nlocal");
+  require_argument(input.nall >= input.nlocal, "nall must be at least nlocal");
+  require_argument(input.inum > 0, "device LAMMPS input must have active atoms");
+  require_argument(input.max_neighbors >= 0, "negative max_neighbors");
+  require_argument(input.neighbor_rows > 0, "invalid device neighbor row count");
+  require_argument(input.numneigh_length > 0, "invalid device numneigh length");
+  require_argument(input.ilist != nullptr, "missing device ilist");
+  require_argument(input.numneigh != nullptr, "missing device numneigh");
+  require_argument(input.neighbors != nullptr, "missing device neighbors");
+  require_argument(input.neighbor_atom_stride > 0, "invalid neighbor atom stride");
+  require_argument(input.neighbor_slot_stride > 0, "invalid neighbor slot stride");
+  require_argument(input.types != nullptr, "missing device types");
+  require_argument(input.positions != nullptr, "missing device positions");
+  require_argument(input.position_atom_stride > 0, "invalid position atom stride");
+  require_argument(
+      input.position_component_stride > 0,
+      "invalid position component stride");
 
   workspace.reset_runtime_overrides();
   const DeviceWorkspaceView view = workspace.view();
@@ -833,7 +841,9 @@ void stage_lammps_device_neighbors_on_device(
 
   const int atom_blocks = (input.nall + kBlockSize - 1) / kBlockSize;
   if (input.type_map != nullptr) {
-    require(input.type_map_length > 0, "invalid device LAMMPS type map length");
+    require_argument(
+        input.type_map_length > 0,
+        "invalid device LAMMPS type map length");
     stage_lammps_device_types<<<atom_blocks, kBlockSize>>>(
         input.nall,
         input.types,
@@ -966,7 +976,7 @@ void stage_lammps_device_neighbors_on_device(
         std::to_string(protocol.neighbor_capacity_angular);
     message += " cutoff_radial=" + std::to_string(protocol.cutoff_radial);
     message += " cutoff_angular=" + std::to_string(protocol.cutoff_angular);
-    throw std::runtime_error(message);
+    throw std::invalid_argument(message);
   }
 }
 
