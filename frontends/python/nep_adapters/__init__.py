@@ -37,7 +37,7 @@ from .errors import (
 try:
     __version__ = version("nep-adapters")
 except PackageNotFoundError:  # Source-tree imports used by CMake tests.
-    __version__ = "1.0.0"
+    __version__ = "1.0.1"
 
 __all__ = [
     "BackendInfo",
