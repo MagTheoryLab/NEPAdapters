@@ -258,13 +258,12 @@ void cache_descriptor_coefficients(const NEP::ParaMB& paramb, NEP::ANN& annmb)
 std::size_t table_pair_slot(const NEP::ParaMB& paramb, const int t12)
 {
   if (t12 < 0 || static_cast<std::size_t>(t12) >= paramb.table_pair_to_slot.size()) {
-    std::cout << "Invalid table type-pair index." << std::endl;
-    exit(1);
+    throw std::out_of_range("invalid table type-pair index");
   }
   const int slot = paramb.table_pair_to_slot[static_cast<std::size_t>(t12)];
   if (slot < 0) {
-    std::cout << "Missing tabulated radial function for an active type pair." << std::endl;
-    exit(1);
+    throw std::runtime_error(
+      "missing tabulated radial function for an active type pair");
   }
   return static_cast<std::size_t>(slot);
 }
@@ -1061,10 +1060,13 @@ void find_descriptor_small_box(
           annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1,
           q.data(), F, Fp.data(), latent_space.data());
       } else {
+        double* atom_B_projection = calculating_B_projection
+          ? g_B_projection + n1 * (annmb.num_neurons1 * (annmb.dim + 2))
+          : nullptr;
         apply_ann_one_layer(
           annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1,
           q.data(), F, Fp.data(), latent_space.data(), calculating_B_projection,
-          g_B_projection + n1 * (annmb.num_neurons1 * (annmb.dim + 2)));
+          atom_B_projection);
       }
 
       if (calculating_latent_space) {
@@ -8337,6 +8339,12 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
 
   paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  if (paramb.num_types == 0 ||
+      paramb.num_types > std::size(paramb.atomic_numbers)) {
+    throw std::invalid_argument(
+      "the number of atom types must be between 1 and " +
+      std::to_string(std::size(paramb.atomic_numbers)));
+  }
   if (tokens.size() != 2 + paramb.num_types) {
     throw std::invalid_argument(
       "the first line of a NEP model has the wrong number of atom symbols");
@@ -8345,18 +8353,27 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   element_list.resize(paramb.num_types);
   for (std::size_t n = 0; n < paramb.num_types; ++n) {
     int atomic_number = 0;
+    bool found_element = false;
     element_list[n] = tokens[2 + n];
     for (int m = 0; m < NUM_ELEMENTS; ++m) {
       if (tokens[2 + n] == ELEMENTS[m]) {
         atomic_number = m;
+        found_element = true;
         break;
       }
+    }
+    if (!found_element) {
+      throw std::invalid_argument(
+        "unknown element symbol in NEP model header: " + tokens[2 + n]);
     }
     paramb.atomic_numbers[n] = atomic_number;
     dftd3.atomic_number[n] = atomic_number;
   }
 
   tokens = get_tokens(input);
+  if (tokens.empty()) {
+    throw std::invalid_argument("unexpected end of NEP model after header");
+  }
   spin_baseline.clear();
   spin_baseline.assign(paramb.num_types, 0.0);
   auto parse_spin_line = [&](const std::vector<std::string>& spin_tokens) {
@@ -8371,22 +8388,45 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         spin_baseline[t] = get_double_from_token(spin_tokens[1 + t], __FILE__, __LINE__);
       }
     } else if (spin_tokens[0] == "spin_chiral") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_chiral requires a value");
+      }
       paramb.spin_chiral = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (paramb.spin_chiral != 0 && paramb.spin_chiral != 1) {
         throw std::runtime_error("spin_chiral must be 0 or 1");
       }
     } else if (spin_tokens[0] == "spin_compress") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_compress requires a value");
+      }
       paramb.spin_compress = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_basis_size") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_basis_size requires a value");
+      }
       paramb.spin_basis_size = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_l_max") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_l_max requires a value");
+      }
       paramb.spin_l_max = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_cutoff") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_cutoff requires a value");
+      }
       paramb.spin_cutoff_radial = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_scaler") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_scaler requires a value");
+      }
       const int spin_scaler = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (spin_scaler != 1) {
         throw std::runtime_error("only spin_scaler 1 is supported by cpu");
+      }
+    } else if (spin_tokens[0] == "spin_n_max") {
+      if (spin_tokens.size() < 3) {
+        throw std::runtime_error(
+          "spin_n_max requires radial and angular values");
       }
     } else if (spin_tokens[0] == "spin_dof_type" || spin_tokens[0] == "spin_type") {
       paramb.spin_dof_type_active.assign(paramb.num_types, 0);
@@ -8406,12 +8446,20 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         }
         paramb.spin_env_type_active[static_cast<std::size_t>(found - element_list.begin())] = 1;
       }
+    } else {
+      throw std::runtime_error("unknown spin header line: " + spin_tokens[0]);
     }
   };
   if (tokens[0] == "spin_mode") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_mode requires a value");
+    }
     paramb.spin_mode = get_int_from_token(tokens[1], __FILE__, __LINE__);
     if (tokens.size() >= 3) {
       const int spin_header_lines = get_int_from_token(tokens[2], __FILE__, __LINE__);
+      if (spin_header_lines < 0) {
+        throw std::runtime_error("spin header line count must be non-negative");
+      }
       for (int line = 0; line < spin_header_lines; ++line) {
         parse_spin_line(get_tokens(input));
       }

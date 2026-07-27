@@ -11,6 +11,8 @@
 namespace nep_adapters::cuda_backend {
 namespace {
 
+constexpr int kMaxModelTypes = 118;
+
 std::vector<std::string> split_line(const std::string& line) {
   std::istringstream stream(line);
   std::vector<std::string> tokens;
@@ -322,17 +324,32 @@ void parse_spin_header_line(
           parse_double(tokens[static_cast<std::size_t>(1 + type)]);
     }
   } else if (tokens[0] == "spin_chiral") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_chiral requires a value");
+    }
     protocol.spin_chiral = parse_int(tokens[1]);
     if (protocol.spin_chiral != 0 && protocol.spin_chiral != 1) {
       throw std::runtime_error("spin_chiral must be 0 or 1");
     }
   } else if (tokens[0] == "spin_compress") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_compress requires a value");
+    }
     protocol.spin_compress = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_basis_size") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_basis_size requires a value");
+    }
     protocol.spin_basis_size = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_l_max") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_l_max requires a value");
+    }
     protocol.spin_l_max = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_cutoff") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_cutoff requires a value");
+    }
     protocol.spin_cutoff_radial = parse_double(tokens[1]);
   } else if (tokens[0] == "spin_dof_type" || tokens[0] == "spin_type") {
     protocol.spin_dof_type_active.assign(
@@ -358,7 +375,17 @@ void parse_spin_header_line(
       protocol.spin_env_type_active[
           static_cast<std::size_t>(found - protocol.elements.begin())] = 1;
     }
-  } else if (tokens[0] == "spin_scaler" || tokens[0] == "spin_n_max") {
+  } else if (tokens[0] == "spin_scaler") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_scaler requires a value");
+    }
+    if (parse_int(tokens[1]) != 1) {
+      throw std::runtime_error("only spin_scaler 1 is supported by CUDA");
+    }
+  } else if (tokens[0] == "spin_n_max") {
+    if (tokens.size() < 3) {
+      throw std::runtime_error("spin_n_max requires radial and angular values");
+    }
     return;
   } else {
     throw std::runtime_error("unknown spin header line");
@@ -375,12 +402,18 @@ std::vector<std::string> parse_spin_block(
   if (tokens.empty() || tokens[0] != "spin_mode") {
     throw std::runtime_error("spin model must contain spin_mode line");
   }
+  if (tokens.size() < 2) {
+    throw std::runtime_error("spin_mode requires a value");
+  }
   protocol.spin_mode = parse_int(tokens[1]);
   if (protocol.spin_mode != 1) {
     throw std::runtime_error("only spin_mode 1 is supported");
   }
   if (tokens.size() >= 3) {
     const int spin_header_lines = parse_int(tokens[2]);
+    if (spin_header_lines < 0) {
+      throw std::runtime_error("spin header line count must be non-negative");
+    }
     for (int line = 0; line < spin_header_lines; ++line) {
       parse_spin_header_line(next_tokens(input), protocol);
     }
@@ -483,7 +516,7 @@ ModelProtocol parse_model_header(std::ifstream& input) {
 
   parse_version_tag(tokens[0], protocol);
   protocol.num_types = parse_int(tokens[1]);
-  if (protocol.num_types <= 0 || protocol.num_types > 118 ||
+  if (protocol.num_types <= 0 || protocol.num_types > kMaxModelTypes ||
       static_cast<int>(tokens.size()) != 2 + protocol.num_types) {
     throw std::runtime_error("invalid type count in model header");
   }

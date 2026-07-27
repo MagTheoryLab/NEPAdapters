@@ -715,5 +715,22 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  const std::string truncated_spin_path =
+      (std::filesystem::temp_directory_path() /
+       "cuda_truncated_spin_reject.nep").string();
+  {
+    std::ofstream out(truncated_spin_path);
+    out << "nep4_spin 1 Fe\n"
+        << "spin_mode 1 1\n"
+        << "spin_chiral\n";
+  }
+  try {
+    (void)nep_adapters::cuda_backend::parse_model_protocol(
+        truncated_spin_path);
+    std::cerr << "CUDA parser accepted truncated spin header\n";
+    return EXIT_FAILURE;
+  } catch (const std::runtime_error&) {
+  }
+
   return EXIT_SUCCESS;
 }

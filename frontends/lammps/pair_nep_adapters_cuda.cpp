@@ -23,6 +23,8 @@
 #include <type_traits>
 
 #ifdef LMP_KOKKOS
+#include "kokkos_view_strides.hpp"
+
 #include "atom_kokkos.h"
 #include "atom_masks.h"
 #include "kokkos.h"
@@ -171,8 +173,7 @@ std::array<int, 2> checked_strides2(
     const View& view,
     Error* error,
     const std::string& label) {
-  std::size_t raw[2] = {};
-  view.stride(raw);
+  const auto raw = nep_adapters::lammps_detail::kokkos_view_strides(view);
   const std::size_t max_int =
       static_cast<std::size_t>(std::numeric_limits<int>::max());
   if (raw[0] > max_int || raw[1] > max_int) {

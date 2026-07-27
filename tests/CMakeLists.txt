@@ -31,6 +31,24 @@ add_test(
 set_tests_properties(nep_adapters_virial_order_test PROPERTIES
   LABELS "contract;virial")
 
+add_executable(
+  nep_adapters_kokkos_view_stride_contract_test
+  test_kokkos_view_strides.cpp)
+target_include_directories(
+  nep_adapters_kokkos_view_stride_contract_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/frontends/lammps")
+target_compile_features(
+  nep_adapters_kokkos_view_stride_contract_test
+  PRIVATE
+    cxx_std_17)
+add_test(
+  NAME nep_adapters_kokkos_view_stride_contract_test
+  COMMAND nep_adapters_kokkos_view_stride_contract_test)
+set_tests_properties(
+  nep_adapters_kokkos_view_stride_contract_test PROPERTIES
+  LABELS "contract;frontend;lammps;kokkos;stride")
+
 set(NEP_ADAPTERS_INSTALL_CONSUMER_TARGETS NEPAdapters::nep_adapters)
 foreach(_engine IN ITEMS cpu cuda)
   if(TARGET NEPAdapters::${_engine})
@@ -79,6 +97,14 @@ if(Python3_Interpreter_FOUND)
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
   add_test(
+    NAME nep_adapters_lammps_nep89_tool_unit_test
+    COMMAND "${Python3_EXECUTABLE}" -m unittest -v
+            tests.test_run_lammps_nep89_smoke)
+  set_tests_properties(nep_adapters_lammps_nep89_tool_unit_test PROPERTIES
+    LABELS "tooling;python;unit;lammps;nonspin;nep89"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+  add_test(
     NAME nep_adapters_lammps_spin_tool_unit_test
     COMMAND "${Python3_EXECUTABLE}" -m unittest -v
             tests.test_run_lammps_spin_smoke)
@@ -113,6 +139,28 @@ if(TARGET NEPAdapters::cpu AND
   add_test(NAME nep_adapters_cpu_smoke_test COMMAND nep_adapters_cpu_smoke_test)
   set_tests_properties(nep_adapters_cpu_smoke_test PROPERTIES
     LABELS "smoke;engine;cpu")
+
+  add_executable(
+    nep_adapters_cpu_input_validation_test
+    test_cpu_input_validation.cpp)
+  target_link_libraries(
+    nep_adapters_cpu_input_validation_test
+    PRIVATE
+      NEPAdapters::cpu)
+  target_include_directories(
+    nep_adapters_cpu_input_validation_test
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/engines/cpu")
+  target_compile_definitions(
+    nep_adapters_cpu_input_validation_test
+    PRIVATE
+      NEP_ADAPTERS_CPU_TEST_DATA_DIR="${NEP_ADAPTERS_CPU_TEST_DATA_DIR}")
+  add_test(
+    NAME nep_adapters_cpu_input_validation_test
+    COMMAND nep_adapters_cpu_input_validation_test)
+  set_tests_properties(
+    nep_adapters_cpu_input_validation_test PROPERTIES
+    LABELS "contract;engine;cpu;validation")
 
   add_executable(nep_adapters_cpu_lammps_neighbors_test
     test_cpu_lammps_neighbors.cpp)
@@ -379,6 +427,24 @@ if(TARGET NEPAdapters::cuda AND
     COMMAND nep_adapters_cuda_lammps_kk_sim_test)
   set_tests_properties(nep_adapters_cuda_lammps_kk_sim_test PROPERTIES
     LABELS "contract;engine;cuda;device;lammps;kokkos")
+
+  add_executable(
+    nep_adapters_cuda_lammps_reuse_overflow_test
+    test_cuda_lammps_reuse_overflow.cu)
+  target_link_libraries(
+    nep_adapters_cuda_lammps_reuse_overflow_test
+    PRIVATE
+      NEPAdapters::cuda)
+  set_target_properties(
+    nep_adapters_cuda_lammps_reuse_overflow_test PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON)
+  add_test(
+    NAME nep_adapters_cuda_lammps_reuse_overflow_test
+    COMMAND nep_adapters_cuda_lammps_reuse_overflow_test)
+  set_tests_properties(
+    nep_adapters_cuda_lammps_reuse_overflow_test PROPERTIES
+    LABELS "contract;engine;cuda;device;lammps;neighbors;reuse")
 
   if(TARGET NEPAdapters::cpu)
     add_executable(nep_adapters_cuda_spin_onsite_test

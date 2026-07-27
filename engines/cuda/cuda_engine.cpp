@@ -1037,9 +1037,12 @@ class CudaModel : public nep_adapters::Model {
                 component);
       }
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
-    } catch (const std::exception& error) {
+    } catch (const std::invalid_argument& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_RUNTIME_ERROR;
     }
     return NEPA_STATUS_UNSUPPORTED;
   }
@@ -1151,6 +1154,9 @@ class CudaModel : public nep_adapters::Model {
            !lammps_device_has_per_atom_virial_sink_) ||
           (needs_spin_transfer &&
            !lammps_device_has_spin_transfer_);
+      const bool neighbor_capacity_needs_runtime_check =
+          input.max_neighbors > external_protocol.neighbor_capacity_radial ||
+          input.max_neighbors > external_protocol.neighbor_capacity_angular;
       LammpsDevicePairProfiler profiler(input.nlocal, rebuild_workspace);
       float stage_ms = 0.0f;
       float clear_ms = 0.0f;
@@ -1169,13 +1175,11 @@ class CudaModel : public nep_adapters::Model {
               active_atom_capacity,
               needs_per_atom_virial_sink,
               needs_spin_transfer);
-      // ponytail: GPUMD uses fixed model MN; per-step compact counts add a
-      // device-to-host sync in the Pair hot path.
       nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
           input,
           external_protocol,
           workspace,
-          rebuild_workspace);
+          rebuild_workspace || neighbor_capacity_needs_runtime_check);
       profiler.split(stage_ms);
 
       const nep_adapters::cuda_backend::SimulationBox box =
@@ -1236,9 +1240,12 @@ class CudaModel : public nep_adapters::Model {
           spin_chiral_ms,
           output_ms);
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
-    } catch (const std::exception& error) {
+    } catch (const std::invalid_argument& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_INVALID_ARGUMENT;
+    } catch (const std::exception& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_RUNTIME_ERROR;
     }
     return NEPA_STATUS_UNSUPPORTED;
   }
