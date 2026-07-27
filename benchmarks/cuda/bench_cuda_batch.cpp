@@ -362,7 +362,8 @@ double time_device_pipeline(
           static_cast<std::size_t>(batch.total_atoms),
           static_cast<std::size_t>(batch.num_structures)));
   workspace_bytes = workspace.summary().total_bytes;
-  nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
+  nep_adapters::cuda_backend::stage_batch_on_device(
+      batch, host.protocol.num_types, workspace);
   const bool orthorhombic_fast_path =
       nep_adapters::cuda_backend::batch_boxes_are_orthorhombic(batch);
 

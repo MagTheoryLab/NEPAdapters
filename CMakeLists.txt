@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
+  NEP_ADAPTERS_VERSION
+  LIMIT_COUNT 1)
+string(STRIP "${NEP_ADAPTERS_VERSION}" NEP_ADAPTERS_VERSION)
+if(NOT NEP_ADAPTERS_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR
+    "VERSION must contain exactly one semantic version in MAJOR.MINOR.PATCH form")
+endif()
+
 include(cmake/NEPAdaptersCUDAAutoDetect.cmake)
 nep_adapters_resolve_cuda_default(NEP_ADAPTERS_ENABLE_CUDA_DEFAULT)
 option(NEP_ADAPTERS_ENABLE_CUDA
@@ -26,13 +35,25 @@ if(NEP_ADAPTERS_ENABLE_CUDA)
 endif()
 
 if(NEP_ADAPTERS_ENABLE_CUDA)
-  project(NEPAdapters VERSION 1.0.0 LANGUAGES CXX CUDA)
+  project(NEPAdapters VERSION "${NEP_ADAPTERS_VERSION}" LANGUAGES CXX CUDA)
 else()
-  project(NEPAdapters VERSION 1.0.0 LANGUAGES CXX)
+  project(NEPAdapters VERSION "${NEP_ADAPTERS_VERSION}" LANGUAGES CXX)
 endif()
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
+
+set(NEP_ADAPTERS_GENERATED_INCLUDE_DIR
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+file(MAKE_DIRECTORY
+  "${NEP_ADAPTERS_GENERATED_INCLUDE_DIR}/nep_adapters")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/NEPAdaptersVersion.h.in"
+  "${NEP_ADAPTERS_GENERATED_INCLUDE_DIR}/nep_adapters/version.h"
+  @ONLY)
+set_property(GLOBAL PROPERTY
+  NEP_ADAPTERS_GENERATED_INCLUDE_DIR
+  "${NEP_ADAPTERS_GENERATED_INCLUDE_DIR}")
 
 option(NEP_ADAPTERS_BUILD_TESTS "Build NEPAdapters tests" ON)
 option(NEP_ADAPTERS_BUILD_BENCHMARKS "Build NEPAdapters performance benchmarks" OFF)
@@ -83,6 +104,11 @@ if(NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES)
   install(
     DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+  install(
+    FILES
+      "${NEP_ADAPTERS_GENERATED_INCLUDE_DIR}/nep_adapters/version.h"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/nep_adapters
   )
 
   install(

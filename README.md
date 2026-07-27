@@ -60,6 +60,61 @@ print(atoms.get_potential_energy())
 print(atoms.get_forces())
 ```
 
+批量预测多结构 XYZ，并把结果作为 ASE 单点计算器挂回每个结构：
+
+```python
+from ase.io import read, write
+from nep_adapters import NEPCalculator
+from nep_adapters.ase import attach_single_point
+
+structures = read("input.xyz", index=":")
+
+calculator = NEPCalculator("nep.txt", backend="cpu")
+attach_single_point(structures, calculator)
+calculator.close()
+
+write("predicted.xyz", structures, format="extxyz")
+```
+
+这里的 batch 是指一次把完整的 `structures` 列表传给计算后端。
+`calculator.predict_structures([atoms])` 仍然只计算一帧，不会获得跨结构的 batch
+收益；`attach_single_point(structures, calculator)` 会对完整列表执行一次
+`predict_structures(structures)`，再为每个结构挂载 `SinglePointCalculator`。
+写出的 extxyz 包含 `energy`、`forces` 和 ASE 约定的 `stress`；调用
+`calculator.close()` 后这些结果仍可读取，不会再次调用 NEP 模型。
+相比逐个结构挂载 `NepAseCalculator` 并分别触发计算，这种方式可以减少大量
+结构的逐帧调用开销；小 batch 不保证更快，实际收益取决于结构数、每帧原子数
+和后端。当前 batch 接口要求所有结构均为全周期。
+
+### CPU batch 什么时候更快
+
+如果已经拿到一个结构列表，不要在 Python 中逐帧调用：
+
+```python
+# 逐帧循环：每一帧都会重新进入 Python/native 边界
+for atoms in structures:
+    prediction = calculator.predict_structures([atoms])
+
+# batch：一次提交完整列表
+prediction = calculator.predict_structures(structures)
+```
+
+下面是 32 原子 BCC Fe、NEP89 模型的 CPU 实测结果。每个点取五组成对 A/B
+的中位数；测试机器为 Intel Xeon Gold 6530，线程均绑定到同一个 CPU socket。
+表中的倍数表示 batch 相对 Python 逐帧循环的加速比：
+
+| CPU 核数 | 512 帧 | 2048 帧 |
+|---:|---:|---:|
+| 8 | 1.97× | 1.92× |
+| 16 | 2.70× | 2.60× |
+| 32 | 3.84× | 3.97× |
+
+32 核预测 2048 帧时，逐帧循环约为 `4109 frame/s`，batch 约为
+`16267 frame/s`。8–128 帧的小 batch 主要减少 Python 调用和数据组装开销，
+本算例中通常只有 `1.02–1.14×`；结构数达到跨结构并行阈值后，收益才会明显。
+这些数值用于说明趋势，不是所有模型和机器的固定加速比。测试中 energy 完全
+一致，force 和 virial 的最大绝对差为 `9.44e-16`。
+
 预编译 wheel 支持 CPython 3.10–3.14：
 
 | 平台 | wheel 包含的后端 | 运行要求 |
@@ -109,6 +164,30 @@ ctest --test-dir .build/release --output-on-failure
 Python 源码安装会自动查找 NVCC；独立 CMake 和 LAMMPS 构建仍按目标显式
 打开 CUDA，避免有 Toolkit 的机器意外改变 CPU-only 构建。完整组合、安装命令
 和选项默认值见 [构建与安装](docs/build.md)。
+
+### Intel oneAPI CPU 构建
+
+使用 IntelLLVM `icpx` 并开启
+`NEP_ADAPTERS_CPU_ENABLE_NATIVE_ARCH=ON`（即允许 `-march=native`）时，
+建议在 Release 编译参数中加入 `-fno-vectorize`：
+
+```sh
+cmake -S . -B .build/intel-cpu \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=icpx \
+  -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fno-vectorize" \
+  -DNEP_ADAPTERS_CPU_ENABLE_NATIVE_ARCH=ON \
+  -DNEP_ADAPTERS_BUILD_TESTS=ON
+cmake --build .build/intel-cpu -j2
+ctest --test-dir .build/intel-cpu --output-on-failure
+```
+
+在 Intel Xeon CPU Max 9470C 与 IntelLLVM 2024.2.1 的组合上，`-march=native`
+会触发 loop vectorizer 对 CPU 内部 cell list 索引更新的错误优化，进而破坏
+batch、descriptor、dipole 和 polarizability 结果。源码已对已知的
+loop-carried dependency 单独禁止向量化；保留全局 `-fno-vectorize` 是该环境下
+经过正确性与性能测试的推荐配置。官方预编译 wheel 使用可移植构建配置，不使用
+`icpx`，也不启用 CPU native architecture，因此无需追加该参数。
 
 ## LAMMPS 安装方式
 

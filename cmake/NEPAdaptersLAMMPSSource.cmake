@@ -113,8 +113,11 @@ function(_nep_adapters_finish_lammps_source_integration)
   # LAMMPS discovers copied pair sources before this deferred hook runs. Add
   # the public adapter headers explicitly so those sources do not depend on
   # deferred transitive usage requirements from the engine link target.
+  get_property(_nep_adapters_generated_include_dir GLOBAL PROPERTY
+    NEP_ADAPTERS_GENERATED_INCLUDE_DIR)
   target_include_directories(lammps PRIVATE
-    "${NEP_ADAPTERS_SOURCE_DIR}/include")
+    "${NEP_ADAPTERS_SOURCE_DIR}/include"
+    "${_nep_adapters_generated_include_dir}")
   if(_nep_adapters_source_enable_cpu)
     target_link_libraries(lammps PRIVATE NEPAdapters::cpu)
   endif()

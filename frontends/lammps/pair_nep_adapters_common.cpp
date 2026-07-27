@@ -270,7 +270,9 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     }
   }
 
-  sanitized_neighbors_.clear();
+  // Keep each atom's row capacity across timesteps. Clearing the outer vector
+  // would destroy every row and repeat thousands of small allocations even
+  // when LAMMPS reuses an unchanged neighbor-list shape.
   sanitized_neighbors_.resize(static_cast<std::size_t>(nall));
   sanitized_numneigh_.assign(static_cast<std::size_t>(nall), 0);
   sanitized_firstneigh_.assign(static_cast<std::size_t>(nall), nullptr);
@@ -284,6 +286,7 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     }
 
     std::vector<int>& neighbors = sanitized_neighbors_[static_cast<std::size_t>(i)];
+    neighbors.clear();
     neighbors.reserve(static_cast<std::size_t>(list->numneigh[i]));
     const int* jlist = list->firstneigh[i];
     for (int jj = 0; jj < list->numneigh[i]; ++jj) {

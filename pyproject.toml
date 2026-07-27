@@ -1,13 +1,13 @@
 [build-system]
 requires = [
-  "scikit-build-core>=0.10",
+  "scikit-build-core>=1.0",
   "pybind11>=2.12",
 ]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "nep-adapters"
-version = "1.0.0"
+dynamic = ["version"]
 description = "NEP runtime adapters for Python and LAMMPS frontends"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,12 @@ classifiers = [
 dependencies = [
   "numpy",
 ]
+
+[[tool.dynamic-metadata]]
+provider = "scikit_build_core.metadata.regex"
+field = "version"
+input = "VERSION"
+regex = '''^(?P<value>\d+\.\d+\.\d+)\s*$'''
 
 [project.optional-dependencies]
 ase = [

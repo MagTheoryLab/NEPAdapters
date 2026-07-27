@@ -4,6 +4,7 @@ add_library(NEPAdapters::nep_adapters ALIAS nep_adapters)
 target_include_directories(
   nep_adapters
   PUBLIC
+    $<BUILD_INTERFACE:${NEP_ADAPTERS_GENERATED_INCLUDE_DIR}>
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )

@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "nep_adapters/version.h"
+
 #if defined(_WIN32) && defined(NEP_ADAPTERS_SHARED)
 #  if defined(NEP_ADAPTERS_BUILDING)
 #    define NEP_ADAPTERS_API __declspec(dllexport)
@@ -12,11 +14,6 @@
 #else
 #  define NEP_ADAPTERS_API
 #endif
-
-#define NEP_ADAPTERS_API_VERSION_MAJOR 1
-#define NEP_ADAPTERS_API_VERSION_MINOR 0
-#define NEP_ADAPTERS_API_VERSION_PATCH 0
-#define NEP_ADAPTERS_VERSION_STRING "1.0.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -98,9 +95,11 @@ typedef struct NepaFindForceResult {
   double* energy_per_structure;
   double* potential_per_atom;
   double* forces_aos3;
-  /* 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  /* Total structure virial in the GPUMD pressure-positive convention.
+     For a static structure, ASE stress is -virial / volume.
+     Order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_row_major9;
-  /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  /* Per-atom contributions in the same GPUMD convention and raw9 order. */
   double* virials_per_atom_row_major9;
   double* charge_per_atom;
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */

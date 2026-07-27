@@ -47,9 +47,16 @@ def main() -> None:
     elif gpu_spec is not None:
         raise AssertionError("CPU wheel unexpectedly contains nep_gpu")
 
+    installed_version = version("nep-adapters")
+    if nep_adapters.__version__ != installed_version:
+        raise AssertionError(
+            "package/runtime version mismatch: "
+            f"{nep_adapters.__version__!r} != {installed_version!r}"
+        )
+
     print(
         "installed wheel smoke:",
-        f"version={version('nep-adapters')}",
+        f"version={installed_version}",
         f"atoms={len(types)}",
         f"gpu_module={int(gpu_spec is not None)}",
     )

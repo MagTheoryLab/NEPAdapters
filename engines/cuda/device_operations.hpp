@@ -224,6 +224,7 @@ atomic_add_force_and_per_atom_virial_float_warp_aggregated(
 
 void stage_batch_on_device(
     const NepaStructureBatch& batch,
+    int num_types,
     DeviceWorkspace& workspace);
 
 void stage_lammps_external_neighbors_on_device(

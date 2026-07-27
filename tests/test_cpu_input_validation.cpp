@@ -105,6 +105,39 @@ int main() {
   batch.atom_offsets = gap_offsets;
   const NepaStatus gap_status = find_force(model, batch);
 
+  // A dense periodic cell exceeds the native neighbor capacity. The adapter
+  // must preserve the native exception text instead of returning a bare
+  // runtime-error status.
+  constexpr std::int32_t kDenseStructures = 2;
+  constexpr std::int32_t kDenseAtomsPerStructure = 8;
+  constexpr std::int32_t kDenseAtoms =
+      kDenseStructures * kDenseAtomsPerStructure;
+  std::vector<std::int32_t> dense_types(kDenseAtoms, 0);
+  std::vector<double> dense_positions(
+      static_cast<std::size_t>(kDenseAtoms) * 3, 0.0);
+  std::int32_t dense_counts[] = {
+      kDenseAtomsPerStructure, kDenseAtomsPerStructure};
+  std::int32_t dense_offsets[] = {0, kDenseAtomsPerStructure};
+  double dense_boxes[] = {
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0,
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0,
+  };
+  std::int32_t dense_pbc[] = {1, 1, 1, 1, 1, 1};
+  batch.num_structures = kDenseStructures;
+  batch.total_atoms = kDenseAtoms;
+  batch.atom_counts = dense_counts;
+  batch.atom_offsets = dense_offsets;
+  batch.types = dense_types.data();
+  batch.positions_aos3 = dense_positions.data();
+  batch.boxes_row_major9 = dense_boxes;
+  batch.pbc_flags3 = dense_pbc;
+  const NepaStatus dense_status = find_force(model, batch);
+  const std::string dense_error = nepa_last_error_message();
+
   nepa_free_model(model);
   const std::filesystem::path temp_dir =
       std::filesystem::temp_directory_path();
@@ -127,6 +160,8 @@ int main() {
       invalid_type_status != NEPA_STATUS_INVALID_ARGUMENT ||
       overlap_status != NEPA_STATUS_INVALID_ARGUMENT ||
       gap_status != NEPA_STATUS_INVALID_ARGUMENT ||
+      dense_status != NEPA_STATUS_RUNTIME_ERROR ||
+      dense_error.find("neighbor capacity exceeded") == std::string::npos ||
       !oversized_model_rejected ||
       !truncated_spin_rejected ||
       !unknown_element_rejected) {
@@ -134,6 +169,8 @@ int main() {
               << " type=" << invalid_type_status
               << " overlap=" << overlap_status
               << " gap=" << gap_status
+              << " dense=" << dense_status
+              << " dense_error=" << dense_error
               << " oversized=" << oversized_model_rejected
               << " truncated_spin=" << truncated_spin_rejected
               << " unknown_element=" << unknown_element_rejected << "\n";

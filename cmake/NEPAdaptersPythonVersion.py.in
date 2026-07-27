@@ -1,0 +1,3 @@
+"""Generated from the repository VERSION file; do not edit."""
+
+__version__ = "@PROJECT_VERSION@"

@@ -390,6 +390,7 @@ __global__ void stage_lammps_device_neighbors_dual_slot_major(
 
 void validate_batch_for_device_staging(
     const NepaStructureBatch& batch,
+    int num_types,
     const DeviceWorkspaceView& view) {
   require(batch.num_structures > 0, "batch must contain structures");
   require(batch.total_atoms > 0, "batch must contain atoms");
@@ -401,6 +402,7 @@ void validate_batch_for_device_staging(
   require(batch.atom_offsets != nullptr, "missing atom offsets");
   require(batch.types != nullptr, "missing atom types");
   require(batch.positions_aos3 != nullptr, "missing atom positions");
+  require_argument(num_types > 0, "model must contain atom types");
   if (view.spins_soa3 != nullptr) {
     require(batch.spins_aos3 != nullptr, "spin model requires atom spins");
   }
@@ -433,6 +435,9 @@ void validate_batch_for_device_staging(
   for (int atom = 0; atom < batch.total_atoms; ++atom) {
     require(covered[static_cast<std::size_t>(atom)] != 0,
             "batch atom is not covered by any structure");
+    require_argument(
+        batch.types[atom] >= 0 && batch.types[atom] < num_types,
+        "atom type index is outside the model type range");
   }
 }
 
@@ -485,9 +490,10 @@ std::vector<int> flatten_lammps_neighbors(
 
 void stage_batch_on_device(
     const NepaStructureBatch& batch,
+    int num_types,
     DeviceWorkspace& workspace) {
   const DeviceWorkspaceView view = workspace.view();
-  validate_batch_for_device_staging(batch, view);
+  validate_batch_for_device_staging(batch, num_types, view);
   require(view.output_forces_aos3 != nullptr,
           "workspace missing batch AoS staging buffer");
   if (view.spins_soa3 != nullptr) {

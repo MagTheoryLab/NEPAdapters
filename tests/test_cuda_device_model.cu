@@ -336,7 +336,7 @@ int main() {
   }
   int batch_counts[] = {2, 2};
   int batch_offsets[] = {0, 2};
-  int batch_types[] = {0, 1, 0, 1};
+  int batch_types[] = {0, 0, 0, 0};
   double batch_positions[] = {
       0.0, 10.0, 20.0,
       1.0, 11.0, 21.0,
@@ -356,7 +356,8 @@ int main() {
   batch.positions_aos3 = batch_positions;
   batch.boxes_row_major9 = batch_boxes;
   batch.pbc_flags3 = batch_pbc;
-  nep_adapters::cuda_backend::stage_batch_on_device(batch, internal_workspace);
+  nep_adapters::cuda_backend::stage_batch_on_device(
+      batch, host.protocol.num_types, internal_workspace);
   const nep_adapters::cuda_backend::DeviceWorkspaceView internal_view =
       internal_workspace.view();
   const int internal_radial_counts[] = {2, 1, 0, 0};
@@ -400,7 +401,7 @@ int main() {
     return EXIT_FAILURE;
   }
   const float expected_internal_value =
-      host.ann_type_major[0] + 1.0f + 10.0f + 1.0f + 1.0f + 1.0f + 2.0f;
+      host.ann_type_major[0] + 0.0f + 10.0f + 1.0f + 1.0f + 1.0f + 2.0f;
   if (smoke_value != expected_internal_value) {
     std::fprintf(stderr, "internal workspace smoke value mismatch\n");
     cudaFree(device_output);
@@ -515,6 +516,7 @@ int main() {
   neighbor_batch.pbc_flags3 = neighbor_pbc;
   nep_adapters::cuda_backend::stage_batch_on_device(
       neighbor_batch,
+      neighbor_protocol.num_types,
       neighbor_workspace);
   const nep_adapters::cuda_backend::SimulationBox neighbor_simulation_box =
       make_simulation_box(neighbor_box, neighbor_pbc);
@@ -571,6 +573,7 @@ int main() {
   neighbor_batch.boxes_row_major9 = triclinic_box;
   nep_adapters::cuda_backend::stage_batch_on_device(
       neighbor_batch,
+      neighbor_protocol.num_types,
       neighbor_workspace);
   nep_adapters::cuda_backend::build_internal_neighbors_on_device(
       neighbor_protocol,

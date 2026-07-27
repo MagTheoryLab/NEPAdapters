@@ -41,7 +41,7 @@ def main():
     if not np.allclose(descriptors, expected_descriptors, rtol=0.0, atol=1.0e-6):
         raise AssertionError("ASE calculator descriptors differ from fixed baseline labels")
     expected_stress = full_3x3_to_voigt_6_stress(
-        reference.virial.reshape(3, 3) / atoms.get_volume()
+        -reference.virial.reshape(3, 3) / atoms.get_volume()
     )
     if abs(float(energy) - reference.energy) > 1.0e-10:
         raise AssertionError("ASE calculator energy differs from fixed baseline label")
@@ -49,6 +49,21 @@ def main():
         raise AssertionError("ASE calculator forces differ from fixed baseline labels")
     if not np.allclose(stress, expected_stress, rtol=0.0, atol=1.0e-10):
         raise AssertionError("ASE calculator stress differs from fixed baseline label")
+
+    # This independent finite-difference check locks the ASE energy-derivative
+    # sign instead of merely comparing against a GPUMD virial fixture.
+    from ase.calculators.fd import calculate_numerical_stress
+
+    numerical_stress = calculate_numerical_stress(
+        atoms,
+        eps=1.0e-5,
+        voigt=True,
+        force_consistent=False,
+    )
+    if not np.allclose(stress, numerical_stress, rtol=5.0e-6, atol=5.0e-9):
+        raise AssertionError(
+            "ASE calculator stress differs from finite-difference energy derivative"
+        )
 
     atoms2 = atoms.copy()
     attach_single_point(atoms2, core)

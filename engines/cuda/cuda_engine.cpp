@@ -606,8 +606,7 @@ class CudaModel : public nep_adapters::Model {
         return NEPA_STATUS_UNSUPPORTED;
       }
       const bool multi_box_execution =
-          protocol_.charge_mode == 0 && protocol_.spin_mode == 0 &&
-          batch.num_structures == 1;
+          protocol_.charge_mode == 0 && protocol_.spin_mode == 0;
       const std::size_t workspace_atom_capacity =
           multi_box_execution
               ? static_cast<std::size_t>(batch.total_atoms)
@@ -623,7 +622,8 @@ class CudaModel : public nep_adapters::Model {
               result.spin_transfer_per_atom_row_major9 != nullptr);
 
       if (multi_box_execution) {
-        nep_adapters::cuda_backend::stage_batch_on_device(batch, workspace);
+        nep_adapters::cuda_backend::stage_batch_on_device(
+            batch, protocol_.num_types, workspace);
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
@@ -675,7 +675,7 @@ class CudaModel : public nep_adapters::Model {
           return NEPA_STATUS_UNSUPPORTED;
         }
         nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, workspace);
+            single.batch, protocol_.num_types, workspace);
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
@@ -797,6 +797,9 @@ class CudaModel : public nep_adapters::Model {
         }
       }
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+    } catch (const std::invalid_argument& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_INVALID_ARGUMENT;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;
@@ -832,7 +835,7 @@ class CudaModel : public nep_adapters::Model {
           return NEPA_STATUS_UNSUPPORTED;
         }
         nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, workspace);
+            single.batch, protocol_.num_types, workspace);
         nep_adapters::cuda_backend::build_internal_neighbors_on_device(
             protocol_,
             single.atom_count,
@@ -874,6 +877,9 @@ class CudaModel : public nep_adapters::Model {
         }
       }
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+    } catch (const std::invalid_argument& error) {
+      nep_adapters::set_last_error(error.what());
+      return NEPA_STATUS_INVALID_ARGUMENT;
     } catch (const std::exception& error) {
       nep_adapters::set_last_error(error.what());
       return NEPA_STATUS_RUNTIME_ERROR;

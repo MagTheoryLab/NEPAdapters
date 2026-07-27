@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 MODULE_PATH = ROOT / "tools" / "run_lammps_baseline_smoke.py"
 SPEC = importlib.util.spec_from_file_location("lammps_baseline_smoke", MODULE_PATH)
 smoke = importlib.util.module_from_spec(SPEC)
@@ -88,7 +89,7 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
     smoke.validate_startup_banner(
         "\n".join(
             (
-                "NEPAdapters 1.0.0: loaded model /tmp/nep.txt",
+                f"NEPAdapters {VERSION}: loaded model /tmp/nep.txt",
                 "  pair_style: nep/cpu, backend: cpu",
                 "  model elements: Fe O",
                 "  LAMMPS type map: 1->Fe(model 1), 2->O(model 2)",
@@ -100,7 +101,7 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
   def test_startup_banner_rejects_missing_type_map(self):
     with self.assertRaisesRegex(RuntimeError, "LAMMPS type map"):
       smoke.validate_startup_banner(
-          "NEPAdapters 1.0.0\npair_style: nep/cpu\nmodel elements: Fe\n",
+          f"NEPAdapters {VERSION}\npair_style: nep/cpu\nmodel elements: Fe\n",
           "nep/cpu",
       )
 

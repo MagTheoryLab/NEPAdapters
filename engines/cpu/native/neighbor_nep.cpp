@@ -259,6 +259,10 @@ int find_neighbor_list_large_box(
 
   std::vector<int> cellContents(N, 0);
 
+#if defined(__INTEL_LLVM_COMPILER)
+  // cellCount has a loop-carried indexed dependency when atoms share a cell.
+#pragma clang loop vectorize(disable)
+#endif
   for (int n = 0; n < N; ++n) {
     const int atom_cell = atomCell[n];
     cellContents[cellCountSum[atom_cell] + cellCount[atom_cell]] = n;

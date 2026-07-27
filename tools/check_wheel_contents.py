@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import tempfile
+import zipfile
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
-import zipfile
 
+from normalize_macos_openmp import verify_tree
 
 NATIVE_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 FORBIDDEN_NAMES = (
@@ -88,6 +91,13 @@ def inspect_wheel(path: Path, variant: str) -> None:
         requirements = metadata.get_all("Requires-Dist", [])
         if not any(requirement.lower().startswith("numpy") for requirement in requirements):
             raise AssertionError(f"{path.name}: NumPy runtime dependency is missing")
+
+    if sys.platform == "darwin":
+        with tempfile.TemporaryDirectory(prefix="nep-adapters-wheel-check-") as tmp_dir:
+            root = Path(tmp_dir)
+            with zipfile.ZipFile(path) as archive:
+                archive.extractall(root)
+            verify_tree(root)
 
     print(
         f"{path.name}: variant={variant} native={','.join(expected)} "

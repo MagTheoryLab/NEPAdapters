@@ -688,7 +688,7 @@ if(TARGET NEPAdapters::cuda AND
     NAME nep_adapters_cuda_cpu_triclinic_parity_test
     COMMAND nep_adapters_cuda_cpu_triclinic_parity_test)
   set_tests_properties(nep_adapters_cuda_cpu_triclinic_parity_test PROPERTIES
-    LABELS "parity;engine;cuda;device;cpu;triclinic")
+    LABELS "parity;engine;cuda;device;cpu;triclinic;batch;multi_structure")
 endif()
 
 if(TARGET NEPAdapters::cpu)

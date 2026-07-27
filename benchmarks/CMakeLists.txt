@@ -76,8 +76,14 @@ if(TARGET NEPAdapters::cpu)
 endif()
 
 if(TARGET NEPAdapters::cuda)
+  find_package(CUDAToolkit REQUIRED)
+
   add_executable(nep_adapters_bench_cuda_batch cuda/bench_cuda_batch.cpp)
-  target_link_libraries(nep_adapters_bench_cuda_batch PRIVATE NEPAdapters::cuda)
+  target_link_libraries(
+    nep_adapters_bench_cuda_batch
+    PRIVATE
+      NEPAdapters::cuda
+      CUDA::cudart)
   target_compile_definitions(nep_adapters_bench_cuda_batch PRIVATE
     NEP_ADAPTERS_BENCH_DEVICE_PIPELINE=1)
   target_include_directories(nep_adapters_bench_cuda_batch PRIVATE
@@ -89,8 +95,6 @@ if(TARGET NEPAdapters::cuda)
   set_tests_properties(nep_adapters_bench_cuda_batch PROPERTIES
     LABELS "bench;performance;engine;cuda;batch"
     TIMEOUT 120)
-
-  find_package(CUDAToolkit REQUIRED)
 
     add_executable(nep_adapters_bench_cuda_lammps_device_layout
       cuda/bench_cuda_lammps_device_layout.cu)
