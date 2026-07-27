@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -145,6 +146,37 @@ cpu_test::Frame make_supercell(
   supercell.box[5] = frame.box[5] * replicate.nz;
   supercell.box[8] = frame.box[8] * replicate.nz;
   return supercell;
+}
+
+cpu_test::Frame make_bcc_fe32(
+    const std::unordered_map<std::string, std::int32_t>& type_map) {
+  const auto fe = type_map.find("Fe");
+  if (fe == type_map.end()) {
+    std::cerr << "The selected model does not contain Fe\n";
+    std::exit(EXIT_FAILURE);
+  }
+
+  constexpr double lattice = 2.87;
+  cpu_test::Frame frame;
+  frame.types.reserve(32);
+  frame.positions_aos3.reserve(32 * 3);
+  for (int ix = 0; ix < 2; ++ix) {
+    for (int iy = 0; iy < 2; ++iy) {
+      for (int iz = 0; iz < 4; ++iz) {
+        for (int basis = 0; basis < 2; ++basis) {
+          const double offset = basis == 0 ? 0.0 : 0.5;
+          frame.types.push_back(fe->second);
+          frame.positions_aos3.push_back((ix + offset) * lattice);
+          frame.positions_aos3.push_back((iy + offset) * lattice);
+          frame.positions_aos3.push_back((iz + offset) * lattice);
+        }
+      }
+    }
+  }
+  frame.box[0] = 2 * lattice;
+  frame.box[4] = 2 * lattice;
+  frame.box[8] = 4 * lattice;
+  return frame;
 }
 
 struct LammpsInputStorage {
@@ -550,9 +582,13 @@ int main(int argc, char** argv) {
   Replicate replicate;
   RankGrid rank_grid;
   int rank_id = 0;
+  int structures = 1;
   std::string engine_name = "cpu";
   Mode mode = Mode::batch;
   bool phase_timer = false;
+  bool fe32 = false;
+  std::string model_path = NEP_ADAPTERS_NEP89_MODEL_PATH;
+  std::string xyz_path = NEP_ADAPTERS_NEP89_XYZ_PATH;
 
   for (int arg = 1; arg < argc; ++arg) {
     if (std::strcmp(argv[arg], "--iterations") == 0 && arg + 1 < argc) {
@@ -565,6 +601,14 @@ int main(int argc, char** argv) {
       rank_grid = parse_replicate(argv[++arg]);
     } else if (std::strcmp(argv[arg], "--rank-id") == 0 && arg + 1 < argc) {
       rank_id = std::atoi(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--structures") == 0 && arg + 1 < argc) {
+      structures = std::atoi(argv[++arg]);
+    } else if (std::strcmp(argv[arg], "--model") == 0 && arg + 1 < argc) {
+      model_path = argv[++arg];
+    } else if (std::strcmp(argv[arg], "--xyz") == 0 && arg + 1 < argc) {
+      xyz_path = argv[++arg];
+    } else if (std::strcmp(argv[arg], "--fe32") == 0) {
+      fe32 = true;
     } else if (std::strcmp(argv[arg], "--engine") == 0 && arg + 1 < argc) {
       engine_name = argv[++arg];
     } else if (std::strcmp(argv[arg], "--mode") == 0 && arg + 1 < argc) {
@@ -578,30 +622,34 @@ int main(int argc, char** argv) {
       std::cerr << "Usage: " << argv[0]
                 << " [--engine NAME] [--mode batch|lammps]"
                 << " [--iterations N] [--warmup N]"
+                << " [--structures N]"
+                << " [--model PATH] [--xyz PATH] [--fe32]"
                 << " [--replicate NxMxK] [--rank-grid NxMxK] [--rank-id N]"
                 << " [--phase-timer]\n";
       return EXIT_FAILURE;
     }
   }
 
-  if (iterations <= 0 || warmup < 0) {
+  if (iterations <= 0 || warmup < 0 || structures <= 0) {
     return EXIT_FAILURE;
   }
   if (engine_name != "cpu") {
     std::cerr << "Unsupported --engine value: " << engine_name << '\n';
     return EXIT_FAILURE;
   }
-
-  const std::string model_path = NEP_ADAPTERS_NEP89_MODEL_PATH;
-  const std::string xyz_path = NEP_ADAPTERS_NEP89_XYZ_PATH;
+  if (mode == Mode::lammps && structures != 1) {
+    std::cerr << "--structures is only supported in batch mode\n";
+    return EXIT_FAILURE;
+  }
 
   if (!nep_adapters::register_cpu_engine()) {
     return EXIT_FAILURE;
   }
 
   const auto type_map = cpu_test::read_type_map(model_path);
-  cpu_test::Frame frame =
-      cpu_test::read_first_frame(xyz_path, type_map);
+  cpu_test::Frame frame = fe32
+      ? make_bcc_fe32(type_map)
+      : cpu_test::read_first_frame(xyz_path, type_map);
   frame = make_supercell(frame, replicate);
 
   const std::int32_t atom_count =
@@ -619,28 +667,71 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  std::int32_t atom_counts[] = {atom_count};
-  std::int32_t atom_offsets[] = {0};
-  std::int32_t pbc[] = {1, 1, 1};
+  const std::int64_t total_atoms_64 =
+      static_cast<std::int64_t>(atom_count) * structures;
+  if (total_atoms_64 > std::numeric_limits<std::int32_t>::max()) {
+    std::cerr << "The requested batch exceeds the C API atom-count range\n";
+    return EXIT_FAILURE;
+  }
+  const std::int32_t total_atoms =
+      static_cast<std::int32_t>(total_atoms_64);
+  std::vector<std::int32_t> atom_counts(
+      static_cast<std::size_t>(structures), atom_count);
+  std::vector<std::int32_t> atom_offsets(
+      static_cast<std::size_t>(structures));
+  std::vector<std::int32_t> batch_types(
+      static_cast<std::size_t>(total_atoms));
+  std::vector<double> batch_positions(
+      static_cast<std::size_t>(total_atoms) * 3);
+  std::vector<double> batch_boxes(
+      static_cast<std::size_t>(structures) * 9);
+  std::vector<std::int32_t> pbc(
+      static_cast<std::size_t>(structures) * 3, 1);
+  for (int structure = 0; structure < structures; ++structure) {
+    const std::int32_t atom_offset = structure * atom_count;
+    atom_offsets[static_cast<std::size_t>(structure)] = atom_offset;
+    std::copy(
+        frame.types.begin(),
+        frame.types.end(),
+        batch_types.begin() + atom_offset);
+    std::copy_n(
+        frame.box,
+        9,
+        batch_boxes.data() + static_cast<std::size_t>(structure) * 9);
+    for (std::int32_t atom = 0; atom < atom_count; ++atom) {
+      const double phase =
+          static_cast<double>(structure) * 0.173 +
+          static_cast<double>(atom) * 0.37;
+      const std::size_t source = static_cast<std::size_t>(atom) * 3;
+      const std::size_t destination =
+          (static_cast<std::size_t>(atom_offset) + atom) * 3;
+      batch_positions[destination + 0] =
+          frame.positions_aos3[source + 0] + 0.012 * std::sin(phase);
+      batch_positions[destination + 1] =
+          frame.positions_aos3[source + 1] + 0.010 * std::sin(1.31 * phase);
+      batch_positions[destination + 2] =
+          frame.positions_aos3[source + 2] + 0.011 * std::sin(1.73 * phase);
+    }
+  }
 
   NepaStructureBatch batch{};
-  batch.num_structures = 1;
-  batch.total_atoms = atom_count;
-  batch.atom_counts = atom_counts;
-  batch.atom_offsets = atom_offsets;
-  batch.types = frame.types.data();
-  batch.positions_aos3 = frame.positions_aos3.data();
-  batch.boxes_row_major9 = frame.box;
-  batch.pbc_flags3 = pbc;
+  batch.num_structures = structures;
+  batch.total_atoms = total_atoms;
+  batch.atom_counts = atom_counts.data();
+  batch.atom_offsets = atom_offsets.data();
+  batch.types = batch_types.data();
+  batch.positions_aos3 = batch_positions.data();
+  batch.boxes_row_major9 = batch_boxes.data();
+  batch.pbc_flags3 = pbc.data();
 
-  double energy[] = {0.0};
-  std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
-  double virial[9] = {};
+  std::vector<double> energy(static_cast<std::size_t>(structures), 0.0);
+  std::vector<double> forces(static_cast<std::size_t>(total_atoms) * 3, 0.0);
+  std::vector<double> virial(static_cast<std::size_t>(structures) * 9, 0.0);
 
   NepaFindForceResult result{};
-  result.energy_per_structure = energy;
+  result.energy_per_structure = energy.data();
   result.forces_aos3 = forces.data();
-  result.virials_row_major9 = virial;
+  result.virials_row_major9 = virial.data();
 
   LammpsInputStorage lammps_input;
   LammpsResultStorage lammps_result;
@@ -690,7 +781,9 @@ int main(int argc, char** argv) {
   const std::vector<double>& checked_forces =
       mode == Mode::batch ? forces : lammps_result.forces;
   const double checked_energy =
-      mode == Mode::batch ? energy[0] : lammps_result.total_potential;
+      mode == Mode::batch
+          ? std::accumulate(energy.begin(), energy.end(), 0.0)
+          : lammps_result.total_potential;
 
   const double force_l1 = std::accumulate(
       checked_forces.begin(),
@@ -706,7 +799,8 @@ int main(int argc, char** argv) {
   nepa_free_model(model);
 
   const int total_iterations = iterations;
-  const int active_atoms = mode == Mode::lammps ? lammps_input.nlocal : atom_count;
+  const int active_atoms =
+      mode == Mode::lammps ? lammps_input.nlocal : total_atoms;
   const double seconds =
       std::chrono::duration<double>(finished - started).count();
   const double evals_per_second = static_cast<double>(total_iterations) / seconds;
@@ -718,12 +812,14 @@ int main(int argc, char** argv) {
   const int omp_threads = 1;
 #endif
 
-  std::cout << "{\"benchmark\":\""
+  std::cout << std::setprecision(17)
+            << "{\"benchmark\":\""
             << (mode == Mode::batch ? "nep89_find_force_batch" : "nep89_lammps_neighbors")
             << "\","
             << "\"engine\":\"" << engine_name << "\","
             << "\"mode\":\"" << mode_name(mode) << "\","
             << "\"model\":\"nep89\","
+            << "\"structures\":" << (mode == Mode::batch ? structures : 1) << ','
             << "\"openmp_enabled\":" << NEP_ADAPTERS_BENCH_OPENMP_ENABLED << ','
             << "\"omp_threads\":" << omp_threads << ','
             << "\"replicate\":\"" << replicate.nx << 'x' << replicate.ny
@@ -735,7 +831,7 @@ int main(int argc, char** argv) {
             << "\"atoms\":" << active_atoms << ','
             << "\"system_atoms\":" << atom_count << ','
             << "\"nlocal\":" << active_atoms << ','
-            << "\"nall\":" << (mode == Mode::lammps ? lammps_input.nall : atom_count) << ','
+            << "\"nall\":" << (mode == Mode::lammps ? lammps_input.nall : total_atoms) << ','
             << "\"ghost_atoms\":" << (mode == Mode::lammps ? lammps_input.ghost_count : 0) << ','
             << "\"neighbor_count\":"
             << (mode == Mode::lammps ? lammps_input.neighbor_count : 0) << ','
@@ -752,7 +848,9 @@ int main(int argc, char** argv) {
             << "\"setup_seconds\":" << setup_seconds << ','
             << "\"seconds\":" << seconds << ','
             << "\"evals_per_second\":" << evals_per_second << ','
-            << "\"atom_steps_per_second\":" << atom_steps_per_second
+            << "\"atom_steps_per_second\":" << atom_steps_per_second << ','
+            << "\"energy_sum\":" << checked_energy << ','
+            << "\"force_l1\":" << force_l1
             << "}\n";
 
   return EXIT_SUCCESS;

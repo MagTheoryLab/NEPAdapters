@@ -30,6 +30,21 @@ struct HasSpin<T, std::void_t<decltype(std::declval<T>().paramb.spin_mode)>>
 constexpr std::int64_t kForceBatchAtomsPerTypeWorker = 4;
 constexpr std::int64_t kDescriptorBatchAtomsPerTypeWorker = 10;
 
+struct CpuBatchScratch {
+  std::vector<int> types;
+  std::vector<double> positions_soa;
+  std::vector<double> box;
+  std::vector<double> potential;
+  std::vector<double> force_soa;
+  std::vector<double> virial_soa;
+  std::vector<double> charge;
+  std::vector<double> bec_soa;
+  std::vector<double> descriptor_soa;
+  std::vector<double> spins_soa;
+  std::vector<double> mforce_soa;
+  std::vector<double> spin_transfer_soa;
+};
+
 template <typename NativeNep>
 class CpuModel final : public Model {
  public:
@@ -148,6 +163,7 @@ class CpuModel final : public Model {
     }
     auto process_structure = [&](
         NativeNep& native,
+        CpuBatchScratch& scratch,
         const std::int32_t structure) -> NepaStatus {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;
@@ -155,156 +171,172 @@ class CpuModel final : public Model {
         const std::int32_t atom_count = batch.atom_counts[structure];
         const std::int32_t atom_offset = batch.atom_offsets[structure];
 
-        std::vector<int> types(static_cast<std::size_t>(atom_count));
-        std::vector<double> positions_soa(static_cast<std::size_t>(atom_count) * 3);
-        std::vector<double> box(9);
-        std::vector<double> potential(static_cast<std::size_t>(atom_count), 0.0);
-        std::vector<double> force_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
-        std::vector<double> virial_soa(static_cast<std::size_t>(atom_count) * 9, 0.0);
+        scratch.types.resize(static_cast<std::size_t>(atom_count));
+        scratch.positions_soa.resize(static_cast<std::size_t>(atom_count) * 3);
+        scratch.box.resize(9);
+        scratch.potential.resize(static_cast<std::size_t>(atom_count));
+        scratch.force_soa.resize(static_cast<std::size_t>(atom_count) * 3);
+        scratch.virial_soa.resize(static_cast<std::size_t>(atom_count) * 9);
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
           const std::int32_t global_atom = atom_offset + atom;
-          types[atom] = batch.types[global_atom];
-          positions_soa[atom] = batch.positions_aos3[3 * global_atom + 0];
-          positions_soa[static_cast<std::size_t>(atom_count) + atom] =
+          scratch.types[atom] = batch.types[global_atom];
+          scratch.positions_soa[atom] = batch.positions_aos3[3 * global_atom + 0];
+          scratch.positions_soa[static_cast<std::size_t>(atom_count) + atom] =
               batch.positions_aos3[3 * global_atom + 1];
-          positions_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+          scratch.positions_soa[static_cast<std::size_t>(2) * atom_count + atom] =
               batch.positions_aos3[3 * global_atom + 2];
         }
 
         std::copy_n(
             batch.boxes_row_major9 + static_cast<std::size_t>(structure) * 9,
             9,
-            box.data());
+            scratch.box.data());
 
-        std::vector<double> charge;
-        std::vector<double> bec_soa;
-        std::vector<double> descriptor_soa;
+        scratch.charge.clear();
+        scratch.bec_soa.clear();
+        scratch.descriptor_soa.clear();
+        scratch.spins_soa.clear();
+        scratch.mforce_soa.clear();
+        scratch.spin_transfer_soa.clear();
         if (descriptor_result != nullptr) {
-          descriptor_soa.assign(
-              static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
+          scratch.descriptor_soa.resize(
+              static_cast<std::size_t>(atom_count) * native.annmb.dim);
         }
         if constexpr (HasSpin<NativeNep>::value) {
           if (native.paramb.spin_mode > 0) {
-            std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
+            scratch.spins_soa.resize(static_cast<std::size_t>(atom_count) * 3);
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
               const std::int32_t global_atom = atom_offset + atom;
-              spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
-              spins_soa[static_cast<std::size_t>(atom_count) + atom] =
+              scratch.spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
+              scratch.spins_soa[static_cast<std::size_t>(atom_count) + atom] =
                   batch.spins_aos3[3 * global_atom + 1];
-              spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+              scratch.spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
-            descriptor_soa.assign(
-                static_cast<std::size_t>(atom_count) * native.annmb.dim, 0.0);
-            std::vector<double> mforce_soa(static_cast<std::size_t>(atom_count) * 3, 0.0);
-            std::vector<double> spin_transfer_soa;
+            scratch.descriptor_soa.resize(
+                static_cast<std::size_t>(atom_count) * native.annmb.dim);
+            scratch.mforce_soa.resize(static_cast<std::size_t>(atom_count) * 3);
             if (result.spin_transfer_per_atom_row_major9 != nullptr) {
-              spin_transfer_soa.assign(
-                  static_cast<std::size_t>(atom_count) * 9, 0.0);
+              scratch.spin_transfer_soa.resize(
+                  static_cast<std::size_t>(atom_count) * 9);
             }
             native.compute(
-                types,
-                box,
-                positions_soa,
-                spins_soa,
-                potential,
-                force_soa,
-                virial_soa,
-                descriptor_soa,
-                mforce_soa,
-                spin_transfer_soa.empty() ? nullptr : &spin_transfer_soa);
+                scratch.types,
+                scratch.box,
+                scratch.positions_soa,
+                scratch.spins_soa,
+                scratch.potential,
+                scratch.force_soa,
+                scratch.virial_soa,
+                scratch.descriptor_soa,
+                scratch.mforce_soa,
+                scratch.spin_transfer_soa.empty()
+                    ? nullptr
+                    : &scratch.spin_transfer_soa);
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
               const std::int32_t global_atom = atom_offset + atom;
               if (result.mforces_aos3 != nullptr) {
-                result.mforces_aos3[3 * global_atom + 0] = mforce_soa[atom];
+                result.mforces_aos3[3 * global_atom + 0] =
+                    scratch.mforce_soa[atom];
                 result.mforces_aos3[3 * global_atom + 1] =
-                    mforce_soa[static_cast<std::size_t>(atom_count) + atom];
+                    scratch.mforce_soa[
+                        static_cast<std::size_t>(atom_count) + atom];
                 result.mforces_aos3[3 * global_atom + 2] =
-                    mforce_soa[static_cast<std::size_t>(2) * atom_count + atom];
+                    scratch.mforce_soa[
+                        static_cast<std::size_t>(2) * atom_count + atom];
               }
               if (result.spin_transfer_per_atom_row_major9 != nullptr) {
                 for (std::int32_t component = 0; component < 9; ++component) {
                   result.spin_transfer_per_atom_row_major9[
                       9 * static_cast<std::size_t>(global_atom) + component] =
-                      spin_transfer_soa[
+                      scratch.spin_transfer_soa[
                           static_cast<std::size_t>(component) * atom_count +
                           atom];
                 }
               }
             }
           } else if (native.paramb.charge_mode > 0) {
-            charge.assign(static_cast<std::size_t>(atom_count), 0.0);
-            bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+            scratch.charge.resize(static_cast<std::size_t>(atom_count));
+            scratch.bec_soa.resize(static_cast<std::size_t>(atom_count) * 9);
             native.compute(
-                types,
-                box,
-                positions_soa,
-                potential,
-                force_soa,
-                virial_soa,
-                charge,
-                bec_soa);
+                scratch.types,
+                scratch.box,
+                scratch.positions_soa,
+                scratch.potential,
+                scratch.force_soa,
+                scratch.virial_soa,
+                scratch.charge,
+                scratch.bec_soa);
           } else {
             native.compute(
-                types,
-                box,
-                positions_soa,
-                potential,
-                force_soa,
-                virial_soa,
-                descriptor_soa.empty() ? nullptr : &descriptor_soa);
+                scratch.types,
+                scratch.box,
+                scratch.positions_soa,
+                scratch.potential,
+                scratch.force_soa,
+                scratch.virial_soa,
+                scratch.descriptor_soa.empty()
+                    ? nullptr
+                    : &scratch.descriptor_soa);
           }
         } else if (native.paramb.charge_mode > 0) {
-          charge.assign(static_cast<std::size_t>(atom_count), 0.0);
-          bec_soa.assign(static_cast<std::size_t>(atom_count) * 9, 0.0);
+          scratch.charge.resize(static_cast<std::size_t>(atom_count));
+          scratch.bec_soa.resize(static_cast<std::size_t>(atom_count) * 9);
           native.compute(
-              types,
-              box,
-              positions_soa,
-              potential,
-              force_soa,
-              virial_soa,
-              charge,
-              bec_soa);
+              scratch.types,
+              scratch.box,
+              scratch.positions_soa,
+              scratch.potential,
+              scratch.force_soa,
+              scratch.virial_soa,
+              scratch.charge,
+              scratch.bec_soa);
         } else {
           native.compute(
-              types,
-              box,
-              positions_soa,
-              potential,
-              force_soa,
-              virial_soa,
-              descriptor_soa.empty() ? nullptr : &descriptor_soa);
+              scratch.types,
+              scratch.box,
+              scratch.positions_soa,
+              scratch.potential,
+              scratch.force_soa,
+              scratch.virial_soa,
+              scratch.descriptor_soa.empty()
+                  ? nullptr
+                  : &scratch.descriptor_soa);
         }
 
         result.energy_per_structure[structure] =
-            std::accumulate(potential.begin(), potential.end(), 0.0);
+            std::accumulate(
+                scratch.potential.begin(), scratch.potential.end(), 0.0);
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
           const std::int32_t global_atom = atom_offset + atom;
           if (result.potential_per_atom != nullptr) {
-            result.potential_per_atom[global_atom] = potential[atom];
+            result.potential_per_atom[global_atom] = scratch.potential[atom];
           }
-          result.forces_aos3[3 * global_atom + 0] = force_soa[atom];
+          result.forces_aos3[3 * global_atom + 0] = scratch.force_soa[atom];
           result.forces_aos3[3 * global_atom + 1] =
-              force_soa[static_cast<std::size_t>(atom_count) + atom];
+              scratch.force_soa[static_cast<std::size_t>(atom_count) + atom];
           result.forces_aos3[3 * global_atom + 2] =
-              force_soa[static_cast<std::size_t>(2) * atom_count + atom];
+              scratch.force_soa[
+                  static_cast<std::size_t>(2) * atom_count + atom];
 
           if (result.virials_per_atom_row_major9 != nullptr) {
             for (std::int32_t component = 0; component < 9; ++component) {
               result.virials_per_atom_row_major9[9 * global_atom + component] =
-                  virial_soa[static_cast<std::size_t>(component) * atom_count + atom];
+                  scratch.virial_soa[
+                      static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
-          if (result.charge_per_atom != nullptr && !charge.empty()) {
-            result.charge_per_atom[global_atom] = charge[atom];
+          if (result.charge_per_atom != nullptr && !scratch.charge.empty()) {
+            result.charge_per_atom[global_atom] = scratch.charge[atom];
           }
-          if (result.bec_per_atom_row_major9 != nullptr && !bec_soa.empty()) {
+          if (result.bec_per_atom_row_major9 != nullptr &&
+              !scratch.bec_soa.empty()) {
             for (std::int32_t component = 0; component < 9; ++component) {
               result.bec_per_atom_row_major9[9 * global_atom + component] =
-                  bec_soa[static_cast<std::size_t>(component) * atom_count + atom];
+                  scratch.bec_soa[
+                      static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
           if (descriptor_result != nullptr) {
@@ -313,7 +345,7 @@ class CpuModel final : public Model {
                  ++component) {
               descriptor_result->descriptors[
                   static_cast<std::size_t>(global_atom) * native.annmb.dim +
-                  component] = descriptor_soa[
+                  component] = scratch.descriptor_soa[
                       static_cast<std::size_t>(component) * atom_count + atom];
             }
           }
@@ -327,7 +359,8 @@ class CpuModel final : public Model {
             const std::size_t component_offset =
                 static_cast<std::size_t>(component) * atom_count;
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
-              virial_out[component] += virial_soa[component_offset + atom];
+              virial_out[component] +=
+                  scratch.virial_soa[component_offset + atom];
             }
           }
         }
@@ -351,9 +384,7 @@ class CpuModel final : public Model {
     try {
       if (use_structure_parallel) {
 #if defined(_OPENMP)
-        std::vector<NativeNep> workers(
-            static_cast<std::size_t>(structure_threads),
-            nep_);
+        ensure_batch_workers(structure_threads);
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
@@ -367,7 +398,10 @@ class CpuModel final : public Model {
             try {
               statuses[static_cast<std::size_t>(structure)] =
                   process_structure(
-                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      batch_workers_[
+                          static_cast<std::size_t>(omp_get_thread_num())],
+                      batch_scratch_[
+                          static_cast<std::size_t>(omp_get_thread_num())],
                       structure);
             } catch (const std::exception& error) {
               errors[static_cast<std::size_t>(structure)] = error.what();
@@ -389,7 +423,8 @@ class CpuModel final : public Model {
           if (is_cancelled()) {
             return NEPA_STATUS_CANCELLED;
           }
-          const NepaStatus status = process_structure(nep_, structure);
+          const NepaStatus status =
+              process_structure(nep_, serial_batch_scratch_, structure);
           if (status != NEPA_STATUS_OK) {
             return status;
           }
@@ -420,6 +455,7 @@ class CpuModel final : public Model {
 
     auto process_structure = [&](
         NativeNep& native,
+        CpuBatchScratch& scratch,
         const std::int32_t structure) -> NepaStatus {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;
@@ -431,49 +467,62 @@ class CpuModel final : public Model {
           return NEPA_STATUS_INVALID_ARGUMENT;
         }
 
-        std::vector<int> types(static_cast<std::size_t>(atom_count));
-        std::vector<double> positions_soa(static_cast<std::size_t>(atom_count) * 3);
-        std::vector<double> box(9);
-        std::vector<double> descriptor_soa(
-            static_cast<std::size_t>(atom_count) * descriptor_dim,
-            0.0);
+        scratch.types.resize(static_cast<std::size_t>(atom_count));
+        scratch.positions_soa.resize(static_cast<std::size_t>(atom_count) * 3);
+        scratch.box.resize(9);
+        scratch.descriptor_soa.resize(
+            static_cast<std::size_t>(atom_count) * descriptor_dim);
+        scratch.spins_soa.clear();
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
           const std::int32_t global_atom = atom_offset + atom;
-          types[atom] = batch.types[global_atom];
-          positions_soa[atom] = batch.positions_aos3[3 * global_atom + 0];
-          positions_soa[static_cast<std::size_t>(atom_count) + atom] =
+          scratch.types[atom] = batch.types[global_atom];
+          scratch.positions_soa[atom] = batch.positions_aos3[3 * global_atom + 0];
+          scratch.positions_soa[static_cast<std::size_t>(atom_count) + atom] =
               batch.positions_aos3[3 * global_atom + 1];
-          positions_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+          scratch.positions_soa[static_cast<std::size_t>(2) * atom_count + atom] =
               batch.positions_aos3[3 * global_atom + 2];
         }
 
         std::copy_n(
             batch.boxes_row_major9 + static_cast<std::size_t>(structure) * 9,
             9,
-            box.data());
+            scratch.box.data());
 
         if constexpr (HasSpin<NativeNep>::value) {
           if (native.paramb.spin_mode > 0) {
             if (batch.spins_aos3 == nullptr) {
               return NEPA_STATUS_INVALID_ARGUMENT;
             }
-            std::vector<double> spins_soa(static_cast<std::size_t>(atom_count) * 3);
+            scratch.spins_soa.resize(static_cast<std::size_t>(atom_count) * 3);
             for (std::int32_t atom = 0; atom < atom_count; ++atom) {
               const std::int32_t global_atom = atom_offset + atom;
-              spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
-              spins_soa[static_cast<std::size_t>(atom_count) + atom] =
+              scratch.spins_soa[atom] = batch.spins_aos3[3 * global_atom + 0];
+              scratch.spins_soa[static_cast<std::size_t>(atom_count) + atom] =
                   batch.spins_aos3[3 * global_atom + 1];
-              spins_soa[static_cast<std::size_t>(2) * atom_count + atom] =
+              scratch.spins_soa[
+                  static_cast<std::size_t>(2) * atom_count + atom] =
                   batch.spins_aos3[3 * global_atom + 2];
             }
             native.find_descriptor(
-                types, box, positions_soa, spins_soa, descriptor_soa);
+                scratch.types,
+                scratch.box,
+                scratch.positions_soa,
+                scratch.spins_soa,
+                scratch.descriptor_soa);
           } else {
-            native.find_descriptor(types, box, positions_soa, descriptor_soa);
+            native.find_descriptor(
+                scratch.types,
+                scratch.box,
+                scratch.positions_soa,
+                scratch.descriptor_soa);
           }
         } else {
-          native.find_descriptor(types, box, positions_soa, descriptor_soa);
+          native.find_descriptor(
+              scratch.types,
+              scratch.box,
+              scratch.positions_soa,
+              scratch.descriptor_soa);
         }
 
         for (std::int32_t atom = 0; atom < atom_count; ++atom) {
@@ -481,7 +530,7 @@ class CpuModel final : public Model {
           for (std::int32_t component = 0; component < descriptor_dim; ++component) {
             result.descriptors[
                 static_cast<std::size_t>(global_atom) * descriptor_dim + component] =
-                descriptor_soa[
+                scratch.descriptor_soa[
                     static_cast<std::size_t>(component) * atom_count + atom];
           }
         }
@@ -505,9 +554,7 @@ class CpuModel final : public Model {
     try {
       if (use_structure_parallel) {
 #if defined(_OPENMP)
-        std::vector<NativeNep> workers(
-            static_cast<std::size_t>(structure_threads),
-            nep_);
+        ensure_batch_workers(structure_threads);
         std::vector<NepaStatus> statuses(
             static_cast<std::size_t>(batch.num_structures),
             NEPA_STATUS_OK);
@@ -521,7 +568,10 @@ class CpuModel final : public Model {
             try {
               statuses[static_cast<std::size_t>(structure)] =
                   process_structure(
-                      workers[static_cast<std::size_t>(omp_get_thread_num())],
+                      batch_workers_[
+                          static_cast<std::size_t>(omp_get_thread_num())],
+                      batch_scratch_[
+                          static_cast<std::size_t>(omp_get_thread_num())],
                       structure);
             } catch (const std::exception& error) {
               errors[static_cast<std::size_t>(structure)] = error.what();
@@ -543,7 +593,8 @@ class CpuModel final : public Model {
           if (is_cancelled()) {
             return NEPA_STATUS_CANCELLED;
           }
-          const NepaStatus status = process_structure(nep_, structure);
+          const NepaStatus status =
+              process_structure(nep_, serial_batch_scratch_, structure);
           if (status != NEPA_STATUS_OK) {
             return status;
           }
@@ -826,6 +877,21 @@ class CpuModel final : public Model {
   }
 
  private:
+  void ensure_batch_workers(const int worker_count) {
+    const std::size_t requested = static_cast<std::size_t>(worker_count);
+    if (batch_workers_.size() >= requested) {
+      return;
+    }
+    // NativeNep stores both immutable model data and mutable evaluation
+    // workspace. Each OpenMP thread therefore needs its own instance, but
+    // rebuilding those copies for every batch call is avoidable overhead.
+    batch_workers_.reserve(requested);
+    while (batch_workers_.size() < requested) {
+      batch_workers_.push_back(nep_);
+    }
+    batch_scratch_.resize(requested);
+  }
+
   static NepaStatus prepare_native_structure(
       const NepaStructureBatch& batch,
       std::int32_t structure,
@@ -902,6 +968,9 @@ class CpuModel final : public Model {
     return true;
   }
 
+  CpuBatchScratch serial_batch_scratch_;
+  std::vector<NativeNep> batch_workers_;
+  std::vector<CpuBatchScratch> batch_scratch_;
   NativeNep nep_;
 };
 
