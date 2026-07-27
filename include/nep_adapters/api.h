@@ -98,9 +98,11 @@ typedef struct NepaFindForceResult {
   double* energy_per_structure;
   double* potential_per_atom;
   double* forces_aos3;
-  /* 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  /* Total structure virial in the GPUMD pressure-positive convention.
+     For a static structure, ASE stress is -virial / volume.
+     Order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
   double* virials_row_major9;
-  /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */
+  /* Per-atom contributions in the same GPUMD convention and raw9 order. */
   double* virials_per_atom_row_major9;
   double* charge_per_atom;
   /* Per-atom 9 components in NEP compute() order: xx, xy, xz, yx, yy, yz, zx, zy, zz. */

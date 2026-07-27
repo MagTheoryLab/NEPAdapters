@@ -74,6 +74,15 @@ stress = atoms.get_stress()
 
 spin 模型也使用同一个 `NepAseCalculator`。结构必须提供 `(natoms, 3)` 的 vector spin；ASE 的 vector `initial_magmoms` 可直接使用，scalar `initial_magmoms` 不会被自动猜成方向。
 
+核心计算接口保持 GPUMD 的 pressure-positive virial 约定。ASE 适配器只在边界处转换为 ASE 的能量-应变导数约定：
+
+```text
+stress_ASE = -virial_total / volume
+           = -num_atoms * structure_virials / volume
+```
+
+其中 `structure_virials` 是平均每原子 virial。这个负号转换不会改变 NumPy/C API 返回的原始 virial。
+
 ## 先检查模型和后端
 
 ```python
@@ -124,6 +133,8 @@ energies, force_blocks, virial_blocks = calculator.calculate(structures)
 ```text
 xx, xy, xz, yx, yy, yz, zx, zy, zz
 ```
+
+virial 的符号与 GPUMD 原生计算保持一致；如果调用方需要 ASE stress，必须按上一节的公式转换。
 
 ## 直接传 NumPy 数组
 

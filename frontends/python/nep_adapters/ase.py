@@ -18,8 +18,14 @@ except ImportError as exc:  # pragma: no cover - exercised only without ASE inst
 
 
 def _stress_from_nep_compute_virial(virial9, atoms):
+    """Convert a mean per-atom GPUMD virial to ASE Voigt stress.
+
+    GPUMD uses a pressure-positive virial W.  ASE defines stress as the
+    energy derivative with respect to strain, so for a static structure
+    sigma_ASE = -W_total / V = -N * W_mean / V.
+    """
     virial_matrix = np.asarray(virial9, dtype=np.float64).reshape(3, 3)
-    stress_matrix = virial_matrix * len(atoms) / atoms.get_volume()
+    stress_matrix = -virial_matrix * len(atoms) / atoms.get_volume()
     return full_3x3_to_voigt_6_stress(stress_matrix)
 
 
