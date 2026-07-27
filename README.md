@@ -110,6 +110,30 @@ Python 源码安装会自动查找 NVCC；独立 CMake 和 LAMMPS 构建仍按�
 打开 CUDA，避免有 Toolkit 的机器意外改变 CPU-only 构建。完整组合、安装命令
 和选项默认值见 [构建与安装](docs/build.md)。
 
+### Intel oneAPI CPU 构建
+
+使用 IntelLLVM `icpx` 并开启
+`NEP_ADAPTERS_CPU_ENABLE_NATIVE_ARCH=ON`（即允许 `-march=native`）时，
+建议在 Release 编译参数中加入 `-fno-vectorize`：
+
+```sh
+cmake -S . -B .build/intel-cpu \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=icpx \
+  -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fno-vectorize" \
+  -DNEP_ADAPTERS_CPU_ENABLE_NATIVE_ARCH=ON \
+  -DNEP_ADAPTERS_BUILD_TESTS=ON
+cmake --build .build/intel-cpu -j2
+ctest --test-dir .build/intel-cpu --output-on-failure
+```
+
+在 Intel Xeon CPU Max 9470C 与 IntelLLVM 2024.2.1 的组合上，`-march=native`
+会触发 loop vectorizer 对 CPU 内部 cell list 索引更新的错误优化，进而破坏
+batch、descriptor、dipole 和 polarizability 结果。源码已对已知的
+loop-carried dependency 单独禁止向量化；保留全局 `-fno-vectorize` 是该环境下
+经过正确性与性能测试的推荐配置。官方预编译 wheel 使用可移植构建配置，不使用
+`icpx`，也不启用 CPU native architecture，因此无需追加该参数。
+
 ## LAMMPS 安装方式
 
 LAMMPS 有两种支持的安装方式：
