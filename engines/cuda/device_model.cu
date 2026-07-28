@@ -137,6 +137,20 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         "upload spin_baseline");
     view_.spin_baseline_count = host.spin_baseline.size();
     upload_int_array(
+        host.protocol.spin_dof_type_active,
+        spin_dof_type_active_device_,
+        summary_.spin_dof_type_active_bytes,
+        "upload spin_dof_type_active");
+    view_.spin_dof_type_active_count =
+        host.protocol.spin_dof_type_active.size();
+    upload_int_array(
+        host.protocol.spin_env_type_active,
+        spin_env_type_active_device_,
+        summary_.spin_env_type_active_bytes,
+        "upload spin_env_type_active");
+    view_.spin_env_type_active_count =
+        host.protocol.spin_env_type_active.size();
+    upload_int_array(
         host.atomic_numbers,
         atomic_numbers_device_,
         summary_.atomic_numbers_bytes,
@@ -151,6 +165,8 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         angular_coefficients_center_type_major_device_;
     view_.q_scaler = q_scaler_device_;
     view_.spin_baseline = spin_baseline_device_;
+    view_.spin_dof_type_active = spin_dof_type_active_device_;
+    view_.spin_env_type_active = spin_env_type_active_device_;
     view_.atomic_numbers = atomic_numbers_device_;
     summary_.total_bytes =
         summary_.ann_type_major_bytes +
@@ -160,6 +176,8 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.angular_coefficients_center_type_major_bytes +
         summary_.q_scaler_bytes +
         summary_.spin_baseline_bytes +
+        summary_.spin_dof_type_active_bytes +
+        summary_.spin_env_type_active_bytes +
         summary_.atomic_numbers_bytes;
   } catch (...) {
     release();
@@ -190,6 +208,8 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
       other.angular_coefficients_center_type_major_device_;
   q_scaler_device_ = other.q_scaler_device_;
   spin_baseline_device_ = other.spin_baseline_device_;
+  spin_dof_type_active_device_ = other.spin_dof_type_active_device_;
+  spin_env_type_active_device_ = other.spin_env_type_active_device_;
   atomic_numbers_device_ = other.atomic_numbers_device_;
   view_ = other.view_;
   summary_ = other.summary_;
@@ -201,6 +221,8 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   other.angular_coefficients_center_type_major_device_ = nullptr;
   other.q_scaler_device_ = nullptr;
   other.spin_baseline_device_ = nullptr;
+  other.spin_dof_type_active_device_ = nullptr;
+  other.spin_env_type_active_device_ = nullptr;
   other.atomic_numbers_device_ = nullptr;
   other.view_ = {};
   other.summary_ = {};
@@ -223,6 +245,8 @@ void DeviceModel::release() {
   free_device(angular_coefficients_center_type_major_device_);
   free_device(q_scaler_device_);
   free_device(spin_baseline_device_);
+  free_device(spin_dof_type_active_device_);
+  free_device(spin_env_type_active_device_);
   free_device(atomic_numbers_device_);
   view_ = {};
   summary_ = {};

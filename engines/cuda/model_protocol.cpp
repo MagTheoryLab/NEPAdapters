@@ -324,34 +324,53 @@ void parse_spin_header_line(
           parse_double(tokens[static_cast<std::size_t>(1 + type)]);
     }
   } else if (tokens[0] == "spin_chiral") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_chiral requires a value");
+    if (tokens.size() != 2) {
+      throw std::runtime_error("spin_chiral requires exactly one value");
     }
     protocol.spin_chiral = parse_int(tokens[1]);
     if (protocol.spin_chiral != 0 && protocol.spin_chiral != 1) {
       throw std::runtime_error("spin_chiral must be 0 or 1");
     }
   } else if (tokens[0] == "spin_compress") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_compress requires a value");
+    if (tokens.size() != 2) {
+      throw std::runtime_error("spin_compress requires exactly one value");
     }
     protocol.spin_compress = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_basis_size") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_basis_size requires a value");
+    if (tokens.size() != 3) {
+      throw std::runtime_error(
+          "spin_basis_size requires radial and reserved angular values");
     }
     protocol.spin_basis_size = parse_int(tokens[1]);
+    const int angular = parse_int(tokens[2]);
+    if (protocol.spin_basis_size < 0 || angular < 0) {
+      throw std::runtime_error("spin_basis_size values must be non-negative");
+    }
   } else if (tokens[0] == "spin_l_max") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_l_max requires a value");
+    if (tokens.size() != 4) {
+      throw std::runtime_error(
+          "spin_l_max requires 3body, 4body, and 5body values");
     }
     protocol.spin_l_max = parse_int(tokens[1]);
+    const int l_max_4body = parse_int(tokens[2]);
+    const int l_max_5body = parse_int(tokens[3]);
+    if (l_max_4body < 0 || l_max_5body < 0) {
+      throw std::runtime_error("spin_l_max values must be non-negative");
+    }
   } else if (tokens[0] == "spin_cutoff") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_cutoff requires a value");
+    if (tokens.size() != 3) {
+      throw std::runtime_error(
+          "spin_cutoff requires radial and reserved angular values");
     }
     protocol.spin_cutoff_radial = parse_double(tokens[1]);
+    const double angular = parse_double(tokens[2]);
+    if (protocol.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
+      throw std::runtime_error("spin_cutoff values must be positive");
+    }
   } else if (tokens[0] == "spin_dof_type" || tokens[0] == "spin_type") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_dof_type must enable at least one type");
+    }
     protocol.spin_dof_type_active.assign(
         static_cast<std::size_t>(protocol.num_types), 0);
     for (std::size_t i = 1; i < tokens.size(); ++i) {
@@ -364,6 +383,9 @@ void parse_spin_header_line(
           static_cast<std::size_t>(found - protocol.elements.begin())] = 1;
     }
   } else if (tokens[0] == "spin_env_type") {
+    if (tokens.size() < 2) {
+      throw std::runtime_error("spin_env_type must enable at least one type");
+    }
     protocol.spin_env_type_active.assign(
         static_cast<std::size_t>(protocol.num_types), 0);
     for (std::size_t i = 1; i < tokens.size(); ++i) {
@@ -376,15 +398,20 @@ void parse_spin_header_line(
           static_cast<std::size_t>(found - protocol.elements.begin())] = 1;
     }
   } else if (tokens[0] == "spin_scaler") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_scaler requires a value");
+    if (tokens.size() != 2) {
+      throw std::runtime_error("spin_scaler requires exactly one value");
     }
     if (parse_int(tokens[1]) != 1) {
       throw std::runtime_error("only spin_scaler 1 is supported by CUDA");
     }
   } else if (tokens[0] == "spin_n_max") {
-    if (tokens.size() < 3) {
+    if (tokens.size() != 3) {
       throw std::runtime_error("spin_n_max requires radial and angular values");
+    }
+    const int radial = parse_int(tokens[1]);
+    const int angular = parse_int(tokens[2]);
+    if (radial < 0 || angular < 0) {
+      throw std::runtime_error("spin_n_max values must be non-negative");
     }
     return;
   } else {
@@ -402,8 +429,9 @@ std::vector<std::string> parse_spin_block(
   if (tokens.empty() || tokens[0] != "spin_mode") {
     throw std::runtime_error("spin model must contain spin_mode line");
   }
-  if (tokens.size() < 2) {
-    throw std::runtime_error("spin_mode requires a value");
+  if (tokens.size() != 2 && tokens.size() != 3) {
+    throw std::runtime_error(
+        "spin_mode requires a value and optional header count");
   }
   protocol.spin_mode = parse_int(tokens[1]);
   if (protocol.spin_mode != 1) {
@@ -440,7 +468,7 @@ void finalize_counts(ModelProtocol& protocol) {
       throw std::runtime_error("spin_basis_size must cover spin_compress");
     }
     if (protocol.spin_cutoff_radial <= 0.0) {
-      protocol.spin_cutoff_radial = protocol.cutoff_radial;
+      throw std::runtime_error("spin_mode block is missing spin_cutoff");
     }
     protocol.cutoff_radial = std::max(protocol.cutoff_radial, protocol.spin_cutoff_radial);
     protocol.cutoff_max = std::max(protocol.cutoff_max, protocol.spin_cutoff_radial);
@@ -452,7 +480,16 @@ void finalize_counts(ModelProtocol& protocol) {
       protocol.spin_env_type_active = protocol.spin_dof_type_active;
     }
     if (protocol.spin_baseline.empty()) {
-      protocol.spin_baseline.assign(static_cast<std::size_t>(protocol.num_types), 0.0);
+      throw std::runtime_error("spin_mode block is missing spin_baseline");
+    }
+    for (std::size_t type = 0;
+         type < protocol.spin_dof_type_active.size();
+         ++type) {
+      if (protocol.spin_dof_type_active[type] != 0 &&
+          protocol.spin_env_type_active[type] == 0) {
+        throw std::runtime_error(
+            "spin_dof_type must be a subset of spin_env_type");
+      }
     }
     protocol.spin_descriptor_dim = make_spin_core_layout(protocol).descriptor_dim;
   }

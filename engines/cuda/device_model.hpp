@@ -55,6 +55,8 @@ struct DeviceModelUploadSummary {
   std::size_t angular_coefficients_center_type_major_bytes = 0;
   std::size_t q_scaler_bytes = 0;
   std::size_t spin_baseline_bytes = 0;
+  std::size_t spin_dof_type_active_bytes = 0;
+  std::size_t spin_env_type_active_bytes = 0;
   std::size_t atomic_numbers_bytes = 0;
   std::size_t total_bytes = 0;
 };
@@ -67,6 +69,8 @@ struct DeviceModelView {
   const float* angular_coefficients_center_type_major = nullptr;
   const float* q_scaler = nullptr;
   const double* spin_baseline = nullptr;
+  const int* spin_dof_type_active = nullptr;
+  const int* spin_env_type_active = nullptr;
   const int* atomic_numbers = nullptr;
   std::size_t ann_type_major_count = 0;
   std::size_t ann_type_major_qscaled_count = 0;
@@ -75,6 +79,8 @@ struct DeviceModelView {
   std::size_t angular_coefficients_center_type_major_count = 0;
   std::size_t q_scaler_count = 0;
   std::size_t spin_baseline_count = 0;
+  std::size_t spin_dof_type_active_count = 0;
+  std::size_t spin_env_type_active_count = 0;
   std::size_t atomic_numbers_count = 0;
 };
 
@@ -101,6 +107,8 @@ class DeviceModel {
   float* angular_coefficients_center_type_major_device_ = nullptr;
   float* q_scaler_device_ = nullptr;
   double* spin_baseline_device_ = nullptr;
+  int* spin_dof_type_active_device_ = nullptr;
+  int* spin_env_type_active_device_ = nullptr;
   int* atomic_numbers_device_ = nullptr;
   DeviceModelView view_{};
   DeviceModelUploadSummary summary_{};
