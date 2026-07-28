@@ -339,6 +339,7 @@ public:
   DFTD3 dftd3;
   std::vector<int> NN_radial, NL_radial, NN_angular, NL_angular;
   std::vector<double> r12;
+  int batch_neighbor_capacity = 0;
   int dftd3_neighbor_capacity = 0;
   std::vector<double> Fp;
   std::vector<double> sum_fxyz;

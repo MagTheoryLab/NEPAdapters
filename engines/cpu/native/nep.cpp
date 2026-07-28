@@ -8604,6 +8604,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
 
   int MN_radial = get_int_from_token(tokens[tokens.size() - 2], __FILE__, __LINE__);
   int MN_angular = get_int_from_token(tokens[tokens.size() - 1], __FILE__, __LINE__);
+  if (MN_radial <= 0 || MN_angular <= 0) {
+    throw std::invalid_argument("neighbor capacities must be positive");
+  }
+  batch_neighbor_capacity = std::max(MN_radial, MN_angular);
 
   // n_max 10 8
   tokens = get_tokens(input);
@@ -8963,16 +8967,18 @@ void NEP::prepare_table_for_lammps(
 
 void NEP::allocate_memory(const int N)
 {
+  const std::size_t capacity =
+    static_cast<std::size_t>(batch_neighbor_capacity);
   if (num_atoms < N || NN_radial.size() < static_cast<std::size_t>(N) ||
-      NL_radial.size() < static_cast<std::size_t>(N) * MN ||
+      NL_radial.size() < static_cast<std::size_t>(N) * capacity ||
       NN_angular.size() < static_cast<std::size_t>(N) ||
-      NL_angular.size() < static_cast<std::size_t>(N) * MN ||
-      r12.size() < static_cast<std::size_t>(N) * MN * 6) {
+      NL_angular.size() < static_cast<std::size_t>(N) * capacity ||
+      r12.size() < static_cast<std::size_t>(N) * capacity * 6) {
     NN_radial.resize(N);
-    NL_radial.resize(N * MN);
+    NL_radial.resize(static_cast<std::size_t>(N) * capacity);
     NN_angular.resize(N);
-    NL_angular.resize(N * MN);
-    r12.resize(N * MN * 6);
+    NL_angular.resize(static_cast<std::size_t>(N) * capacity);
+    r12.resize(static_cast<std::size_t>(N) * capacity * 6);
     Fp.resize(N * annmb.dim);
     sum_fxyz.resize(N * (paramb.n_max_angular + 1) * NUM_OF_ABC);
     if (paramb.charge_mode > 0) {
@@ -9042,7 +9048,7 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const int size_x12 = N * MN;
+  const std::size_t size_x12 = N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9090,7 +9096,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity, box, position,
+    num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
@@ -9209,7 +9216,8 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
   if (!paramb.spin_mode) {
     throw std::runtime_error("spin descriptor requested for a non-spin model");
   }
@@ -9220,7 +9228,8 @@ void NEP::find_descriptor(
 
   allocate_memory(N);
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox,
     NN_radial, NL_radial, NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9276,7 +9285,8 @@ void NEP::compute(
   double phase_spin_gradient = 0.0;
   SpinPhaseBreakdown spin_phase;
 
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
   allocate_memory(N);
   std::fill(force.begin(), force.end(), 0.0);
   std::fill(virial.begin(), virial.end(), 0.0);
@@ -9290,7 +9300,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox,
     NN_radial, NL_radial, NN_angular, NL_angular, r12);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
@@ -9427,7 +9438,8 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9473,7 +9485,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 
   find_descriptor_small_box(
@@ -9688,7 +9701,8 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9702,7 +9716,8 @@ void NEP::find_descriptor(
   allocate_memory(N);
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9737,7 +9752,8 @@ void NEP::find_latent_space(
   std::vector<double>& latent_space)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9751,7 +9767,8 @@ void NEP::find_latent_space(
   allocate_memory(N);
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9777,7 +9794,8 @@ void NEP::find_B_projection(
   std::vector<double>& B_projection)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9790,7 +9808,8 @@ void NEP::find_B_projection(
 
   allocate_memory(N);
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9821,7 +9840,8 @@ void NEP::find_dipole(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9840,7 +9860,8 @@ void NEP::find_dipole(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9895,7 +9916,8 @@ void NEP::find_polarizability(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9914,7 +9936,8 @@ void NEP::find_polarizability(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_radial_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(

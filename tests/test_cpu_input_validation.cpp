@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,31 @@ bool rejects_model_text(
   }
   std::filesystem::remove(path);
   return status == NEPA_STATUS_RUNTIME_ERROR;
+}
+
+std::filesystem::path write_model_with_neighbor_capacity(
+    const std::filesystem::path& source,
+    int capacity) {
+  std::ifstream input(source);
+  const std::filesystem::path output_path =
+      std::filesystem::temp_directory_path() /
+      "nep_adapters_cpu_exported_capacity.nep";
+  std::ofstream output(output_path);
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.rfind("cutoff ", 0) == 0) {
+      std::istringstream tokens(line);
+      std::string keyword;
+      double radial = 0.0;
+      double angular = 0.0;
+      tokens >> keyword >> radial >> angular;
+      output << keyword << ' ' << radial << ' ' << angular << ' '
+             << capacity << ' ' << capacity << '\n';
+    } else {
+      output << line << '\n';
+    }
+  }
+  return output_path;
 }
 
 }  // namespace
@@ -141,6 +167,17 @@ int main() {
   nepa_free_model(model);
   const std::filesystem::path temp_dir =
       std::filesystem::temp_directory_path();
+  const std::filesystem::path expanded_model_path =
+      write_model_with_neighbor_capacity(model_path, 20000);
+  NepaModel* expanded_model = nullptr;
+  const NepaStatus expanded_load_status = nepa_load_model(
+      "cpu", expanded_model_path.string().c_str(), &expanded_model);
+  const NepaStatus expanded_dense_status =
+      expanded_load_status == NEPA_STATUS_OK
+          ? find_force(expanded_model, batch)
+          : expanded_load_status;
+  nepa_free_model(expanded_model);
+  std::filesystem::remove(expanded_model_path);
   std::string oversized_header = "nep4 95";
   for (int type = 0; type < 95; ++type) {
     oversized_header += " H";
@@ -162,6 +199,7 @@ int main() {
       gap_status != NEPA_STATUS_INVALID_ARGUMENT ||
       dense_status != NEPA_STATUS_RUNTIME_ERROR ||
       dense_error.find("neighbor capacity exceeded") == std::string::npos ||
+      expanded_dense_status != NEPA_STATUS_OK ||
       !oversized_model_rejected ||
       !truncated_spin_rejected ||
       !unknown_element_rejected) {
@@ -171,6 +209,7 @@ int main() {
               << " gap=" << gap_status
               << " dense=" << dense_status
               << " dense_error=" << dense_error
+              << " expanded_dense=" << expanded_dense_status
               << " oversized=" << oversized_model_rejected
               << " truncated_spin=" << truncated_spin_rejected
               << " unknown_element=" << unknown_element_rejected << "\n";

@@ -51,6 +51,7 @@ struct ModelProtocol {
   double zbl_inner = 0.0;
   double zbl_outer = 0.0;
   double cutoff_radial = 0.0;
+  double cutoff_neighbor = 0.0;
   double cutoff_angular = 0.0;
   double cutoff_max = 0.0;
   double spin_cutoff_radial = 0.0;

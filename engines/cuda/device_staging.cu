@@ -929,8 +929,8 @@ void stage_lammps_device_neighbors_on_device(
       input.neighbor_slot_stride,
       staged_positions,
       static_cast<int>(view.atom_capacity),
-      std::max(protocol.cutoff_radial, protocol.zbl_outer) *
-          std::max(protocol.cutoff_radial, protocol.zbl_outer),
+      std::max(protocol.cutoff_neighbor, protocol.zbl_outer) *
+          std::max(protocol.cutoff_neighbor, protocol.zbl_outer),
       protocol.cutoff_angular * protocol.cutoff_angular,
       view.nn_radial,
       view.nl_radial_slot_major,

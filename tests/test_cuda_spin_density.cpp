@@ -27,9 +27,14 @@ std::filesystem::path process_local_model_path(const std::string& label) {
           ".nep");
 }
 
-std::string write_model(int active_dim) {
+std::string write_model(
+    int active_dim,
+    double cutoff_radial = 4.0,
+    double spin_cutoff_radial = 4.0) {
   const std::string path = process_local_model_path(
-      "cuda_spin_density_" + std::to_string(active_dim)).string();
+      "cuda_spin_density_" + std::to_string(active_dim) + "_" +
+      std::to_string(cutoff_radial) + "_" +
+      std::to_string(spin_cutoff_radial)).string();
   std::ofstream out(path);
   out << "nep4_spin1 1 Fe\n";
   out << "spin_mode 1 10\n";
@@ -38,12 +43,14 @@ std::string write_model(int active_dim) {
   out << "spin_basis_size 0 0\n";
   out << "spin_l_max 4 0 0\n";
   out << "spin_compress 1\n";
-  out << "spin_cutoff 4 4\n";
+  out << "spin_cutoff " << spin_cutoff_radial << " "
+      << spin_cutoff_radial << "\n";
   out << "spin_chiral 0\n";
   out << "spin_scaler 1\n";
   out << "spin_dof_type Fe\n";
   out << "spin_env_type Fe\n";
-  out << "cutoff 4 4 64 64\n";
+  out << "cutoff " << cutoff_radial << " " << cutoff_radial
+      << " 64 64\n";
   out << "n_max 0 0\n";
   out << "basis_size 0 0\n";
   out << "l_max 0 0 0\n";
@@ -159,11 +166,11 @@ struct BatchResult {
   std::vector<double> descriptor;
 };
 
-BatchResult run_batch(NepaModel* model) {
+BatchResult run_batch(NepaModel* model, double neighbor_x = 1.3) {
   const int atom_counts[] = {kAtomCount};
   const int atom_offsets[] = {0};
   const int types[] = {0, 0};
-  const double positions[] = {0.0, 0.0, 0.0, 1.3, 0.4, 0.2};
+  const double positions[] = {0.0, 0.0, 0.0, neighbor_x, 0.4, 0.2};
   const double spins[] = {1.2, -0.3, 0.4, -0.5, 0.7, 1.1};
   const double box[] = {16.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0, 16.0};
   const int pbc[] = {1, 1, 1};
@@ -210,7 +217,10 @@ BatchResult run_batch(NepaModel* model) {
   return out;
 }
 
-bool check_lammps(NepaModel* model, const BatchResult& ref) {
+bool check_lammps(
+    NepaModel* model,
+    const BatchResult& ref,
+    double neighbor_x = 1.3) {
   int ilist[] = {0, 1};
   int numneigh[] = {1, 1};
   int neigh0[] = {1};
@@ -219,7 +229,7 @@ bool check_lammps(NepaModel* model, const BatchResult& ref) {
   int types[] = {1, 1};
   int type_map[] = {-1, 0};
   double x0[] = {0.0, 0.0, 0.0};
-  double x1[] = {1.3, 0.4, 0.2};
+  double x1[] = {neighbor_x, 0.4, 0.2};
   double s0[] = {0.6, -0.15, 0.2, 2.0};
   double s1[] = {-0.25, 0.35, 0.55, 2.0};
   double* positions[] = {x0, x1};
@@ -255,9 +265,22 @@ bool check_lammps(NepaModel* model, const BatchResult& ref) {
   }
   const std::vector<double> force = {f0[0], f0[1], f0[2], f1[0], f1[1], f1[2]};
   const std::vector<double> mforce = {m0[0], m0[1], m0[2], m1[0], m1[1], m1[2]};
+  const std::vector<double> lammps_potential = {potential[0], potential[1]};
+  const std::vector<double> reference_virial6 = {
+      ref.virial[0],
+      ref.virial[4],
+      ref.virial[8],
+      0.5 * (ref.virial[1] + ref.virial[3]),
+      0.5 * (ref.virial[2] + ref.virial[6]),
+      0.5 * (ref.virial[5] + ref.virial[7]),
+  };
+  const std::vector<double> lammps_virial6(
+      total_virial6, total_virial6 + 6);
   return std::abs(total_potential - ref.energy) < 1.0e-6 &&
+         max_abs_diff(lammps_potential, ref.potential) < 1.0e-6 &&
          max_abs_diff(force, ref.force) < 1.0e-6 &&
-         max_abs_diff(mforce, ref.mforce) < 1.0e-6;
+         max_abs_diff(mforce, ref.mforce) < 1.0e-6 &&
+         max_abs_diff(lammps_virial6, reference_virial6) < 1.0e-6;
 }
 
 bool check_dim(int active_dim) {
@@ -276,6 +299,7 @@ bool check_dim(int active_dim) {
       max_abs_diff(c.force, g.force) < 1.0e-6 &&
       max_abs_diff(c.virial, g.virial) < 1.0e-6 &&
       max_abs_diff(c.mforce, g.mforce) < 1.0e-6 &&
+      max_abs_diff(c.descriptor, g.descriptor) < 1.0e-6 &&
       check_lammps(gpu, c);
   if (!ok) {
     std::cerr << "spin density mismatch active_dim=" << active_dim
@@ -288,6 +312,53 @@ bool check_dim(int active_dim) {
     print_non_finite("cpu_virial", c.virial);
     print_non_finite("gpu_virial", g.virial);
     std::cerr << '\n';
+  }
+  nepa_free_model(cpu);
+  nepa_free_model(gpu);
+  return ok;
+}
+
+bool check_unequal_cutoffs(
+    const char* label,
+    double cutoff_radial,
+    double spin_cutoff_radial,
+    int active_dim) {
+  constexpr double kNeighborDistance = 3.0;
+  const std::string model_path =
+      write_model(active_dim, cutoff_radial, spin_cutoff_radial);
+  NepaModel* cpu = nullptr;
+  NepaModel* gpu = nullptr;
+  if (nepa_load_model("cpu", model_path.c_str(), &cpu) != NEPA_STATUS_OK ||
+      nepa_load_model("cuda", model_path.c_str(), &gpu) != NEPA_STATUS_OK) {
+    std::cerr << label << " model load failed: "
+              << nepa_last_error_message() << "\n";
+    nepa_free_model(cpu);
+    nepa_free_model(gpu);
+    return false;
+  }
+  const BatchResult cpu_oracle = run_batch(cpu, kNeighborDistance);
+  const BatchResult cuda_batch = run_batch(gpu, kNeighborDistance);
+  const bool ok =
+      std::abs(cpu_oracle.energy - cuda_batch.energy) < 1.0e-6 &&
+      max_abs_diff(cpu_oracle.potential, cuda_batch.potential) < 1.0e-6 &&
+      max_abs_diff(cpu_oracle.force, cuda_batch.force) < 1.0e-6 &&
+      max_abs_diff(cpu_oracle.virial, cuda_batch.virial) < 1.0e-6 &&
+      max_abs_diff(cpu_oracle.mforce, cuda_batch.mforce) < 1.0e-6 &&
+      max_abs_diff(cpu_oracle.descriptor, cuda_batch.descriptor) < 1.0e-6 &&
+      check_lammps(gpu, cpu_oracle, kNeighborDistance);
+  if (!ok) {
+    std::cerr << label << " cutoff parity mismatch"
+              << " energy="
+              << std::abs(cpu_oracle.energy - cuda_batch.energy)
+              << " force="
+              << max_abs_diff(cpu_oracle.force, cuda_batch.force)
+              << " virial="
+              << max_abs_diff(cpu_oracle.virial, cuda_batch.virial)
+              << " mforce="
+              << max_abs_diff(cpu_oracle.mforce, cuda_batch.mforce)
+              << " descriptor="
+              << max_abs_diff(cpu_oracle.descriptor, cuda_batch.descriptor)
+              << "\n";
   }
   nepa_free_model(cpu);
   nepa_free_model(gpu);
@@ -379,6 +450,10 @@ int main() {
     if (!check_dim(active_dim)) {
       return EXIT_FAILURE;
     }
+  }
+  if (!check_unequal_cutoffs("spin_gt_struct", 2.0, 4.0, 0) ||
+      !check_unequal_cutoffs("spin_lt_struct", 4.0, 2.0, 7)) {
+    return EXIT_FAILURE;
   }
   if (!check_c4_l4_raw1_dot()) {
     return EXIT_FAILURE;

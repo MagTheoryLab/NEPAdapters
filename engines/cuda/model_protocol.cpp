@@ -170,6 +170,7 @@ void parse_cutoff(
   }
 
   protocol.cutoff_radial = parse_double(tokens[1]);
+  protocol.cutoff_neighbor = protocol.cutoff_radial;
   protocol.cutoff_angular = parse_double(tokens[2]);
   protocol.max_neighbors_radial = parse_int(tokens[3]);
   protocol.max_neighbors_angular = parse_int(tokens[4]);
@@ -470,7 +471,8 @@ void finalize_counts(ModelProtocol& protocol) {
     if (protocol.spin_cutoff_radial <= 0.0) {
       throw std::runtime_error("spin_mode block is missing spin_cutoff");
     }
-    protocol.cutoff_radial = std::max(protocol.cutoff_radial, protocol.spin_cutoff_radial);
+    protocol.cutoff_neighbor =
+        std::max(protocol.cutoff_radial, protocol.spin_cutoff_radial);
     protocol.cutoff_max = std::max(protocol.cutoff_max, protocol.spin_cutoff_radial);
     if (protocol.spin_dof_type_active.empty()) {
       protocol.spin_dof_type_active.assign(
