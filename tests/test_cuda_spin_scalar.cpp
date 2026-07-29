@@ -65,6 +65,7 @@ struct BatchResult {
   std::vector<double> force;
   std::vector<double> virial;
   std::vector<double> mforce;
+  std::vector<double> spin_transfer;
   std::vector<double> descriptor;
 };
 
@@ -79,7 +80,10 @@ double max_abs_diff(const std::vector<double>& lhs, const std::vector<double>& r
   return diff;
 }
 
-BatchResult run_batch(NepaModel* model, int descriptor_dim) {
+BatchResult run_batch(
+    NepaModel* model,
+    int descriptor_dim,
+    double box_length = 16.0) {
   const int atom_counts[] = {kAtomCount};
   const int atom_offsets[] = {0};
   const int types[] = {0, 0};
@@ -92,9 +96,9 @@ BatchResult run_batch(NepaModel* model, int descriptor_dim) {
       -0.5, 0.7, 1.1,
   };
   const double box[] = {
-      16.0, 0.0, 0.0,
-      0.0, 16.0, 0.0,
-      0.0, 0.0, 16.0,
+      box_length, 0.0, 0.0,
+      0.0, box_length, 0.0,
+      0.0, 0.0, box_length,
   };
   const int pbc[] = {1, 1, 1};
 
@@ -114,6 +118,7 @@ BatchResult run_batch(NepaModel* model, int descriptor_dim) {
   out.force.assign(3 * kAtomCount, 0.0);
   out.virial.assign(9, 0.0);
   out.mforce.assign(3 * kAtomCount, 0.0);
+  out.spin_transfer.assign(9 * kAtomCount, 0.0);
   out.descriptor.assign(kAtomCount * descriptor_dim, 0.0);
   NepaFindForceResult force_result{};
   force_result.energy_per_structure = &out.energy;
@@ -121,6 +126,8 @@ BatchResult run_batch(NepaModel* model, int descriptor_dim) {
   force_result.forces_aos3 = out.force.data();
   force_result.virials_row_major9 = out.virial.data();
   force_result.mforces_aos3 = out.mforce.data();
+  force_result.spin_transfer_per_atom_row_major9 =
+      out.spin_transfer.data();
   const NepaStatus force_status = nepa_find_force_batch(model, &batch, &force_result);
   if (force_status != NEPA_STATUS_OK) {
     std::cerr << "batch force failed status=" << force_status
@@ -227,11 +234,15 @@ int main() {
         max_abs_diff(cpu_result.virial, gpu_result.virial);
     const double mforce_diff =
         max_abs_diff(cpu_result.mforce, gpu_result.mforce);
+    const double spin_transfer_diff =
+        max_abs_diff(cpu_result.spin_transfer, gpu_result.spin_transfer);
     const double descriptor_diff =
         max_abs_diff(cpu_result.descriptor, gpu_result.descriptor);
     const bool ok = energy_diff < 2.0e-5 && potential_diff < 2.0e-5 &&
                     force_diff < 2.0e-5 && virial_diff < 2.0e-5 &&
-                    mforce_diff < 2.0e-5 && descriptor_diff < 2.0e-5 &&
+                    mforce_diff < 2.0e-5 &&
+                    spin_transfer_diff < 2.0e-5 &&
+                    descriptor_diff < 2.0e-5 &&
                     check_lammps(gpu, cpu_result);
     if (!ok) {
       std::cerr << "spin scalar CPU/GPU mismatch l_max="
@@ -241,7 +252,47 @@ int main() {
                 << " force=" << force_diff
                 << " virial=" << virial_diff
                 << " mforce=" << mforce_diff
+                << " spin_transfer=" << spin_transfer_diff
                 << " descriptor=" << descriptor_diff << "\n";
+      nepa_free_model(cpu);
+      nepa_free_model(gpu);
+      return EXIT_FAILURE;
+    }
+
+    const BatchResult cpu_small =
+        run_batch(cpu, descriptor_dim, 3.5);
+    const BatchResult gpu_small =
+        run_batch(gpu, descriptor_dim, 3.5);
+    const double small_energy_diff =
+        std::abs(cpu_small.energy - gpu_small.energy);
+    const double small_potential_diff =
+        max_abs_diff(cpu_small.potential, gpu_small.potential);
+    const double small_force_diff =
+        max_abs_diff(cpu_small.force, gpu_small.force);
+    const double small_virial_diff =
+        max_abs_diff(cpu_small.virial, gpu_small.virial);
+    const double small_mforce_diff =
+        max_abs_diff(cpu_small.mforce, gpu_small.mforce);
+    const double small_spin_transfer_diff =
+        max_abs_diff(cpu_small.spin_transfer, gpu_small.spin_transfer);
+    const double small_descriptor_diff =
+        max_abs_diff(cpu_small.descriptor, gpu_small.descriptor);
+    if (small_energy_diff >= 2.0e-5 ||
+        small_potential_diff >= 2.0e-5 ||
+        small_force_diff >= 2.0e-5 ||
+        small_virial_diff >= 2.0e-5 ||
+        small_mforce_diff >= 2.0e-5 ||
+        small_spin_transfer_diff >= 2.0e-5 ||
+        small_descriptor_diff >= 2.0e-5) {
+      std::cerr << "small-box spin CPU/GPU mismatch l_max="
+                << structural_l_max
+                << " energy=" << small_energy_diff
+                << " potential=" << small_potential_diff
+                << " force=" << small_force_diff
+                << " virial=" << small_virial_diff
+                << " mforce=" << small_mforce_diff
+                << " spin_transfer=" << small_spin_transfer_diff
+                << " descriptor=" << small_descriptor_diff << "\n";
       nepa_free_model(cpu);
       nepa_free_model(gpu);
       return EXIT_FAILURE;

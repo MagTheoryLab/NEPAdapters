@@ -60,8 +60,7 @@ __device__ __forceinline__ void add_phi_zbl(
 __device__ __forceinline__ void find_f_and_fp_zbl(
     float zizj,
     float a_inv,
-    float inner,
-    float outer,
+    const float* parameters,
     float r,
     float rinv,
     float& f,
@@ -69,10 +68,10 @@ __device__ __forceinline__ void find_f_and_fp_zbl(
   const float x = r * a_inv;
   f = 0.0f;
   fp = 0.0f;
-  add_phi_zbl(0.18175f, 3.1998f, x, f, fp);
-  add_phi_zbl(0.50986f, 0.94229f, x, f, fp);
-  add_phi_zbl(0.28022f, 0.4029f, x, f, fp);
-  add_phi_zbl(0.02817f, 0.20162f, x, f, fp);
+  add_phi_zbl(parameters[2], parameters[3], x, f, fp);
+  add_phi_zbl(parameters[4], parameters[5], x, f, fp);
+  add_phi_zbl(parameters[6], parameters[7], x, f, fp);
+  add_phi_zbl(parameters[8], parameters[9], x, f, fp);
 
   f *= zizj;
   fp *= zizj * a_inv;
@@ -81,7 +80,7 @@ __device__ __forceinline__ void find_f_and_fp_zbl(
 
   float fc = 0.0f;
   float fcp = 0.0f;
-  find_fc_and_fcp_zbl(inner, outer, r, fc, fcp);
+  find_fc_and_fcp_zbl(parameters[0], parameters[1], r, fc, fcp);
   fp = fp * fc + f * fcp;
   f *= fc;
 }
@@ -91,8 +90,7 @@ __global__ void accumulate_zbl_forces(
     int atom_count,
     int atom_stride,
     int num_types,
-    float zbl_inner,
-    float zbl_outer,
+    const float* __restrict__ zbl_parameters_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const int* __restrict__ atomic_numbers,
@@ -113,7 +111,6 @@ __global__ void accumulate_zbl_forces(
   }
   const int zi = atomic_numbers[type1];
   const float pow_zi = powf(static_cast<float>(zi), 0.23f);
-  const float zbl_outer_squared = zbl_outer * zbl_outer;
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
@@ -139,6 +136,10 @@ __global__ void accumulate_zbl_forces(
       continue;
     }
     const int zj = atomic_numbers[type2];
+    const float* zbl_parameters =
+        zbl_parameters_pair + 10 * (type1 * num_types + type2);
+    const float zbl_outer_squared =
+        zbl_parameters[1] * zbl_parameters[1];
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -161,7 +162,7 @@ __global__ void accumulate_zbl_forces(
     const float zizj = kCoulomb * static_cast<float>(zi * zj);
     float f = 0.0f;
     float fp = 0.0f;
-    find_f_and_fp_zbl(zizj, a_inv, zbl_inner, zbl_outer, r, rinv, f, fp);
+    find_f_and_fp_zbl(zizj, a_inv, zbl_parameters, r, rinv, f, fp);
 
     const float force_scale = 0.5f * fp * rinv;
     const float f12x = x12 * force_scale;
@@ -237,8 +238,7 @@ __global__ void accumulate_zbl_forces_batched(
     int atom_count,
     int atom_stride,
     int num_types,
-    float zbl_inner,
-    float zbl_outer,
+    const float* __restrict__ zbl_parameters_pair,
     const int* __restrict__ atom_to_structure,
     const double* __restrict__ boxes_row_major9,
     const double* __restrict__ box_inverse_row_major9,
@@ -267,7 +267,6 @@ __global__ void accumulate_zbl_forces_batched(
   }
   const int zi = atomic_numbers[type1];
   const float pow_zi = powf(static_cast<float>(zi), 0.23f);
-  const float zbl_outer_squared = zbl_outer * zbl_outer;
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
@@ -293,6 +292,10 @@ __global__ void accumulate_zbl_forces_batched(
       continue;
     }
     const int zj = atomic_numbers[type2];
+    const float* zbl_parameters =
+        zbl_parameters_pair + 10 * (type1 * num_types + type2);
+    const float zbl_outer_squared =
+        zbl_parameters[1] * zbl_parameters[1];
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -315,7 +318,7 @@ __global__ void accumulate_zbl_forces_batched(
     const float zizj = kCoulomb * static_cast<float>(zi * zj);
     float f = 0.0f;
     float fp = 0.0f;
-    find_f_and_fp_zbl(zizj, a_inv, zbl_inner, zbl_outer, r, rinv, f, fp);
+    find_f_and_fp_zbl(zizj, a_inv, zbl_parameters, r, rinv, f, fp);
 
     const float force_scale = 0.5f * fp * rinv;
     const float f12x = x12 * force_scale;
@@ -399,11 +402,6 @@ void accumulate_zbl_forces_on_device(
       virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
-  require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
-  require(protocol.zbl_inner >= 0.0, "ZBL inner cutoff must be non-negative");
-  require(protocol.zbl_outer > protocol.zbl_inner, "ZBL outer cutoff must exceed inner");
-  require(protocol.zbl_outer <= protocol.cutoff_radial,
-          "current ZBL force kernel reuses the radial neighbor list");
 
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
@@ -412,6 +410,13 @@ void accumulate_zbl_forces_on_device(
   require(model_view.atomic_numbers != nullptr, "model missing atomic numbers");
   require(model_view.atomic_numbers_count >= static_cast<std::size_t>(protocol.num_types),
           "model atomic number buffer is too small");
+  require(model_view.zbl_parameters_pair != nullptr,
+          "model missing ZBL pair parameters");
+  require(
+      model_view.zbl_parameters_pair_count >=
+          static_cast<std::size_t>(protocol.num_types) *
+              static_cast<std::size_t>(protocol.num_types) * 10,
+      "model ZBL pair parameter buffer is too small");
   require(view.types != nullptr, "workspace missing atom types");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.nn_radial != nullptr, "workspace missing radial counts");
@@ -434,8 +439,7 @@ void accumulate_zbl_forces_on_device(
           atom_count,
           static_cast<int>(view.atom_capacity),
           protocol.num_types,
-          static_cast<float>(protocol.zbl_inner),
-          static_cast<float>(protocol.zbl_outer),
+          model_view.zbl_parameters_pair,
           box,
           view.types,
           model_view.atomic_numbers,
@@ -473,11 +477,6 @@ void accumulate_zbl_forces_batched(
       virial_target == VirialTarget::neighbor_atom;
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.has_zbl, "ZBL force kernel requires a ZBL model");
-  require(!protocol.flexible_zbl, "flexible ZBL is not supported yet");
-  require(protocol.zbl_inner >= 0.0, "ZBL inner cutoff must be non-negative");
-  require(protocol.zbl_outer > protocol.zbl_inner, "ZBL outer cutoff must exceed inner");
-  require(protocol.zbl_outer <= protocol.cutoff_radial,
-          "current ZBL force kernel reuses the radial neighbor list");
 
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
@@ -486,6 +485,13 @@ void accumulate_zbl_forces_batched(
   require(model_view.atomic_numbers != nullptr, "model missing atomic numbers");
   require(model_view.atomic_numbers_count >= static_cast<std::size_t>(protocol.num_types),
           "model atomic number buffer is too small");
+  require(model_view.zbl_parameters_pair != nullptr,
+          "model missing ZBL pair parameters");
+  require(
+      model_view.zbl_parameters_pair_count >=
+          static_cast<std::size_t>(protocol.num_types) *
+              static_cast<std::size_t>(protocol.num_types) * 10,
+      "model ZBL pair parameter buffer is too small");
   require(view.atom_to_structure != nullptr, "workspace missing atom_to_structure");
   require(view.boxes_row_major9 != nullptr, "workspace missing boxes");
   require(view.box_inverse_row_major9 != nullptr, "workspace missing box inverses");
@@ -508,8 +514,7 @@ void accumulate_zbl_forces_batched(
           atom_count,
           static_cast<int>(view.atom_capacity),
           protocol.num_types,
-          static_cast<float>(protocol.zbl_inner),
-          static_cast<float>(protocol.zbl_outer),
+          model_view.zbl_parameters_pair,
           view.atom_to_structure,
           view.boxes_row_major9,
           view.box_inverse_row_major9,

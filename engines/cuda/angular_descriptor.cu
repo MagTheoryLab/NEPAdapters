@@ -290,8 +290,8 @@ __device__ __forceinline__ void build_structural_descriptor_core(
     int has_q_233,
     int has_q_134,
     int abc_count,
-    float cutoff_radial,
-    float cutoff_angular,
+    const float* __restrict__ cutoff_radial_pair,
+    const float* __restrict__ cutoff_angular_pair,
     const SimulationBox& box,
     const int* __restrict__ types,
     const double* __restrict__ positions_soa3,
@@ -313,7 +313,6 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   const double xi = positions_soa3[atom];
   const double yi = positions_soa3[atom_stride + atom];
   const double zi = positions_soa3[2 * atom_stride + atom];
-  const float radial_rcinv = 1.0f / cutoff_radial;
   const int radial_count = nn_radial[atom];
 
   for (int n = 0; n <= n_max_radial; ++n) {
@@ -325,6 +324,9 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   for (int slot = 0; slot < radial_count; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
+    const float cutoff_radial =
+        cutoff_radial_pair[type1 * num_types + type2];
+    const float radial_rcinv = 1.0f / cutoff_radial;
     if (type2 != radial_run_type) {
       if (radial_run_type >= 0) {
         flush_radial_type_run(
@@ -402,7 +404,6 @@ __device__ __forceinline__ void build_structural_descriptor_core(
   const int angular_basis_count =
       (n_max_angular + 1) * (basis_size_angular + 1);
   const int angular_count = nn_angular[atom];
-  const float angular_rcinv = 1.0f / cutoff_angular;
   const int angular_order_count = n_max_angular + 1;
 
   for (int n_base = 0; n_base < angular_order_count;
@@ -425,6 +426,8 @@ __device__ __forceinline__ void build_structural_descriptor_core(
       const int neighbor = nl_angular[offset];
       const int type2 = types[neighbor];
       const int type_pair = type1 * num_types + type2;
+      const float cutoff_angular = cutoff_angular_pair[type_pair];
+      const float angular_rcinv = 1.0f / cutoff_angular;
       float dx = 0.0f;
       float dy = 0.0f;
       float dz = 0.0f;
@@ -719,8 +722,8 @@ __global__ void build_descriptor_core_from_positions(
     int has_q_233,
     int has_q_134,
     int abc_count,
-    float cutoff_radial,
-    float cutoff_angular,
+    const float* __restrict__ cutoff_radial_pair,
+    const float* __restrict__ cutoff_angular_pair,
     SimulationBox box,
     const int* __restrict__ atom_to_structure,
     const double* __restrict__ boxes_row_major9,
@@ -784,8 +787,8 @@ __global__ void build_descriptor_core_from_positions(
       has_q_233,
       has_q_134,
       abc_count,
-      cutoff_radial,
-      cutoff_angular,
+      cutoff_radial_pair,
+      cutoff_angular_pair,
       atom_box,
       types,
       positions_soa3,
@@ -840,6 +843,15 @@ void build_descriptor_core_from_positions_on_device(
   require(model_view.descriptor_coefficients_type_pair_major_count >=
               protocol.ordinary_descriptor_parameter_count,
           "model type-pair-major descriptor coefficient buffer is too small");
+  const std::size_t type_pair_count =
+      static_cast<std::size_t>(protocol.num_types) *
+      static_cast<std::size_t>(protocol.num_types);
+  require(model_view.cutoff_radial_pair != nullptr &&
+              model_view.cutoff_radial_pair_count >= type_pair_count,
+          "model radial pair cutoff buffer is too small");
+  require(model_view.cutoff_angular_pair != nullptr &&
+              model_view.cutoff_angular_pair_count >= type_pair_count,
+          "model angular pair cutoff buffer is too small");
   require(workspace_view.types != nullptr, "workspace missing atom types");
   require(workspace_view.positions_soa3 != nullptr, "workspace missing positions");
   require(workspace_view.nn_radial != nullptr, "workspace missing radial counts");
@@ -951,8 +963,8 @@ void build_descriptor_core_from_positions_on_device(
           protocol.body_channels.has_q_233 ? 1 : 0,
           protocol.body_channels.has_q_134 ? 1 : 0,
           protocol.body_channels.abc_count(),
-          static_cast<float>(protocol.cutoff_radial),
-          static_cast<float>(protocol.cutoff_angular),
+          model_view.cutoff_radial_pair,
+          model_view.cutoff_angular_pair,
           box,
           workspace_view.atom_to_structure,
           workspace_view.boxes_row_major9,

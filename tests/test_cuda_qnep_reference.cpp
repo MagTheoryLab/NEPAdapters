@@ -1,4 +1,5 @@
 #include "nep_adapters/api.h"
+#include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include "cpu_test_utils.hpp"
@@ -90,6 +91,62 @@ bool near_all(
   return true;
 }
 
+struct ChargePrediction {
+  double energy = 0.0;
+  std::vector<double> potential;
+  std::vector<double> force;
+  std::vector<double> total_virial;
+  std::vector<double> per_atom_virial;
+  std::vector<double> charge;
+  std::vector<double> bec;
+};
+
+ChargePrediction run_small_box_charge(NepaModel* model, std::int32_t type) {
+  std::int32_t atom_counts[] = {1};
+  std::int32_t atom_offsets[] = {0};
+  std::int32_t types[] = {type};
+  double positions[] = {0.2, 0.3, 0.4};
+  double box[] = {
+      6.0, 0.0, 0.0,
+      0.0, 6.0, 0.0,
+      0.0, 0.0, 6.0,
+  };
+  std::int32_t pbc[] = {1, 1, 1};
+  NepaStructureBatch batch{};
+  batch.num_structures = 1;
+  batch.total_atoms = 1;
+  batch.atom_counts = atom_counts;
+  batch.atom_offsets = atom_offsets;
+  batch.types = types;
+  batch.positions_aos3 = positions;
+  batch.boxes_row_major9 = box;
+  batch.pbc_flags3 = pbc;
+
+  ChargePrediction prediction;
+  prediction.potential.resize(1);
+  prediction.force.resize(3);
+  prediction.total_virial.resize(9);
+  prediction.per_atom_virial.resize(9);
+  prediction.charge.resize(1);
+  prediction.bec.resize(9);
+  NepaFindForceResult result{};
+  result.energy_per_structure = &prediction.energy;
+  result.potential_per_atom = prediction.potential.data();
+  result.forces_aos3 = prediction.force.data();
+  result.virials_row_major9 = prediction.total_virial.data();
+  result.virials_per_atom_row_major9 =
+      prediction.per_atom_virial.data();
+  result.charge_per_atom = prediction.charge.data();
+  result.bec_per_atom_row_major9 = prediction.bec.data();
+  const NepaStatus status = nepa_find_charge_batch(model, &batch, &result);
+  if (status != NEPA_STATUS_OK) {
+    std::cerr << "small-box qNEP failed status=" << status
+              << " error=" << nepa_last_error_message() << '\n';
+    std::exit(EXIT_FAILURE);
+  }
+  return prediction;
+}
+
 }  // namespace
 
 int main() {
@@ -97,7 +154,8 @@ int main() {
   const std::string model_path = data_dir + "/nep.txt";
   const std::string xyz_path = data_dir + "/xyz.in";
 
-  if (!nep_adapters::register_cuda_engine()) {
+  if (!nep_adapters::register_cpu_engine() ||
+      !nep_adapters::register_cuda_engine()) {
     return EXIT_FAILURE;
   }
 
@@ -192,6 +250,67 @@ int main() {
       3.0e-5,
       "qNEP per-atom virial",
       9);
-  return force_ok && virial_ok && per_atom_virial_ok ? EXIT_SUCCESS
-                                                     : EXIT_FAILURE;
+
+  NepaModel* cpu_small_model = nullptr;
+  NepaModel* cuda_small_model = nullptr;
+  if (nepa_load_model(
+          "cpu",
+          model_path.c_str(),
+          &cpu_small_model) != NEPA_STATUS_OK ||
+      nepa_load_model(
+          "cuda",
+          model_path.c_str(),
+          &cuda_small_model) != NEPA_STATUS_OK ||
+      cpu_small_model == nullptr || cuda_small_model == nullptr) {
+    nepa_free_model(cpu_small_model);
+    nepa_free_model(cuda_small_model);
+    return EXIT_FAILURE;
+  }
+  const ChargePrediction cpu_small =
+      run_small_box_charge(cpu_small_model, frame.types.front());
+  const ChargePrediction cuda_small =
+      run_small_box_charge(cuda_small_model, frame.types.front());
+  nepa_free_model(cpu_small_model);
+  nepa_free_model(cuda_small_model);
+  const bool small_box_ok =
+      std::abs(cpu_small.energy - cuda_small.energy) < 2.0e-5 &&
+      near_all(
+          cuda_small.potential,
+          cpu_small.potential,
+          2.0e-5,
+          "small-box qNEP potential",
+          1) &&
+      near_all(
+          cuda_small.force,
+          cpu_small.force,
+          2.0e-5,
+          "small-box qNEP force",
+          3) &&
+      near_all(
+          cuda_small.total_virial,
+          cpu_small.total_virial,
+          1.0e-4,
+          "small-box qNEP virial",
+          9) &&
+      near_all(
+          cuda_small.per_atom_virial,
+          cpu_small.per_atom_virial,
+          1.0e-4,
+          "small-box qNEP per-atom virial",
+          9) &&
+      near_all(
+          cuda_small.charge,
+          cpu_small.charge,
+          2.0e-5,
+          "small-box qNEP charge",
+          1) &&
+      near_all(
+          cuda_small.bec,
+          cpu_small.bec,
+          1.0e-4,
+          "small-box qNEP BEC",
+          9);
+  return force_ok && virial_ok && per_atom_virial_ok && small_box_ok
+             ? EXIT_SUCCESS
+             : EXIT_FAILURE;
 }

@@ -132,13 +132,20 @@ void parse_zbl(
     throw std::runtime_error("expected zbl line");
   }
   if (tokens.size() == 4) {
-    throw UnsupportedModelProtocol(
-        "CUDA backend does not support typewise ZBL cutoffs");
+    protocol.typewise_cutoff_zbl_factor = parse_double(tokens[3]);
+    if (protocol.typewise_cutoff_zbl_factor <= 0.0) {
+      throw std::runtime_error("typewise ZBL cutoff factor must be positive");
+    }
+    protocol.use_typewise_cutoff_zbl = true;
   }
 
   protocol.zbl_inner = parse_double(tokens[1]);
   protocol.zbl_outer = parse_double(tokens[2]);
   protocol.flexible_zbl = (protocol.zbl_inner == 0.0 && protocol.zbl_outer == 0.0);
+  if (protocol.flexible_zbl && protocol.use_typewise_cutoff_zbl) {
+    throw std::runtime_error(
+        "flexible ZBL does not accept a typewise cutoff factor");
+  }
   if (!protocol.flexible_zbl &&
       (protocol.zbl_inner < 0.0 ||
        protocol.zbl_outer <= protocol.zbl_inner)) {
@@ -164,19 +171,51 @@ void parse_cutoff(
   if (!uniform_cutoff && !per_type_cutoff) {
     throw std::runtime_error("invalid cutoff line");
   }
-  if (per_type_cutoff) {
-    throw UnsupportedModelProtocol(
-        "CUDA backend does not support type-dependent radial/angular cutoffs");
+  protocol.cutoff_radial_by_type.resize(
+      static_cast<std::size_t>(protocol.num_types));
+  protocol.cutoff_angular_by_type.resize(
+      static_cast<std::size_t>(protocol.num_types));
+  if (uniform_cutoff) {
+    const double radial = parse_double(tokens[1]);
+    const double angular = parse_double(tokens[2]);
+    std::fill(
+        protocol.cutoff_radial_by_type.begin(),
+        protocol.cutoff_radial_by_type.end(),
+        radial);
+    std::fill(
+        protocol.cutoff_angular_by_type.begin(),
+        protocol.cutoff_angular_by_type.end(),
+        angular);
+  } else {
+    protocol.use_typewise_cutoff = true;
+    for (int type = 0; type < protocol.num_types; ++type) {
+      protocol.cutoff_radial_by_type[static_cast<std::size_t>(type)] =
+          parse_double(tokens[static_cast<std::size_t>(1 + 2 * type)]);
+      protocol.cutoff_angular_by_type[static_cast<std::size_t>(type)] =
+          parse_double(tokens[static_cast<std::size_t>(2 + 2 * type)]);
+    }
   }
-
-  protocol.cutoff_radial = parse_double(tokens[1]);
-  protocol.cutoff_neighbor = protocol.cutoff_radial;
-  protocol.cutoff_angular = parse_double(tokens[2]);
-  protocol.max_neighbors_radial = parse_int(tokens[3]);
-  protocol.max_neighbors_angular = parse_int(tokens[4]);
-  if (protocol.cutoff_radial <= 0.0 || protocol.cutoff_radial > 100.0 ||
-      protocol.cutoff_angular <= 0.0 || protocol.cutoff_angular > 100.0) {
-    throw std::runtime_error("cutoffs must be within (0, 100]");
+  protocol.cutoff_radial = *std::max_element(
+      protocol.cutoff_radial_by_type.begin(),
+      protocol.cutoff_radial_by_type.end());
+  protocol.cutoff_neighbor =
+      std::max(protocol.cutoff_radial, protocol.zbl_outer);
+  protocol.cutoff_angular = *std::max_element(
+      protocol.cutoff_angular_by_type.begin(),
+      protocol.cutoff_angular_by_type.end());
+  protocol.max_neighbors_radial =
+      parse_int(tokens[tokens.size() - 2]);
+  protocol.max_neighbors_angular =
+      parse_int(tokens[tokens.size() - 1]);
+  for (int type = 0; type < protocol.num_types; ++type) {
+    const double radial =
+        protocol.cutoff_radial_by_type[static_cast<std::size_t>(type)];
+    const double angular =
+        protocol.cutoff_angular_by_type[static_cast<std::size_t>(type)];
+    if (radial <= 0.0 || radial > 100.0 ||
+        angular <= 0.0 || angular > 100.0) {
+      throw std::runtime_error("cutoffs must be within (0, 100]");
+    }
   }
   if (protocol.max_neighbors_radial <= 0 ||
       protocol.max_neighbors_angular <= 0) {
@@ -265,9 +304,15 @@ void parse_ann(
   if (protocol.hidden_neurons <= 0 || protocol.hidden_neurons > 120) {
     throw std::runtime_error("first ANN hidden layer must be within 1..120");
   }
-  if (parse_int(tokens[2]) != 0) {
+  protocol.hidden_neurons2 = parse_int(tokens[2]);
+  if (protocol.hidden_neurons2 < 0 || protocol.hidden_neurons2 > 120) {
+    throw std::runtime_error("second ANN hidden layer must be within 0..120");
+  }
+  if (protocol.hidden_neurons2 > 0 &&
+      (protocol.version != 4 || protocol.charge_mode != 0 ||
+       protocol.spin_mode != 0)) {
     throw UnsupportedModelProtocol(
-        "CUDA backend does not support two-hidden-layer ANN models");
+        "two-hidden-layer ANN is supported only for ordinary NEP4 models");
   }
 }
 
@@ -343,8 +388,9 @@ void parse_spin_header_line(
           "spin_basis_size requires radial and reserved angular values");
     }
     protocol.spin_basis_size = parse_int(tokens[1]);
-    const int angular = parse_int(tokens[2]);
-    if (protocol.spin_basis_size < 0 || angular < 0) {
+    protocol.spin_basis_size_angular = parse_int(tokens[2]);
+    if (protocol.spin_basis_size < 0 ||
+        protocol.spin_basis_size_angular < 0) {
       throw std::runtime_error("spin_basis_size values must be non-negative");
     }
   } else if (tokens[0] == "spin_l_max") {
@@ -355,8 +401,9 @@ void parse_spin_header_line(
     protocol.spin_l_max = parse_int(tokens[1]);
     const int l_max_4body = parse_int(tokens[2]);
     const int l_max_5body = parse_int(tokens[3]);
-    if (l_max_4body < 0 || l_max_5body < 0) {
-      throw std::runtime_error("spin_l_max values must be non-negative");
+    if (l_max_4body != 0 || l_max_5body != 0) {
+      throw std::runtime_error(
+          "reserved spin_l_max values must be zero for Spin Lite");
     }
   } else if (tokens[0] == "spin_cutoff") {
     if (tokens.size() != 3) {
@@ -409,9 +456,10 @@ void parse_spin_header_line(
     if (tokens.size() != 3) {
       throw std::runtime_error("spin_n_max requires radial and angular values");
     }
-    const int radial = parse_int(tokens[1]);
-    const int angular = parse_int(tokens[2]);
-    if (radial < 0 || angular < 0) {
+    protocol.spin_n_max_radial = parse_int(tokens[1]);
+    protocol.spin_n_max_angular = parse_int(tokens[2]);
+    if (protocol.spin_n_max_radial < 0 ||
+        protocol.spin_n_max_angular < 0) {
       throw std::runtime_error("spin_n_max values must be non-negative");
     }
     return;
@@ -461,12 +509,25 @@ void finalize_counts(ModelProtocol& protocol) {
       protocol.n_max_radial + 1 +
       (protocol.n_max_angular + 1) * protocol.body_channels.channel_count();
   if (protocol.spin_mode) {
+    if (protocol.use_typewise_cutoff) {
+      throw UnsupportedModelProtocol(
+          "Spin Lite does not support type-dependent structural cutoffs");
+    }
     if (protocol.spin_compress <= 0 || protocol.spin_l_max < 0 ||
         protocol.spin_l_max > 4) {
       throw std::runtime_error("invalid spin settings");
     }
     if (protocol.spin_basis_size + 1 < protocol.spin_compress) {
       throw std::runtime_error("spin_basis_size must cover spin_compress");
+    }
+    if (protocol.spin_basis_size > 8) {
+      throw std::runtime_error(
+          "Spin Lite radial basis size must not exceed 8");
+    }
+    if (protocol.spin_n_max_radial > protocol.spin_basis_size ||
+        protocol.spin_n_max_angular > protocol.spin_basis_size_angular) {
+      throw std::runtime_error(
+          "spin_n_max values must not exceed spin_basis_size values");
     }
     if (protocol.spin_cutoff_radial <= 0.0) {
       throw std::runtime_error("spin_mode block is missing spin_cutoff");
@@ -500,8 +561,13 @@ void finalize_counts(ModelProtocol& protocol) {
 
   const std::size_t dim = static_cast<std::size_t>(protocol.descriptor_dim);
   const std::size_t hidden = static_cast<std::size_t>(protocol.hidden_neurons);
+  const std::size_t hidden2 =
+      static_cast<std::size_t>(protocol.hidden_neurons2);
   const std::size_t types = static_cast<std::size_t>(protocol.num_types);
-  if (protocol.version == 4) {
+  if (hidden2 > 0) {
+    protocol.ann_parameter_count =
+        ((dim + 1) * hidden + (hidden + 2) * hidden2) * types + 1;
+  } else if (protocol.version == 4) {
     protocol.ann_parameter_count = (dim + 2) * hidden * types + 1;
   } else {
     protocol.ann_parameter_count = ((dim + 2) * hidden + 1) * types + 1;
@@ -624,6 +690,22 @@ ParsedModelFile parse_model_file(const std::string& model_path) {
         static_cast<std::size_t>(parsed.protocol.num_types + 1) / 2;
     parsed.flexible_zbl_parameters =
         read_scalar_lines(input, 10 * type_pairs, "flexible zbl parameters");
+    double flexible_outer_max = 0.0;
+    for (std::size_t pair = 0; pair < type_pairs; ++pair) {
+      const double inner =
+          parsed.flexible_zbl_parameters[10 * pair];
+      const double outer =
+          parsed.flexible_zbl_parameters[10 * pair + 1];
+      if (inner < 0.0 || outer <= inner) {
+        throw std::runtime_error("invalid flexible ZBL cutoff range");
+      }
+      flexible_outer_max = std::max(flexible_outer_max, outer);
+    }
+    parsed.protocol.zbl_outer = flexible_outer_max;
+    parsed.protocol.cutoff_neighbor =
+        std::max(parsed.protocol.cutoff_neighbor, flexible_outer_max);
+    parsed.protocol.cutoff_max =
+        std::max(parsed.protocol.cutoff_max, flexible_outer_max);
   }
 
   return parsed;

@@ -257,6 +257,12 @@ int main() {
       summary.angular_coefficients_center_type_major_bytes !=
           host.angular_coefficients_center_type_major.size() * sizeof(float) ||
       summary.q_scaler_bytes != host.q_scaler.size() * sizeof(float) ||
+      summary.cutoff_radial_pair_bytes !=
+          host.cutoff_radial_pair.size() * sizeof(float) ||
+      summary.cutoff_angular_pair_bytes !=
+          host.cutoff_angular_pair.size() * sizeof(float) ||
+      summary.zbl_parameters_pair_bytes !=
+          host.zbl_parameters_pair.size() * sizeof(float) ||
       summary.spin_baseline_bytes !=
           host.spin_baseline.size() * sizeof(double) ||
       summary.atomic_numbers_bytes != host.atomic_numbers.size() * sizeof(int) ||
@@ -265,7 +271,9 @@ int main() {
            host.descriptor_coefficients.size() +
            host.descriptor_coefficients_type_pair_major.size() +
            host.angular_coefficients_center_type_major.size() +
-           host.q_scaler.size()) *
+           host.q_scaler.size() + host.cutoff_radial_pair.size() +
+           host.cutoff_angular_pair.size() +
+           host.zbl_parameters_pair.size()) *
                   sizeof(float) +
               host.spin_baseline.size() * sizeof(double) +
               host.atomic_numbers.size() * sizeof(int)) {
@@ -287,6 +295,12 @@ int main() {
           device.view().angular_coefficients_center_type_major,
           host.angular_coefficients_center_type_major) ||
       !copy_matches(device.view().q_scaler, host.q_scaler) ||
+      !copy_matches(
+          device.view().cutoff_radial_pair, host.cutoff_radial_pair) ||
+      !copy_matches(
+          device.view().cutoff_angular_pair, host.cutoff_angular_pair) ||
+      !copy_matches(
+          device.view().zbl_parameters_pair, host.zbl_parameters_pair) ||
       copy_ints(device.view().atomic_numbers, host.atomic_numbers.size()) !=
           host.atomic_numbers) {
     std::fprintf(stderr, "device model upload copy contract failed\n");

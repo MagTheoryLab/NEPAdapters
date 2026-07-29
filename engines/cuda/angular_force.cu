@@ -1244,7 +1244,7 @@ __global__ void accumulate_angular_forces_pull_tile(
     int has_q_233,
     int has_q_134,
     int abc_count,
-    float cutoff_angular,
+    const float* __restrict__ cutoff_angular_pair,
     const int* __restrict__ types,
     const int* __restrict__ scheduled_atoms,
     const int* __restrict__ schedule_active_type_counts,
@@ -1414,7 +1414,6 @@ __global__ void accumulate_angular_forces_pull_tile(
   const int angular_basis_count = NCount * basis_count;
   const float* center_coefficients = angular_coefficients_center_type_major +
       type1 * angular_basis_count * num_types;
-  const float rcinv = 1.0f / cutoff_angular;
   float center_fx = 0.0f;
   float center_fy = 0.0f;
   float center_fz = 0.0f;
@@ -1449,13 +1448,16 @@ __global__ void accumulate_angular_forces_pull_tile(
         unit[2] = z12 * rinv;
 
         const int type2 = types[neighbor];
+        const float cutoff_angular =
+            cutoff_angular_pair[type1 * num_types + type2];
+        const float cutoff_rcinv = 1.0f / cutoff_angular;
         if (use_center_grouping) {
           const CenterMajorAngularCoefficients coefficients{
               center_coefficients, num_types, type2};
           evaluate_angular_radial_response<NCount>(
               basis_count,
               cutoff_angular,
-              rcinv,
+              cutoff_rcinv,
               r,
               coefficients,
               gn,
@@ -1468,7 +1470,7 @@ __global__ void accumulate_angular_forces_pull_tile(
           evaluate_angular_radial_response<NCount>(
               basis_count,
               cutoff_angular,
-              rcinv,
+              cutoff_rcinv,
               r,
               coefficients,
               gn,
@@ -1705,7 +1707,7 @@ void launch_angular_pull_tile(
           protocol.body_channels.has_q_233 ? 1 : 0,
           protocol.body_channels.has_q_134 ? 1 : 0,
           protocol.body_channels.abc_count(),
-          static_cast<float>(protocol.cutoff_angular),
+          model_view.cutoff_angular_pair,
           view.types,
           protocol.num_types > 1 ? view.type_scheduled_atoms : nullptr,
           protocol.num_types > 1
@@ -1864,6 +1866,12 @@ void validate_angular_force_inputs(
           "model missing type-pair-major descriptor coefficients");
   require(model_view.angular_coefficients_center_type_major != nullptr,
           "model missing center-type-major angular coefficients");
+  const std::size_t type_pair_count =
+      static_cast<std::size_t>(protocol.num_types) *
+      static_cast<std::size_t>(protocol.num_types);
+  require(model_view.cutoff_angular_pair != nullptr &&
+              model_view.cutoff_angular_pair_count >= type_pair_count,
+          "model angular pair cutoff buffer is too small");
   const std::size_t radial_coefficient_count =
       static_cast<std::size_t>(protocol.num_types) * protocol.num_types *
       static_cast<std::size_t>(protocol.n_max_radial + 1) *

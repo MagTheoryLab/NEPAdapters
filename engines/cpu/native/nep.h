@@ -40,6 +40,8 @@ public:
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
     int version = 4;
     double rc_radial_max = 0.0;
+    double rc_neighbor_max = 0.0;
+    double zbl_rc_outer_max = 0.0;
     double rc_angular_max = 0.0;
     double rc_radial[94];
     double rc_angular[94];
@@ -78,11 +80,14 @@ public:
   struct ANN {
     int dim = 0;
     int num_neurons1 = 0;
+    int num_neurons2 = 0;
     int num_para = 0;
     int num_para_ann = 0;
     const double* w0[94];
     const double* b0[94];
     const double* w1[94];
+    const double* b1_hidden[94];
+    const double* w2[94];
     const double* b1;
     const double* c;
     const double* c_spin = nullptr;

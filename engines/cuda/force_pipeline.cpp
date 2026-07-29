@@ -119,12 +119,17 @@ void execute_force_pipeline(
       virial_target == VirialTarget::center_and_neighbor_float_sink;
   const bool zbl_outputs =
       request.store_potential || accumulates_virial(virial_target);
+  const bool can_fuse_zbl =
+      protocol.has_zbl &&
+      !protocol.flexible_zbl &&
+      !protocol.use_typewise_cutoff_zbl &&
+      protocol.zbl_outer <= protocol.cutoff_radial;
   const bool fuse_external_zbl =
       request.topology == ForceNeighborTopology::external_full &&
-      protocol.has_zbl;
+      can_fuse_zbl;
   const bool fuse_radial_zbl =
       request.topology == ForceNeighborTopology::single_box_symmetric &&
-      protocol.has_zbl && !zbl_outputs;
+      can_fuse_zbl && !zbl_outputs;
   if (fuse_radial_zbl) {
     accumulate_radial_and_zbl_forces_on_device(
         protocol, atom_count, box, model, workspace);
@@ -151,9 +156,11 @@ void execute_force_pipeline(
             virial_target,
             true);
         break;
-      case ForceNeighborTopology::external_full:
+      case ForceNeighborTopology::external_full: {
+        ModelProtocol radial_protocol = protocol;
+        radial_protocol.has_zbl = fuse_external_zbl;
         accumulate_lammps_radial_forces_on_device(
-            protocol,
+            radial_protocol,
             atom_count,
             box,
             model,
@@ -161,6 +168,7 @@ void execute_force_pipeline(
             virial_target,
             request.store_potential);
         break;
+      }
     }
   }
   timer.split(measured.radial_force_ms);
