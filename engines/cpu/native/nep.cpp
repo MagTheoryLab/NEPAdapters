@@ -9095,16 +9095,25 @@ void NEP::allocate_memory(const int N)
 {
   const std::size_t capacity =
     static_cast<std::size_t>(batch_neighbor_capacity);
+  const std::size_t atom_count = static_cast<std::size_t>(N);
+  if (capacity == 0 ||
+      atom_count > std::numeric_limits<std::size_t>::max() / capacity) {
+    throw std::overflow_error("batch neighbor workspace size overflow");
+  }
+  const std::size_t edge_capacity = atom_count * capacity;
+  if (edge_capacity > std::numeric_limits<std::size_t>::max() / 6) {
+    throw std::overflow_error("batch displacement workspace size overflow");
+  }
   if (num_atoms < N || NN_radial.size() < static_cast<std::size_t>(N) ||
-      NL_radial.size() < static_cast<std::size_t>(N) * capacity ||
+      NL_radial.size() < edge_capacity ||
       NN_angular.size() < static_cast<std::size_t>(N) ||
-      NL_angular.size() < static_cast<std::size_t>(N) * capacity ||
-      r12.size() < static_cast<std::size_t>(N) * capacity * 6) {
+      NL_angular.size() < edge_capacity ||
+      r12.size() < edge_capacity * 6) {
     NN_radial.resize(N);
-    NL_radial.resize(static_cast<std::size_t>(N) * capacity);
+    NL_radial.resize(edge_capacity);
     NN_angular.resize(N);
-    NL_angular.resize(static_cast<std::size_t>(N) * capacity);
-    r12.resize(static_cast<std::size_t>(N) * capacity * 6);
+    NL_angular.resize(edge_capacity);
+    r12.resize(edge_capacity * 6);
     Fp.resize(N * annmb.dim);
     sum_fxyz.resize(N * (paramb.n_max_angular + 1) * NUM_OF_ABC);
     if (paramb.charge_mode > 0) {
@@ -9115,6 +9124,26 @@ void NEP::allocate_memory(const int N)
     dftd3.dc6_sum.resize(N);
     dftd3.dc8_sum.resize(N);
     num_atoms = N;
+  }
+}
+
+std::size_t NEP::build_batch_neighbor_list(
+  const int N,
+  const std::vector<double>& box,
+  const std::vector<double>& position)
+{
+  allocate_memory(N);
+  while (true) {
+    const int required_capacity = find_neighbor_list_small_box(
+      paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+      box, position, num_cells, ebox, NN_radial, NL_radial,
+      NN_angular, NL_angular, r12, true);
+    if (required_capacity <= batch_neighbor_capacity) {
+      return static_cast<std::size_t>(N) *
+        static_cast<std::size_t>(batch_neighbor_capacity);
+    }
+    batch_neighbor_capacity = required_capacity;
+    allocate_memory(N);
   }
 }
 
@@ -9174,7 +9203,6 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9221,10 +9249,8 @@ void NEP::compute(
     phase_setup = nep_phase_elapsed(phase_mark);
   }
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity, box, position,
-    num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
   }
@@ -9342,8 +9368,6 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
   if (!paramb.spin_mode) {
     throw std::runtime_error("spin descriptor requested for a non-spin model");
   }
@@ -9353,10 +9377,8 @@ void NEP::find_descriptor(
   }
 
   allocate_memory(N);
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox,
-    NN_radial, NL_radial, NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -9411,8 +9433,6 @@ void NEP::compute(
   double phase_spin_gradient = 0.0;
   SpinPhaseBreakdown spin_phase;
 
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
   allocate_memory(N);
   std::fill(force.begin(), force.end(), 0.0);
   std::fill(virial.begin(), virial.end(), 0.0);
@@ -9425,10 +9445,8 @@ void NEP::compute(
     phase_setup = nep_phase_elapsed(phase_mark);
   }
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox,
-    NN_radial, NL_radial, NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
   }
@@ -9563,8 +9581,6 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9609,10 +9625,8 @@ void NEP::compute(
     bec[n] = 0.0;
   }
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 
   find_descriptor_small_box(
     true, false, paramb, annmb, N, NN_radial.data(), NL_radial.data(),
@@ -9826,8 +9840,6 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9840,10 +9852,8 @@ void NEP::find_descriptor(
 
   allocate_memory(N);
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -9877,8 +9887,6 @@ void NEP::find_latent_space(
   std::vector<double>& latent_space)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9891,10 +9899,8 @@ void NEP::find_latent_space(
 
   allocate_memory(N);
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -9919,8 +9925,6 @@ void NEP::find_B_projection(
   std::vector<double>& B_projection)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9932,10 +9936,8 @@ void NEP::find_B_projection(
   }
 
   allocate_memory(N);
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -9965,8 +9967,6 @@ void NEP::find_dipole(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9984,10 +9984,8 @@ void NEP::find_dipole(
     virial[n] = 0.0;
   }
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
@@ -10041,8 +10039,6 @@ void NEP::find_polarizability(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 =
-    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -10060,10 +10056,8 @@ void NEP::find_polarizability(
     virial[n] = 0.0;
   }
 
-  find_neighbor_list_small_box(
-    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
-    box, position, num_cells, ebox, NN_radial, NL_radial,
-    NN_angular, NL_angular, r12);
+  const std::size_t size_x12 =
+    build_batch_neighbor_list(static_cast<int>(N), box, position);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
     N, NN_radial.data(), NL_radial.data(), NN_angular.data(), NL_angular.data(), type.data());
