@@ -393,6 +393,10 @@ public:
   int lammps_touched_stamp = 0;
   void update_potential(double* parameters, ANN& ann);
   void allocate_memory(const int N);
+  std::size_t build_batch_neighbor_list(
+    const int N,
+    const std::vector<double>& box,
+    const std::vector<double>& position);
   int build_dftd3_neighbor_list(
     const int N,
     const std::vector<double>& box,

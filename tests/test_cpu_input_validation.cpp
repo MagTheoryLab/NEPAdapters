@@ -2,6 +2,8 @@
 #include "nep_adapters/api.h"
 #include "nep_adapters/engines/cpu.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -15,7 +17,9 @@ namespace {
 
 NepaStatus find_force(
     NepaModel* model,
-    const NepaStructureBatch& batch) {
+    const NepaStructureBatch& batch,
+    std::vector<double>* energies_out = nullptr,
+    std::vector<double>* forces_out = nullptr) {
   std::vector<double> energies(
       static_cast<std::size_t>(batch.num_structures), 0.0);
   std::vector<double> forces(
@@ -23,7 +27,32 @@ NepaStatus find_force(
   NepaFindForceResult result{};
   result.energy_per_structure = energies.data();
   result.forces_aos3 = forces.data();
-  return nepa_find_force_batch(model, &batch, &result);
+  const NepaStatus status = nepa_find_force_batch(model, &batch, &result);
+  if (status == NEPA_STATUS_OK) {
+    if (energies_out != nullptr) {
+      *energies_out = energies;
+    }
+    if (forces_out != nullptr) {
+      *forces_out = forces;
+    }
+  }
+  return status;
+}
+
+double max_abs_diff(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return INFINITY;
+  }
+  double result = 0.0;
+  for (std::size_t index = 0; index < lhs.size(); ++index) {
+    if (!std::isfinite(lhs[index]) || !std::isfinite(rhs[index])) {
+      return INFINITY;
+    }
+    result = std::max(result, std::abs(lhs[index] - rhs[index]));
+  }
+  return result;
 }
 
 bool rejects_model_text(
@@ -131,9 +160,8 @@ int main() {
   batch.atom_offsets = gap_offsets;
   const NepaStatus gap_status = find_force(model, batch);
 
-  // A dense periodic cell exceeds the native neighbor capacity. The adapter
-  // must preserve the native exception text instead of returning a bare
-  // runtime-error status.
+  // A dense periodic cell exceeds the model-exported neighbor capacity.
+  // CPU batch must grow its workspace and preserve the resulting values.
   constexpr std::int32_t kDenseStructures = 2;
   constexpr std::int32_t kDenseAtomsPerStructure = 8;
   constexpr std::int32_t kDenseAtoms =
@@ -141,6 +169,20 @@ int main() {
   std::vector<std::int32_t> dense_types(kDenseAtoms, 0);
   std::vector<double> dense_positions(
       static_cast<std::size_t>(kDenseAtoms) * 3, 0.0);
+  for (std::int32_t structure = 0;
+       structure < kDenseStructures;
+       ++structure) {
+    for (std::int32_t atom = 0; atom < kDenseAtomsPerStructure; ++atom) {
+      const std::int32_t index =
+          structure * kDenseAtomsPerStructure + atom;
+      dense_positions[static_cast<std::size_t>(index) * 3] =
+          (atom & 1) == 0 ? 0.0 : 0.5;
+      dense_positions[static_cast<std::size_t>(index) * 3 + 1] =
+          (atom & 2) == 0 ? 0.0 : 0.5;
+      dense_positions[static_cast<std::size_t>(index) * 3 + 2] =
+          (atom & 4) == 0 ? 0.0 : 0.5;
+    }
+  }
   std::int32_t dense_counts[] = {
       kDenseAtomsPerStructure, kDenseAtomsPerStructure};
   std::int32_t dense_offsets[] = {0, kDenseAtomsPerStructure};
@@ -161,8 +203,11 @@ int main() {
   batch.positions_aos3 = dense_positions.data();
   batch.boxes_row_major9 = dense_boxes;
   batch.pbc_flags3 = dense_pbc;
-  const NepaStatus dense_status = find_force(model, batch);
-  const std::string dense_error = nepa_last_error_message();
+  std::vector<double> dense_energies;
+  std::vector<double> dense_forces;
+  const NepaStatus dense_status =
+      find_force(model, batch, &dense_energies, &dense_forces);
+  const NepaStatus dense_repeat_status = find_force(model, batch);
 
   nepa_free_model(model);
   const std::filesystem::path temp_dir =
@@ -172,9 +217,15 @@ int main() {
   NepaModel* expanded_model = nullptr;
   const NepaStatus expanded_load_status = nepa_load_model(
       "cpu", expanded_model_path.string().c_str(), &expanded_model);
+  std::vector<double> expanded_dense_energies;
+  std::vector<double> expanded_dense_forces;
   const NepaStatus expanded_dense_status =
       expanded_load_status == NEPA_STATUS_OK
-          ? find_force(expanded_model, batch)
+          ? find_force(
+              expanded_model,
+              batch,
+              &expanded_dense_energies,
+              &expanded_dense_forces)
           : expanded_load_status;
   nepa_free_model(expanded_model);
   std::filesystem::remove(expanded_model_path);
@@ -197,9 +248,11 @@ int main() {
       invalid_type_status != NEPA_STATUS_INVALID_ARGUMENT ||
       overlap_status != NEPA_STATUS_INVALID_ARGUMENT ||
       gap_status != NEPA_STATUS_INVALID_ARGUMENT ||
-      dense_status != NEPA_STATUS_RUNTIME_ERROR ||
-      dense_error.find("neighbor capacity exceeded") == std::string::npos ||
+      dense_status != NEPA_STATUS_OK ||
+      dense_repeat_status != NEPA_STATUS_OK ||
       expanded_dense_status != NEPA_STATUS_OK ||
+      max_abs_diff(dense_energies, expanded_dense_energies) > 1.0e-12 ||
+      max_abs_diff(dense_forces, expanded_dense_forces) > 1.0e-12 ||
       !oversized_model_rejected ||
       !truncated_spin_rejected ||
       !unknown_element_rejected) {
@@ -208,8 +261,12 @@ int main() {
               << " overlap=" << overlap_status
               << " gap=" << gap_status
               << " dense=" << dense_status
-              << " dense_error=" << dense_error
+              << " dense_repeat=" << dense_repeat_status
               << " expanded_dense=" << expanded_dense_status
+              << " dense_energy_diff="
+              << max_abs_diff(dense_energies, expanded_dense_energies)
+              << " dense_force_diff="
+              << max_abs_diff(dense_forces, expanded_dense_forces)
               << " oversized=" << oversized_model_rejected
               << " truncated_spin=" << truncated_spin_rejected
               << " unknown_element=" << unknown_element_rejected << "\n";
