@@ -13,17 +13,16 @@ CUDA 模型协议支持：
 
 普通结构描述符接受 `n_max_radial=0..12`、
 `n_max_angular=0..8`、`basis_size_radial=0..16`、
-`basis_size_angular=0..12`、`num_types=1..118`、单隐藏层
-`ANN=1..120`。结构
+`basis_size_angular=0..12`、`num_types=1..118`。普通 NEP4 支持一层或
+两层隐藏层；NEP5/qNEP 与 Spin Lite 保持各自现有 ANN 布局。结构
 `l_max_3body=0..8` 均可推理；其中 GPUMD 当前训练接口使用 `2..8`，
 `0/1` 仅为旧模型和 radial-only 模型保留。结构 angular descriptor
 总数不得超过 90。
 
 `l_max` 同时兼容旧的 `420/421` 编码、当前 0/1 flags，以及 GPUMD
 现阶段仍会输出的 `q222=2` 加 `q112/q123/q233/q134` 混合格式。
-按元素类型变化的 radial/angular cutoff、typewise ZBL cutoff、flexible
-ZBL 和双隐藏层 ANN 尚未实现；这些模型会明确返回 unsupported，不会把
-cutoff 合并后静默计算。
+支持按元素类型变化的 radial/angular cutoff、typewise ZBL cutoff 和
+flexible ZBL；候选邻居 cutoff 与结构描述符 cutoff 独立保存。
 
 CUDA 不接受 NEP3，返回 `NEPA_STATUS_UNSUPPORTED`，调用方不会被重定向到 CPU。
 
@@ -103,11 +102,15 @@ internal-neighbor builder 支持正交和 triclinic 全周期盒子。它在 fra
 
 支持的 angular channel 包括普通 3-body `L=1..8`，以及 `q222`、`q1111`、`q112`、`q123`、`q233` 和 `q134`。
 
-`ann_energy.cu` 处理打包后的 NEP4/NEP5 单隐藏层布局，写入每原子 `potential`，并把 descriptor derivative 放入 `fp`。
+`ann_energy.cu` 处理打包后的 NEP4/NEP5 ANN 布局，包括普通 NEP4
+双隐藏层，写入每原子 `potential`，并把 descriptor derivative 放入
+`fp`。
 
 `radial_force.cu` 完成 radial force。公共 `find_force_batch` 对正交和 triclinic 单结构 NEP4 执行完整 device pipeline：staging、internal cell-list、descriptor、ANN、force 和 host copyback。
 
-`zbl_force.cu` 实现 universal non-flexible ZBL。当 `zbl_outer <= cutoff_radial` 时复用 radial 邻居表，在 ANN backprop 后累加每原子 ZBL 势能、力和 virial，并通过有限差分门禁。Flexible ZBL 与 typewise ZBL cutoff 返回 `NEPA_STATUS_UNSUPPORTED`。
+`zbl_force.cu` 实现 universal、typewise cutoff 和 flexible ZBL。
+只有 universal ZBL 且 `zbl_outer <= cutoff_radial` 时才与 radial force
+融合；其他形状使用候选邻居表中的独立 ZBL kernel，并通过有限差分门禁。
 
 `angular_force.cu` 实现 angular force。公共门禁覆盖常规 `L=1..8` 和全部已支持 high-body channel，并使用有限差分检查 energy/force。direct batch 与其他路径复用同一 batched workspace。
 

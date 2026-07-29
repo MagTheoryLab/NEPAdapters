@@ -11,10 +11,12 @@
 #include "nep_adapters/virial_order.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -81,10 +83,10 @@ bool supports_cuda_force_protocol(
          protocol.charge_mode == 0 &&
          nep_adapters::cuda_backend::supports_cuda_spin_shape(protocol) &&
          (!protocol.has_zbl ||
-          (!protocol.flexible_zbl &&
-           protocol.zbl_inner >= 0.0 &&
-           protocol.zbl_outer > protocol.zbl_inner &&
-           protocol.zbl_outer <= protocol.cutoff_radial)) &&
+          (protocol.zbl_outer > 0.0 &&
+           (protocol.flexible_zbl ||
+            (protocol.zbl_inner >= 0.0 &&
+             protocol.zbl_outer > protocol.zbl_inner)))) &&
          body.l_max_3body <= 8;
 }
 
@@ -338,6 +340,309 @@ bool make_simulation_box(
          std::isfinite(box.cart_to_frac[8]);
 }
 
+struct ExpandedPeriodicBatch {
+  NepaStructureBatch batch{};
+  std::vector<std::int32_t> atom_counts;
+  std::vector<std::int32_t> atom_offsets;
+  std::vector<std::int32_t> types;
+  std::vector<double> positions;
+  std::vector<double> spins;
+  std::vector<double> boxes;
+  std::vector<std::int32_t> pbc;
+  std::vector<std::int32_t> original_atom;
+  std::vector<double> atom_weight;
+  std::vector<std::int32_t> replicas_per_structure;
+  bool expanded = false;
+};
+
+std::array<int, 3> periodic_replication_counts(
+    const double* box,
+    double cutoff) {
+  double inverse[9] = {};
+  if (!invert_row_major3(box, inverse)) {
+    throw std::invalid_argument("cannot expand a singular periodic box");
+  }
+  std::array<int, 3> counts = {1, 1, 1};
+  for (int axis = 0; axis < 3; ++axis) {
+    const double x = inverse[3 * axis + 0];
+    const double y = inverse[3 * axis + 1];
+    const double z = inverse[3 * axis + 2];
+    const double reciprocal_norm = std::sqrt(x * x + y * y + z * z);
+    const double required = 2.0 * cutoff * reciprocal_norm;
+    if (!std::isfinite(required) ||
+        required > static_cast<double>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument("periodic box expansion is too large");
+    }
+    counts[axis] = std::max(
+        1,
+        static_cast<int>(std::ceil(required - 1.0e-12)));
+  }
+  return counts;
+}
+
+ExpandedPeriodicBatch expand_small_periodic_batch(
+    const NepaStructureBatch& source,
+    double cutoff) {
+  ExpandedPeriodicBatch expanded;
+  std::vector<std::array<int, 3>> replication(
+      static_cast<std::size_t>(source.num_structures));
+  std::size_t expanded_atom_count = 0;
+
+  for (std::int32_t structure = 0;
+       structure < source.num_structures;
+       ++structure) {
+    if (source.pbc_flags3 == nullptr ||
+        source.pbc_flags3[3 * structure + 0] != 1 ||
+        source.pbc_flags3[3 * structure + 1] != 1 ||
+        source.pbc_flags3[3 * structure + 2] != 1) {
+      throw std::invalid_argument(
+          "CUDA batch evaluation requires three-dimensional periodic boxes");
+    }
+    const auto cells = periodic_replication_counts(
+        source.boxes_row_major9 + 9 * structure,
+        cutoff);
+    replication[static_cast<std::size_t>(structure)] = cells;
+    const std::int64_t replicas =
+        static_cast<std::int64_t>(cells[0]) * cells[1] * cells[2];
+    const std::int64_t structure_atoms =
+        replicas * source.atom_counts[structure];
+    if (replicas > std::numeric_limits<std::int32_t>::max() ||
+        structure_atoms > std::numeric_limits<std::int32_t>::max() ||
+        expanded_atom_count + static_cast<std::size_t>(structure_atoms) >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int32_t>::max())) {
+      throw std::invalid_argument("expanded periodic batch is too large");
+    }
+    expanded.expanded = expanded.expanded || replicas > 1;
+    expanded_atom_count += static_cast<std::size_t>(structure_atoms);
+  }
+  if (!expanded.expanded) {
+    return expanded;
+  }
+
+  expanded.atom_counts.reserve(source.num_structures);
+  expanded.atom_offsets.reserve(source.num_structures);
+  expanded.boxes.reserve(9 * static_cast<std::size_t>(source.num_structures));
+  expanded.pbc.reserve(3 * static_cast<std::size_t>(source.num_structures));
+  expanded.replicas_per_structure.reserve(source.num_structures);
+  expanded.types.reserve(expanded_atom_count);
+  expanded.positions.reserve(3 * expanded_atom_count);
+  if (source.spins_aos3 != nullptr) {
+    expanded.spins.reserve(3 * expanded_atom_count);
+  }
+  expanded.original_atom.reserve(expanded_atom_count);
+  expanded.atom_weight.reserve(expanded_atom_count);
+
+  std::size_t atom_offset = 0;
+  for (std::int32_t structure = 0;
+       structure < source.num_structures;
+       ++structure) {
+    const auto cells = replication[static_cast<std::size_t>(structure)];
+    const int replicas = cells[0] * cells[1] * cells[2];
+    const double weight = 1.0 / replicas;
+    expanded.replicas_per_structure.push_back(replicas);
+    expanded.atom_offsets.push_back(static_cast<std::int32_t>(atom_offset));
+    expanded.atom_counts.push_back(
+        source.atom_counts[structure] * replicas);
+
+    const double* box = source.boxes_row_major9 + 9 * structure;
+    const double ax = box[0];
+    const double ay = box[3];
+    const double az = box[6];
+    const double bx = box[1];
+    const double by = box[4];
+    const double bz = box[7];
+    const double cx = box[2];
+    const double cy = box[5];
+    const double cz = box[8];
+    expanded.boxes.insert(
+        expanded.boxes.end(),
+        {ax * cells[0], bx * cells[1], cx * cells[2],
+         ay * cells[0], by * cells[1], cy * cells[2],
+         az * cells[0], bz * cells[1], cz * cells[2]});
+    expanded.pbc.insert(expanded.pbc.end(), {1, 1, 1});
+
+    const int source_offset = source.atom_offsets[structure];
+    const int source_count = source.atom_counts[structure];
+    for (int ia = 0; ia < cells[0]; ++ia) {
+      for (int ib = 0; ib < cells[1]; ++ib) {
+        for (int ic = 0; ic < cells[2]; ++ic) {
+          const double tx = ia * ax + ib * bx + ic * cx;
+          const double ty = ia * ay + ib * by + ic * cy;
+          const double tz = ia * az + ib * bz + ic * cz;
+          for (int local = 0; local < source_count; ++local) {
+            const int atom = source_offset + local;
+            expanded.types.push_back(source.types[atom]);
+            expanded.positions.insert(
+                expanded.positions.end(),
+                {source.positions_aos3[3 * atom + 0] + tx,
+                 source.positions_aos3[3 * atom + 1] + ty,
+                 source.positions_aos3[3 * atom + 2] + tz});
+            if (source.spins_aos3 != nullptr) {
+              expanded.spins.insert(
+                  expanded.spins.end(),
+                  {source.spins_aos3[3 * atom + 0],
+                   source.spins_aos3[3 * atom + 1],
+                   source.spins_aos3[3 * atom + 2]});
+            }
+            expanded.original_atom.push_back(atom);
+            expanded.atom_weight.push_back(weight);
+          }
+        }
+      }
+    }
+    atom_offset +=
+        static_cast<std::size_t>(source_count) *
+        static_cast<std::size_t>(replicas);
+  }
+
+  expanded.batch.num_structures = source.num_structures;
+  expanded.batch.total_atoms = static_cast<std::int32_t>(expanded_atom_count);
+  expanded.batch.atom_counts = expanded.atom_counts.data();
+  expanded.batch.atom_offsets = expanded.atom_offsets.data();
+  expanded.batch.types = expanded.types.data();
+  expanded.batch.positions_aos3 = expanded.positions.data();
+  expanded.batch.spins_aos3 =
+      source.spins_aos3 == nullptr ? nullptr : expanded.spins.data();
+  expanded.batch.boxes_row_major9 = expanded.boxes.data();
+  expanded.batch.pbc_flags3 = expanded.pbc.data();
+  return expanded;
+}
+
+struct ExpandedForceResult {
+  ExpandedForceResult(
+      const ExpandedPeriodicBatch& expanded,
+      const NepaFindForceResult& requested)
+      : energy(expanded.batch.num_structures),
+        forces(3 * static_cast<std::size_t>(expanded.batch.total_atoms)) {
+    result.energy_per_structure = energy.data();
+    result.forces_aos3 = forces.data();
+    const std::size_t atoms =
+        static_cast<std::size_t>(expanded.batch.total_atoms);
+    const std::size_t structures =
+        static_cast<std::size_t>(expanded.batch.num_structures);
+    if (requested.potential_per_atom != nullptr) {
+      potential.resize(atoms);
+      result.potential_per_atom = potential.data();
+    }
+    if (requested.virials_row_major9 != nullptr) {
+      virials.resize(9 * structures);
+      result.virials_row_major9 = virials.data();
+    }
+    if (requested.virials_per_atom_row_major9 != nullptr) {
+      atom_virials.resize(9 * atoms);
+      result.virials_per_atom_row_major9 = atom_virials.data();
+    }
+    if (requested.charge_per_atom != nullptr) {
+      charge.resize(atoms);
+      result.charge_per_atom = charge.data();
+    }
+    if (requested.bec_per_atom_row_major9 != nullptr) {
+      bec.resize(9 * atoms);
+      result.bec_per_atom_row_major9 = bec.data();
+    }
+    if (requested.mforces_aos3 != nullptr) {
+      mforces.resize(3 * atoms);
+      result.mforces_aos3 = mforces.data();
+    }
+    if (requested.spin_transfer_per_atom_row_major9 != nullptr) {
+      spin_transfer.resize(9 * atoms);
+      result.spin_transfer_per_atom_row_major9 = spin_transfer.data();
+    }
+  }
+
+  NepaFindForceResult result{};
+  std::vector<double> energy;
+  std::vector<double> potential;
+  std::vector<double> forces;
+  std::vector<double> virials;
+  std::vector<double> atom_virials;
+  std::vector<double> charge;
+  std::vector<double> bec;
+  std::vector<double> mforces;
+  std::vector<double> spin_transfer;
+};
+
+void reduce_expanded_force_result(
+    const ExpandedPeriodicBatch& expanded,
+    const ExpandedForceResult& source,
+    NepaFindForceResult& target,
+    std::size_t original_atom_count) {
+  for (std::size_t structure = 0;
+       structure < expanded.replicas_per_structure.size();
+       ++structure) {
+    const double weight =
+        1.0 / expanded.replicas_per_structure[structure];
+    target.energy_per_structure[structure] =
+        source.energy[structure] * weight;
+    if (target.virials_row_major9 != nullptr) {
+      for (int component = 0; component < 9; ++component) {
+        target.virials_row_major9[9 * structure + component] =
+            source.virials[9 * structure + component] * weight;
+      }
+    }
+  }
+
+  std::fill(
+      target.forces_aos3,
+      target.forces_aos3 + 3 * original_atom_count,
+      0.0);
+  auto clear_if_requested = [original_atom_count](
+                                double* values,
+                                std::size_t components) {
+    if (values != nullptr) {
+      std::fill(
+          values,
+          values + components * original_atom_count,
+          0.0);
+    }
+  };
+  clear_if_requested(target.potential_per_atom, 1);
+  clear_if_requested(target.virials_per_atom_row_major9, 9);
+  clear_if_requested(target.charge_per_atom, 1);
+  clear_if_requested(target.bec_per_atom_row_major9, 9);
+  clear_if_requested(target.mforces_aos3, 3);
+  clear_if_requested(target.spin_transfer_per_atom_row_major9, 9);
+
+  for (std::size_t atom = 0;
+       atom < expanded.original_atom.size();
+       ++atom) {
+    const std::size_t original =
+        static_cast<std::size_t>(expanded.original_atom[atom]);
+    const double weight = expanded.atom_weight[atom];
+    for (int component = 0; component < 3; ++component) {
+      target.forces_aos3[3 * original + component] +=
+          source.forces[3 * atom + component] * weight;
+      if (target.mforces_aos3 != nullptr) {
+        target.mforces_aos3[3 * original + component] +=
+            source.mforces[3 * atom + component] * weight;
+      }
+    }
+    if (target.potential_per_atom != nullptr) {
+      target.potential_per_atom[original] +=
+          source.potential[atom] * weight;
+    }
+    if (target.charge_per_atom != nullptr) {
+      target.charge_per_atom[original] += source.charge[atom] * weight;
+    }
+    for (int component = 0; component < 9; ++component) {
+      if (target.virials_per_atom_row_major9 != nullptr) {
+        target.virials_per_atom_row_major9[9 * original + component] +=
+            source.atom_virials[9 * atom + component] * weight;
+      }
+      if (target.bec_per_atom_row_major9 != nullptr) {
+        target.bec_per_atom_row_major9[9 * original + component] +=
+            source.bec[9 * atom + component] * weight;
+      }
+      if (target.spin_transfer_per_atom_row_major9 != nullptr) {
+        target.spin_transfer_per_atom_row_major9[
+            9 * original + component] +=
+            source.spin_transfer[9 * atom + component] * weight;
+      }
+    }
+  }
+}
+
 std::vector<double> copy_device_doubles(const double* device, std::size_t count) {
   std::vector<double> host(count, 0.0);
   const cudaError_t status = cudaMemcpy(
@@ -576,7 +881,8 @@ class CudaModel : public nep_adapters::Model {
 
   NepaStatus find_force_batch_impl(
       const NepaStructureBatch& batch,
-      NepaFindForceResult& result) {
+      NepaFindForceResult& result,
+      bool allow_periodic_expansion = true) {
     if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
@@ -604,6 +910,26 @@ class CudaModel : public nep_adapters::Model {
       if (result.spin_transfer_per_atom_row_major9 != nullptr &&
           protocol_.spin_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
+      }
+      if (allow_periodic_expansion) {
+        ExpandedPeriodicBatch expanded =
+            expand_small_periodic_batch(batch, protocol_.cutoff_max);
+        if (expanded.expanded) {
+          ExpandedForceResult expanded_result(expanded, result);
+          const NepaStatus status = find_force_batch_impl(
+              expanded.batch,
+              expanded_result.result,
+              false);
+          if (status != NEPA_STATUS_OK) {
+            return status;
+          }
+          reduce_expanded_force_result(
+              expanded,
+              expanded_result,
+              result,
+              static_cast<std::size_t>(batch.total_atoms));
+          return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+        }
       }
       const bool multi_box_execution =
           protocol_.charge_mode == 0 && protocol_.spin_mode == 0;
@@ -822,6 +1148,43 @@ class CudaModel : public nep_adapters::Model {
     try {
       if (!supports_cuda_descriptor_protocol(protocol_)) {
         return NEPA_STATUS_UNSUPPORTED;
+      }
+      ExpandedPeriodicBatch expanded =
+          expand_small_periodic_batch(batch, protocol_.cutoff_max);
+      if (expanded.expanded) {
+        std::vector<double> expanded_descriptors(
+            static_cast<std::size_t>(expanded.batch.total_atoms) *
+            static_cast<std::size_t>(protocol_.descriptor_dim));
+        NepaFindDescriptorResult expanded_result{};
+        expanded_result.descriptors = expanded_descriptors.data();
+        const NepaStatus status =
+            find_descriptors(expanded.batch, expanded_result);
+        if (status != NEPA_STATUS_OK) {
+          return status;
+        }
+        std::fill(
+            result.descriptors,
+            result.descriptors +
+                static_cast<std::size_t>(batch.total_atoms) *
+                    static_cast<std::size_t>(protocol_.descriptor_dim),
+            0.0);
+        for (std::size_t atom = 0;
+             atom < expanded.original_atom.size();
+             ++atom) {
+          const std::size_t original =
+              static_cast<std::size_t>(expanded.original_atom[atom]);
+          const double weight = expanded.atom_weight[atom];
+          for (int dim = 0; dim < protocol_.descriptor_dim; ++dim) {
+            result.descriptors[
+                original * static_cast<std::size_t>(protocol_.descriptor_dim) +
+                static_cast<std::size_t>(dim)] +=
+                expanded_descriptors[
+                    atom * static_cast<std::size_t>(protocol_.descriptor_dim) +
+                    static_cast<std::size_t>(dim)] *
+                weight;
+          }
+        }
+        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
       }
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
           batch_workspace(max_structure_atom_count(batch), 1, false);

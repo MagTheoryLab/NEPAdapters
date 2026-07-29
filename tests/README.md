@@ -40,7 +40,9 @@ CPU 正确性同时使用固定 golden label 和独立编译的严格 FP64 oracl
 
 项目不保留第二套 CPU backend 作为 runtime 或测试 fallback。
 
-`tests/fixtures/nep_cpu_reference/` 保存 NEP_CPU 的 250 原子普通 NEP3 和 qNEP 固定 case。CPU 直接核对力、每原子 raw9 virial 和 descriptor，不要求配置另一个仓库。CUDA 复用 qNEP case；NEP3 测试只锁定明确的 unsupported 状态。
+`tests/fixtures/nep_cpu_reference/` 保存 250 原子的普通 NEP3 历史模型和
+qNEP 固定 case。CPU/CUDA 都对 NEP3 锁定明确的 unsupported 状态；
+qNEP fixture 用于核对力、每原子 raw9 virial 和 descriptor。
 
 `tests/fixtures/production_api/` 保存生产 API 的最小固定 oracle：
 

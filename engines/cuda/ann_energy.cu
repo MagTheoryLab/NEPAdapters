@@ -107,6 +107,7 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
     int version,
     int descriptor_dim,
     int hidden_neurons,
+    int hidden_neurons2,
     int num_types,
     const int* __restrict__ types,
     const int* __restrict__ scheduled_atoms,
@@ -178,11 +179,18 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
   const int safe_type = type_is_valid ? type : 0;
   const int w0_count = hidden_neurons * descriptor_dim;
   const int type_extra_bias_count = version == 5 ? 1 : 0;
-  const int type_block_size =
-      w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
+  const int type_block_size = hidden_neurons2 > 0
+      ? w0_count + hidden_neurons +
+            hidden_neurons * hidden_neurons2 +
+            hidden_neurons2 + hidden_neurons2
+      : w0_count + hidden_neurons + hidden_neurons + type_extra_bias_count;
   const float* w0 = ann_type_major + safe_type * type_block_size;
   const float* b0 = w0 + w0_count;
   const float* w1 = b0 + hidden_neurons;
+  const float* b1_hidden =
+      hidden_neurons2 > 0 ? w1 + hidden_neurons * hidden_neurons2 : nullptr;
+  const float* w2 =
+      hidden_neurons2 > 0 ? b1_hidden + hidden_neurons2 : nullptr;
   const float* b1 = ann_type_major + num_types * type_block_size;
 
   float energy = 0.0f;
@@ -200,10 +208,46 @@ __global__ void evaluate_ann_energy_scheduled_subwarp(
     const float dot = ann_subwarp_sum(partial);
     if (sublane == 0 && type_is_valid) {
       const float value = tanhf(dot - b0[neuron]);
-      energy += w1[neuron] * value;
       hidden_delta_shared[
-          neuron * kAnnAtomsPerWarp + atom_in_warp] =
-          w1[neuron] * (1.0f - value * value);
+          neuron * kAnnAtomsPerWarp + atom_in_warp] = value;
+    }
+  }
+  __syncwarp();
+
+  if (sublane == 0 && type_is_valid) {
+    if (hidden_neurons2 > 0) {
+      float y2[120];
+      for (int neuron2 = 0; neuron2 < hidden_neurons2; ++neuron2) {
+        float dot = 0.0f;
+        for (int neuron1 = 0; neuron1 < hidden_neurons; ++neuron1) {
+          dot += w1[neuron2 * hidden_neurons + neuron1] *
+              hidden_delta_shared[
+                  neuron1 * kAnnAtomsPerWarp + atom_in_warp];
+        }
+        const float value = tanhf(dot - b1_hidden[neuron2]);
+        energy += w2[neuron2] * value;
+        y2[neuron2] = w2[neuron2] * (1.0f - value * value);
+      }
+      for (int neuron1 = 0; neuron1 < hidden_neurons; ++neuron1) {
+        float pull = 0.0f;
+        for (int neuron2 = 0; neuron2 < hidden_neurons2; ++neuron2) {
+          pull += w1[neuron2 * hidden_neurons + neuron1] * y2[neuron2];
+        }
+        const float value = hidden_delta_shared[
+            neuron1 * kAnnAtomsPerWarp + atom_in_warp];
+        hidden_delta_shared[
+            neuron1 * kAnnAtomsPerWarp + atom_in_warp] =
+            pull * (1.0f - value * value);
+      }
+    } else {
+      for (int neuron = 0; neuron < hidden_neurons; ++neuron) {
+        const float value = hidden_delta_shared[
+            neuron * kAnnAtomsPerWarp + atom_in_warp];
+        energy += w1[neuron] * value;
+        hidden_delta_shared[
+            neuron * kAnnAtomsPerWarp + atom_in_warp] =
+            w1[neuron] * (1.0f - value * value);
+      }
     }
   }
   __syncwarp();
@@ -463,6 +507,7 @@ void evaluate_ann_energy_on_device(
         protocol.version,
         protocol.descriptor_dim,
         protocol.hidden_neurons,
+        protocol.hidden_neurons2,
         protocol.num_types,
         workspace_view.types,
         workspace_view.type_scheduled_atoms,

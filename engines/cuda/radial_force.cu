@@ -199,7 +199,7 @@ __global__ void accumulate_radial_forces(
     int n_max_radial,
     int basis_size_radial,
     int radial_capacity,
-    float cutoff_radial,
+    const float* __restrict__ cutoff_radial_pair,
     float zbl_inner,
     float zbl_outer,
     SimulationBox box,
@@ -222,7 +222,6 @@ __global__ void accumulate_radial_forces(
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
-  const float rcinv = 1.0f / cutoff_radial;
   const int radial_basis_count =
       (n_max_radial + 1) * (basis_size_radial + 1);
   float pow_zi = 0.0f;
@@ -250,6 +249,9 @@ __global__ void accumulate_radial_forces(
   for (int slot = 0; slot < nn_radial[atom]; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
+    const float cutoff_radial =
+        cutoff_radial_pair[type1 * num_types + type2];
+    const float rcinv = 1.0f / cutoff_radial;
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -439,7 +441,7 @@ __global__ void accumulate_qnep_radial_bec(
     int num_types,
     int n_max_radial,
     int basis_size_radial,
-    float cutoff_radial,
+    const float* __restrict__ cutoff_radial_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const double* __restrict__ positions_soa3,
@@ -456,12 +458,14 @@ __global__ void accumulate_qnep_radial_bec(
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
-  const float rcinv = 1.0f / cutoff_radial;
   const int radial_basis_count =
       (n_max_radial + 1) * (basis_size_radial + 1);
   for (int slot = 0; slot < nn_radial[atom]; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
+    const float cutoff_radial =
+        cutoff_radial_pair[type1 * num_types + type2];
+    const float rcinv = 1.0f / cutoff_radial;
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -516,7 +520,7 @@ __global__ void accumulate_lammps_radial_forces(
     int num_types,
     int n_max_radial,
     int basis_size_radial,
-    float cutoff_radial,
+    const float* __restrict__ cutoff_radial_pair,
     float zbl_inner,
     float zbl_outer,
     SimulationBox box,
@@ -543,7 +547,6 @@ __global__ void accumulate_lammps_radial_forces(
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
-  const float rcinv = 1.0f / cutoff_radial;
   const int basis_count = basis_size_radial + 1;
   const int radial_basis_count = (n_max_radial + 1) * basis_count;
   float* radial_pull = radial_pull_shared + threadIdx.x;
@@ -571,6 +574,9 @@ __global__ void accumulate_lammps_radial_forces(
     const int pair_offset = atom + atom_stride * slot;
     const int neighbor = nl_radial[pair_offset];
     const int type2 = types[neighbor];
+    const float cutoff_radial =
+        cutoff_radial_pair[type1 * num_types + type2];
+    const float rcinv = 1.0f / cutoff_radial;
     if (type2 != pull_type) {
       for (int k = 0; k < basis_count; ++k) {
         radial_pull[k * blockDim.x] = 0.0f;
@@ -824,7 +830,7 @@ __global__ void accumulate_radial_forces_batched(
     int n_max_radial,
     int basis_size_radial,
     int radial_capacity,
-    float cutoff_radial,
+    const float* __restrict__ cutoff_radial_pair,
     const int* __restrict__ atom_to_structure,
     const double* __restrict__ boxes_row_major9,
     const double* __restrict__ box_inverse_row_major9,
@@ -851,7 +857,6 @@ __global__ void accumulate_radial_forces_batched(
   const double x1 = positions_soa3[atom];
   const double y1 = positions_soa3[atom_stride + atom];
   const double z1 = positions_soa3[2 * atom_stride + atom];
-  const float rcinv = 1.0f / cutoff_radial;
   const int type_pairs = num_types * num_types;
 
   float s_fx = 0.0f;
@@ -870,6 +875,9 @@ __global__ void accumulate_radial_forces_batched(
   for (int slot = 0; slot < nn_radial[atom]; ++slot) {
     const int neighbor = nl_radial[atom + atom_stride * slot];
     const int type2 = types[neighbor];
+    const float cutoff_radial =
+        cutoff_radial_pair[type1 * num_types + type2];
+    const float rcinv = 1.0f / cutoff_radial;
     float x12 = 0.0f;
     float y12 = 0.0f;
     float z12 = 0.0f;
@@ -1050,7 +1058,7 @@ void accumulate_radial_forces_on_device(
         protocol.n_max_radial,
         protocol.basis_size_radial,
         protocol.neighbor_capacity_radial,
-        static_cast<float>(protocol.cutoff_radial),
+        model_view.cutoff_radial_pair,
         0.0f,
         0.0f,
         box,
@@ -1072,7 +1080,7 @@ void accumulate_radial_forces_on_device(
           protocol.n_max_radial,
           protocol.basis_size_radial,
           protocol.neighbor_capacity_radial,
-          static_cast<float>(protocol.cutoff_radial),
+          model_view.cutoff_radial_pair,
           0.0f,
           0.0f,
           box,
@@ -1114,7 +1122,7 @@ void accumulate_qnep_radial_bec_on_device(
         protocol.num_types,
         protocol.n_max_radial,
         protocol.basis_size_radial,
-        static_cast<float>(protocol.cutoff_radial),
+        model_view.cutoff_radial_pair,
         box,
         view.types,
         view.positions_soa3,
@@ -1254,7 +1262,7 @@ void accumulate_lammps_radial_forces_on_device(
           protocol.num_types,
           protocol.n_max_radial,
           protocol.basis_size_radial,
-          static_cast<float>(protocol.cutoff_radial),
+          model_view.cutoff_radial_pair,
           kIncludeZbl ? static_cast<float>(protocol.zbl_inner) : 0.0f,
           kIncludeZbl ? static_cast<float>(protocol.zbl_outer) : 0.0f,
           box,
@@ -1366,7 +1374,7 @@ void accumulate_radial_and_zbl_forces_on_device(
         protocol.n_max_radial,
         protocol.basis_size_radial,
         protocol.neighbor_capacity_radial,
-        static_cast<float>(protocol.cutoff_radial),
+        model_view.cutoff_radial_pair,
         static_cast<float>(protocol.zbl_inner),
         static_cast<float>(protocol.zbl_outer),
         box,
@@ -1448,7 +1456,7 @@ void accumulate_radial_forces_batched(
           protocol.n_max_radial,
           protocol.basis_size_radial,
           protocol.neighbor_capacity_radial,
-          static_cast<float>(protocol.cutoff_radial),
+          model_view.cutoff_radial_pair,
           view.atom_to_structure,
           view.boxes_row_major9,
           view.box_inverse_row_major9,

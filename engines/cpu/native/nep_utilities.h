@@ -229,6 +229,55 @@ void apply_ann_one_layer(
   energy -= b1[0];
 }
 
+void apply_ann_two_layers(
+  const int dim,
+  const int num_neurons1,
+  const int num_neurons2,
+  const double* w0,
+  const double* b0,
+  const double* w1,
+  const double* b1_hidden,
+  const double* w2,
+  const double* b2,
+  double* q,
+  double& energy,
+  double* energy_derivative,
+  double* latent_space)
+{
+  double x1[MAX_NEURON] = {0.0};
+  double pull1[MAX_NEURON] = {0.0};
+  for (int n1 = 0; n1 < num_neurons1; ++n1) {
+    const double* w0_n = w0 + n1 * dim;
+    double dot = 0.0;
+    for (int d = 0; d < dim; ++d) {
+      dot += w0_n[d] * q[d];
+    }
+    x1[n1] = tanh(dot - b0[n1]);
+  }
+  for (int n2 = 0; n2 < num_neurons2; ++n2) {
+    const double* w1_n = w1 + n2 * num_neurons1;
+    double dot = 0.0;
+    for (int n1 = 0; n1 < num_neurons1; ++n1) {
+      dot += w1_n[n1] * x1[n1];
+    }
+    const double x2 = tanh(dot - b1_hidden[n2]);
+    const double pull2 = w2[n2] * (1.0 - x2 * x2);
+    energy += w2[n2] * x2;
+    for (int n1 = 0; n1 < num_neurons1; ++n1) {
+      pull1[n1] += w1_n[n1] * pull2;
+    }
+  }
+  for (int n1 = 0; n1 < num_neurons1; ++n1) {
+    const double pull = pull1[n1] * (1.0 - x1[n1] * x1[n1]);
+    latent_space[n1] = pull;
+    const double* w0_n = w0 + n1 * dim;
+    for (int d = 0; d < dim; ++d) {
+      energy_derivative[d] += pull * w0_n[d];
+    }
+  }
+  energy -= b2[0];
+}
+
 void apply_ann_one_layer_charge(
   const int N_des,
   const int N_neu,

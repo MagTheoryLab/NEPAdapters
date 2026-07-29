@@ -213,7 +213,14 @@ void cache_type_pair_constants(NEP::ParaMB& paramb, const NEP::ZBL& zbl)
 
       double rc_inner = zbl.rc_inner;
       double rc_outer = zbl.rc_outer;
-      if (!zbl.flexibled && paramb.use_typewise_cutoff_zbl) {
+      if (zbl.flexibled) {
+        const std::size_t low = std::min(t1, t2);
+        const std::size_t high = std::max(t1, t2);
+        const std::size_t pair =
+          low * num_types - low * (low - 1) / 2 + (high - low);
+        rc_inner = zbl.para[10 * pair];
+        rc_outer = zbl.para[10 * pair + 1];
+      } else if (paramb.use_typewise_cutoff_zbl) {
         rc_outer = std::min(
           (COVALENT_RADIUS[zi - 1] + COVALENT_RADIUS[zj - 1]) * paramb.typewise_cutoff_zbl_factor,
           rc_outer);
@@ -221,6 +228,8 @@ void cache_type_pair_constants(NEP::ParaMB& paramb, const NEP::ZBL& zbl)
       }
       paramb.zbl_rc_inner_pair[t12] = rc_inner;
       paramb.zbl_rc_outer_pair[t12] = rc_outer;
+      paramb.zbl_rc_outer_max =
+        std::max(paramb.zbl_rc_outer_max, rc_outer);
     }
   }
 }
@@ -473,6 +482,52 @@ void accumulate_s_lmax4_edges(
 }
 #endif
 
+void apply_ann_model(
+  const NEP::ANN& annmb,
+  const int type,
+  double* q,
+  double& energy,
+  double* energy_derivative,
+  double* latent_space,
+  const bool need_B_projection = false,
+  double* B_projection = nullptr)
+{
+  if (annmb.num_neurons2 > 0) {
+    if (need_B_projection) {
+      throw std::runtime_error(
+        "B projection is not defined for two-hidden-layer ANN models");
+    }
+    apply_ann_two_layers(
+      annmb.dim,
+      annmb.num_neurons1,
+      annmb.num_neurons2,
+      annmb.w0[type],
+      annmb.b0[type],
+      annmb.w1[type],
+      annmb.b1_hidden[type],
+      annmb.w2[type],
+      annmb.b1,
+      q,
+      energy,
+      energy_derivative,
+      latent_space);
+    return;
+  }
+  apply_ann_one_layer(
+    annmb.dim,
+    annmb.num_neurons1,
+    annmb.w0[type],
+    annmb.b0[type],
+    annmb.w1[type],
+    annmb.b1,
+    q,
+    energy,
+    energy_derivative,
+    latent_space,
+    need_B_projection,
+    B_projection);
+}
+
 #if defined(NEP_ADAPTERS_CPU_USE_CBLAS)
 void apply_ann_one_layer_batched_by_type(
   const NEP::ParaMB& paramb,
@@ -500,7 +555,7 @@ void apply_ann_one_layer_batched_by_type(
       continue;
     }
 
-    if (atom_count < 16) {
+    if (atom_count < 16 || annmb.num_neurons2 > 0) {
       double q[MAX_DIM];
       double Fp[MAX_DIM];
       double latent_space[MAX_NEURON];
@@ -513,9 +568,7 @@ void apply_ann_one_layer_batched_by_type(
           latent_space[n] = 0.0;
         }
         double F = 0.0;
-        apply_ann_one_layer(
-          dim, num_neurons, annmb.w0[t], annmb.b0[t], annmb.w1[t], annmb.b1, q, F, Fp,
-          latent_space, false, nullptr);
+        apply_ann_model(annmb, static_cast<int>(t), q, F, Fp, latent_space);
         g_potential[atom] += F;
         for (int d = 0; d < dim; ++d) {
           q_and_Fp[static_cast<std::size_t>(atom) * dim + d] = Fp[d] * paramb.q_scaler[d];
@@ -604,7 +657,7 @@ void apply_ann_one_layer_batched_for_lammps(
       continue;
     }
 
-    if (atom_count < 16) {
+    if (atom_count < 16 || annmb.num_neurons2 > 0) {
       double q[MAX_DIM];
       double Fp[MAX_DIM];
       double latent_space[MAX_NEURON];
@@ -617,9 +670,7 @@ void apply_ann_one_layer_batched_for_lammps(
           latent_space[n] = 0.0;
         }
         double F = 0.0;
-        apply_ann_one_layer(
-          dim, num_neurons, annmb.w0[t], annmb.b0[t], annmb.w1[t], annmb.b1, q, F, Fp,
-          latent_space, false, nullptr);
+        apply_ann_model(annmb, static_cast<int>(t), q, F, Fp, latent_space);
         total_potential += F;
         if (g_potential) {
           g_potential[atom] += F;
@@ -1063,10 +1114,9 @@ void find_descriptor_small_box(
         double* atom_B_projection = calculating_B_projection
           ? g_B_projection + n1 * (annmb.num_neurons1 * (annmb.dim + 2))
           : nullptr;
-        apply_ann_one_layer(
-          annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1,
-          q.data(), F, Fp.data(), latent_space.data(), calculating_B_projection,
-          atom_B_projection);
+        apply_ann_model(
+          annmb, t1, q.data(), F, Fp.data(), latent_space.data(),
+          calculating_B_projection, atom_B_projection);
       }
 
       if (calculating_latent_space) {
@@ -3201,9 +3251,7 @@ void find_descriptor_for_lammps(
         annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F, Fp,
         latent_space);
     } else {
-      apply_ann_one_layer(
-        annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F, Fp,
-        latent_space, false, nullptr);
+      apply_ann_model(annmb, t1, q, F, Fp, latent_space);
     }
 
     total_potential += F; // always calculate this
@@ -3857,7 +3905,7 @@ void find_force_ZBL_for_lammps(
             g_pos[n2][0] - g_pos[n1][0], g_pos[n2][1] - g_pos[n1][1], g_pos[n2][2] - g_pos[n1][2]};
 
           double d12sq = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
-          double max_rc_outer = 2.5;
+          const double max_rc_outer = paramb.zbl_rc_outer_max;
           if (d12sq >= max_rc_outer * max_rc_outer) {
             continue;
           }
@@ -3927,7 +3975,7 @@ void find_force_ZBL_for_lammps(
         g_pos[n2][0] - g_pos[n1][0], g_pos[n2][1] - g_pos[n1][1], g_pos[n2][2] - g_pos[n1][2]};
 
       double d12sq = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
-      double max_rc_outer = 2.5;
+      const double max_rc_outer = paramb.zbl_rc_outer_max;
       if (d12sq >= max_rc_outer * max_rc_outer) {
         continue;
       }
@@ -7747,9 +7795,13 @@ void add_spin_gradient(
     return;
   }
 
+  // spin_dof_type is the public-output contract: environment-only species
+  // may contribute to descriptors and forces, but do not expose mforce.
   for (int atom = 0; atom < N; ++atom) {
-    for (int d = 0; d < 3; ++d) {
-      mforce[static_cast<std::size_t>(d) * N + atom] -= grad_spin[static_cast<std::size_t>(d) * N + atom];
+    if (spin_dof_active(type[atom])) {
+      for (int d = 0; d < 3; ++d) {
+        mforce[static_cast<std::size_t>(d) * N + atom] -= grad_spin[static_cast<std::size_t>(d) * N + atom];
+      }
     }
   }
 }
@@ -8259,22 +8311,9 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   if (tokens.size() < 3) {
     throw std::invalid_argument("the first line of a NEP model must contain at least 3 fields");
   }
-  if (tokens[0] == "nep3") {
-    paramb.model_type = 0;
-    paramb.version = 3;
-    zbl.enabled = false;
-  } else if (tokens[0] == "nep3_zbl") {
-    paramb.model_type = 0;
-    paramb.version = 3;
-    zbl.enabled = true;
-  } else if (tokens[0] == "nep3_dipole") {
-    paramb.model_type = 1;
-    paramb.version = 3;
-    zbl.enabled = false;
-  } else if (tokens[0] == "nep3_polarizability") {
-    paramb.model_type = 2;
-    paramb.version = 3;
-    zbl.enabled = false;
+  if (tokens[0].rfind("nep3", 0) == 0) {
+    throw std::invalid_argument(
+      "NEP3 is no longer supported; export the model as NEP4 or newer");
   } else if (tokens[0] == "nep4") {
     paramb.model_type = 0;
     paramb.version = 4;
@@ -8376,6 +8415,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
   spin_baseline.clear();
   spin_baseline.assign(paramb.num_types, 0.0);
+  bool saw_spin_baseline = false;
+  int spin_basis_size_angular = 0;
+  int spin_n_max_radial = 0;
+  int spin_n_max_angular = 0;
   auto parse_spin_line = [&](const std::vector<std::string>& spin_tokens) {
     if (spin_tokens.empty()) {
       return;
@@ -8387,48 +8430,80 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       for (std::size_t t = 0; t < paramb.num_types; ++t) {
         spin_baseline[t] = get_double_from_token(spin_tokens[1 + t], __FILE__, __LINE__);
       }
+      saw_spin_baseline = true;
     } else if (spin_tokens[0] == "spin_chiral") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_chiral requires a value");
+      if (spin_tokens.size() != 2) {
+        throw std::runtime_error("spin_chiral requires exactly one value");
       }
       paramb.spin_chiral = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (paramb.spin_chiral != 0 && paramb.spin_chiral != 1) {
         throw std::runtime_error("spin_chiral must be 0 or 1");
       }
     } else if (spin_tokens[0] == "spin_compress") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_compress requires a value");
+      if (spin_tokens.size() != 2) {
+        throw std::runtime_error("spin_compress requires exactly one value");
       }
       paramb.spin_compress = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_basis_size") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_basis_size requires a value");
+      if (spin_tokens.size() != 3) {
+        throw std::runtime_error(
+          "spin_basis_size requires radial and reserved angular values");
       }
       paramb.spin_basis_size = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+      spin_basis_size_angular =
+        get_int_from_token(spin_tokens[2], __FILE__, __LINE__);
+      if (paramb.spin_basis_size < 0 || spin_basis_size_angular < 0) {
+        throw std::runtime_error("spin_basis_size values must be non-negative");
+      }
     } else if (spin_tokens[0] == "spin_l_max") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_l_max requires a value");
+      if (spin_tokens.size() != 4) {
+        throw std::runtime_error(
+          "spin_l_max requires 3body, 4body, and 5body values");
       }
       paramb.spin_l_max = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+      const int l_max_4body =
+        get_int_from_token(spin_tokens[2], __FILE__, __LINE__);
+      const int l_max_5body =
+        get_int_from_token(spin_tokens[3], __FILE__, __LINE__);
+      if (l_max_4body != 0 || l_max_5body != 0) {
+        throw std::runtime_error(
+          "reserved spin_l_max values must be zero for Spin Lite");
+      }
     } else if (spin_tokens[0] == "spin_cutoff") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_cutoff requires a value");
+      if (spin_tokens.size() != 3) {
+        throw std::runtime_error(
+          "spin_cutoff requires radial and reserved angular values");
       }
       paramb.spin_cutoff_radial = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
+      const double angular =
+        get_double_from_token(spin_tokens[2], __FILE__, __LINE__);
+      if (paramb.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
+        throw std::runtime_error("spin_cutoff values must be positive");
+      }
     } else if (spin_tokens[0] == "spin_scaler") {
-      if (spin_tokens.size() < 2) {
-        throw std::runtime_error("spin_scaler requires a value");
+      if (spin_tokens.size() != 2) {
+        throw std::runtime_error("spin_scaler requires exactly one value");
       }
       const int spin_scaler = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (spin_scaler != 1) {
         throw std::runtime_error("only spin_scaler 1 is supported by cpu");
       }
     } else if (spin_tokens[0] == "spin_n_max") {
-      if (spin_tokens.size() < 3) {
+      if (spin_tokens.size() != 3) {
         throw std::runtime_error(
           "spin_n_max requires radial and angular values");
       }
+      spin_n_max_radial =
+        get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
+      spin_n_max_angular =
+        get_int_from_token(spin_tokens[2], __FILE__, __LINE__);
+      if (spin_n_max_radial < 0 || spin_n_max_angular < 0) {
+        throw std::runtime_error("spin_n_max values must be non-negative");
+      }
     } else if (spin_tokens[0] == "spin_dof_type" || spin_tokens[0] == "spin_type") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_dof_type must enable at least one type");
+      }
       paramb.spin_dof_type_active.assign(paramb.num_types, 0);
       for (std::size_t i = 1; i < spin_tokens.size(); ++i) {
         auto found = std::find(element_list.begin(), element_list.end(), spin_tokens[i]);
@@ -8438,6 +8513,9 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         paramb.spin_dof_type_active[static_cast<std::size_t>(found - element_list.begin())] = 1;
       }
     } else if (spin_tokens[0] == "spin_env_type") {
+      if (spin_tokens.size() < 2) {
+        throw std::runtime_error("spin_env_type must enable at least one type");
+      }
       paramb.spin_env_type_active.assign(paramb.num_types, 0);
       for (std::size_t i = 1; i < spin_tokens.size(); ++i) {
         auto found = std::find(element_list.begin(), element_list.end(), spin_tokens[i]);
@@ -8451,10 +8529,14 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     }
   };
   if (tokens[0] == "spin_mode") {
-    if (tokens.size() < 2) {
-      throw std::runtime_error("spin_mode requires a value");
+    if (tokens.size() != 2 && tokens.size() != 3) {
+      throw std::runtime_error(
+        "spin_mode requires a value and optional header count");
     }
     paramb.spin_mode = get_int_from_token(tokens[1], __FILE__, __LINE__);
+    if (paramb.spin_mode != 1) {
+      throw std::runtime_error("only spin_mode 1 is supported");
+    }
     if (tokens.size() >= 3) {
       const int spin_header_lines = get_int_from_token(tokens[2], __FILE__, __LINE__);
       if (spin_header_lines < 0) {
@@ -8479,11 +8561,26 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     }
   }
   if (paramb.spin_mode) {
+    if (!saw_spin_baseline) {
+      throw std::runtime_error("spin_mode block is missing spin_baseline");
+    }
+    if (paramb.spin_cutoff_radial <= 0.0) {
+      throw std::runtime_error("spin_mode block is missing spin_cutoff");
+    }
     if (paramb.spin_compress <= 0 || paramb.spin_l_max < 0 || paramb.spin_l_max > 4) {
       throw std::runtime_error("invalid spin settings");
     }
     if (paramb.spin_basis_size + 1 < paramb.spin_compress) {
       throw std::runtime_error("spin_basis_size must cover spin_compress");
+    }
+    if (paramb.spin_basis_size > 8) {
+      throw std::runtime_error(
+        "Spin Lite radial basis size must not exceed 8");
+    }
+    if (spin_n_max_radial > paramb.spin_basis_size ||
+        spin_n_max_angular > spin_basis_size_angular) {
+      throw std::runtime_error(
+        "spin_n_max values must not exceed spin_basis_size values");
     }
     if (paramb.spin_basis_size + 1 > MAX_NUM_N ||
         paramb.spin_compress > MAX_SPIN_COMPRESS) {
@@ -8495,6 +8592,15 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     if (paramb.spin_env_type_active.empty()) {
       paramb.spin_env_type_active = paramb.spin_dof_type_active;
     }
+    for (std::size_t type = 0;
+         type < paramb.spin_dof_type_active.size();
+         ++type) {
+      if (paramb.spin_dof_type_active[type] != 0 &&
+          paramb.spin_env_type_active[type] == 0) {
+        throw std::runtime_error(
+          "spin_dof_type must be a subset of spin_env_type");
+      }
+    }
   }
 
   // zbl
@@ -8505,10 +8611,22 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     zbl.rc_inner = get_double_from_token(tokens[1], __FILE__, __LINE__);
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
+      if (tokens.size() != 3) {
+        throw std::invalid_argument(
+          "flexible ZBL does not accept a typewise cutoff factor");
+      }
       zbl.flexibled = true;
     } else {
+      if (zbl.rc_inner < 0.0 || zbl.rc_outer <= zbl.rc_inner) {
+        throw std::invalid_argument(
+          "ZBL requires 0 <= inner cutoff < outer cutoff");
+      }
       if (tokens.size() == 4) {
         paramb.typewise_cutoff_zbl_factor = get_double_from_token(tokens[3], __FILE__, __LINE__);
+        if (paramb.typewise_cutoff_zbl_factor <= 0.0) {
+          throw std::invalid_argument(
+            "typewise ZBL cutoff factor must be positive");
+        }
         paramb.use_typewise_cutoff_zbl = true;
       }
     }
@@ -8527,12 +8645,20 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       paramb.rc_angular[n] = paramb.rc_angular[0];
     }
   } else {
+    if (paramb.spin_mode) {
+      throw std::invalid_argument(
+        "Spin Lite does not support type-dependent structural cutoffs");
+    }
     for (std::size_t n = 0; n < paramb.num_types; ++n) {
       paramb.rc_radial[n] = get_double_from_token(tokens[1 + n * 2], __FILE__, __LINE__);
       paramb.rc_angular[n] = get_double_from_token(tokens[2 + n * 2], __FILE__, __LINE__);
     }
   }
   for (std::size_t n = 0; n < paramb.num_types; ++n) {
+    if (paramb.rc_radial[n] <= 0.0 || paramb.rc_radial[n] > 100.0 ||
+        paramb.rc_angular[n] <= 0.0 || paramb.rc_angular[n] > 100.0) {
+      throw std::invalid_argument("cutoffs must be within (0, 100]");
+    }
     if (paramb.rc_radial[n] > paramb.rc_radial_max) {
       paramb.rc_radial_max = paramb.rc_radial[n];
     }
@@ -8540,15 +8666,12 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       paramb.rc_angular_max = paramb.rc_angular[n];
     }
   }
-  if (paramb.spin_mode) {
-    if (paramb.spin_cutoff_radial <= 0.0) {
-      paramb.spin_cutoff_radial = paramb.rc_radial_max;
-    }
-    paramb.rc_radial_max = std::max(paramb.rc_radial_max, paramb.spin_cutoff_radial);
-  }
-
   int MN_radial = get_int_from_token(tokens[tokens.size() - 2], __FILE__, __LINE__);
   int MN_angular = get_int_from_token(tokens[tokens.size() - 1], __FILE__, __LINE__);
+  if (MN_radial <= 0 || MN_angular <= 0) {
+    throw std::invalid_argument("neighbor capacities must be positive");
+  }
+  batch_neighbor_capacity = std::max(MN_radial, MN_angular);
 
   // n_max 10 8
   tokens = get_tokens(input);
@@ -8557,6 +8680,11 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
   paramb.n_max_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.n_max_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
+  if (paramb.n_max_radial < 0 || paramb.n_max_radial > 12 ||
+      paramb.n_max_angular < 0 || paramb.n_max_angular > 8) {
+    throw std::invalid_argument(
+      "n_max must be within radial=0..12 and angular=0..8");
+  }
 
   // basis_size 10 8
   tokens = get_tokens(input);
@@ -8566,6 +8694,11 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
   paramb.basis_size_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.basis_size_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
+  if (paramb.basis_size_radial < 0 || paramb.basis_size_radial > 16 ||
+      paramb.basis_size_angular < 0 || paramb.basis_size_angular > 12) {
+    throw std::invalid_argument(
+      "basis_size must be within radial=0..16 and angular=0..12");
+  }
 
   // l_max
   tokens = get_tokens(input);
@@ -8574,6 +8707,9 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   }
 
   paramb.L_max = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  if (paramb.L_max < 0 || paramb.L_max > 8) {
+    throw std::invalid_argument("l_max 3body must be within 0..8");
+  }
   paramb.num_L = paramb.L_max;
 
   paramb.has_q_222 =
@@ -8603,6 +8739,18 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     throw std::invalid_argument("expected: ANN num_neurons 0");
   }
   annmb.num_neurons1 = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  annmb.num_neurons2 = get_int_from_token(tokens[2], __FILE__, __LINE__);
+  if (annmb.num_neurons1 <= 0 || annmb.num_neurons1 > MAX_NEURON ||
+      annmb.num_neurons2 < 0 || annmb.num_neurons2 > MAX_NEURON) {
+    throw std::invalid_argument(
+      "ANN hidden layer sizes must be within first=1..120, second=0..120");
+  }
+  if (annmb.num_neurons2 > 0 &&
+      (paramb.version != 4 || paramb.model_type != 0 ||
+       paramb.charge_mode != 0 || paramb.spin_mode != 0)) {
+    throw std::invalid_argument(
+      "two-hidden-layer ANN is supported only for ordinary NEP4 models");
+  }
   paramb.struct_dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
   paramb.spin_dim =
     paramb.spin_mode ? spin_descriptor_dim(paramb.spin_compress, paramb.spin_l_max, paramb.spin_chiral != 0) : 0;
@@ -8610,7 +8758,13 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
 
   // calculated parameters:
   paramb.num_types_sq = paramb.num_types * paramb.num_types;
-  if (paramb.version == 3) {
+  if (annmb.num_neurons2 > 0) {
+    annmb.num_para_ann =
+      ((annmb.dim + 1) * annmb.num_neurons1 +
+       (annmb.num_neurons1 + 2) * annmb.num_neurons2) *
+        paramb.num_types +
+      1;
+  } else if (paramb.version == 3) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 + 1;
   } else if (paramb.version == 4) {
     annmb.num_para_ann = (annmb.dim + 2) * annmb.num_neurons1 * paramb.num_types + 1;
@@ -8650,13 +8804,38 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
   // flexible zbl potential parameters if (zbl.flexibled)
   if (zbl.flexibled) {
     int num_type_zbl = (paramb.num_types * (paramb.num_types + 1)) / 2;
+    if (10 * num_type_zbl > static_cast<int>(std::size(zbl.para))) {
+      throw std::invalid_argument(
+        "flexible ZBL parameter block exceeds the supported type count");
+    }
     for (int d = 0; d < 10 * num_type_zbl; ++d) {
       tokens = get_tokens(input);
+      if (tokens.size() != 1) {
+        throw std::invalid_argument(
+          "flexible ZBL parameter lines must contain exactly one value");
+      }
       zbl.para[d] = get_double_from_token(tokens[0], __FILE__, __LINE__);
+    }
+    for (int pair = 0; pair < num_type_zbl; ++pair) {
+      if (zbl.para[10 * pair] < 0.0 ||
+          zbl.para[10 * pair + 1] <= zbl.para[10 * pair]) {
+        throw std::invalid_argument(
+          "invalid flexible ZBL cutoff range");
+      }
     }
     zbl.num_types = paramb.num_types;
   }
   cache_type_pair_constants(paramb, zbl);
+  paramb.rc_neighbor_max = std::max(
+    paramb.rc_radial_max,
+    paramb.spin_mode ? paramb.spin_cutoff_radial : 0.0);
+  if (zbl.enabled && !paramb.zbl_rc_outer_pair.empty()) {
+    paramb.rc_neighbor_max = std::max(
+      paramb.rc_neighbor_max,
+      *std::max_element(
+        paramb.zbl_rc_outer_pair.begin(),
+        paramb.zbl_rc_outer_pair.end()));
+  }
   input.close();
 
 
@@ -8766,7 +8945,13 @@ void NEP::update_potential(double* parameters, ANN& ann)
     ann.b0[t] = pointer;
     pointer += ann.num_neurons1;
     ann.w1[t] = pointer;
-    if (paramb.charge_mode > 0) {
+    if (ann.num_neurons2 > 0) {
+      pointer += ann.num_neurons1 * ann.num_neurons2;
+      ann.b1_hidden[t] = pointer;
+      pointer += ann.num_neurons2;
+      ann.w2[t] = pointer;
+      pointer += ann.num_neurons2;
+    } else if (paramb.charge_mode > 0) {
       pointer += ann.num_neurons1 * 2;
     } else {
       pointer += ann.num_neurons1;
@@ -8908,16 +9093,18 @@ void NEP::prepare_table_for_lammps(
 
 void NEP::allocate_memory(const int N)
 {
+  const std::size_t capacity =
+    static_cast<std::size_t>(batch_neighbor_capacity);
   if (num_atoms < N || NN_radial.size() < static_cast<std::size_t>(N) ||
-      NL_radial.size() < static_cast<std::size_t>(N) * MN ||
+      NL_radial.size() < static_cast<std::size_t>(N) * capacity ||
       NN_angular.size() < static_cast<std::size_t>(N) ||
-      NL_angular.size() < static_cast<std::size_t>(N) * MN ||
-      r12.size() < static_cast<std::size_t>(N) * MN * 6) {
+      NL_angular.size() < static_cast<std::size_t>(N) * capacity ||
+      r12.size() < static_cast<std::size_t>(N) * capacity * 6) {
     NN_radial.resize(N);
-    NL_radial.resize(N * MN);
+    NL_radial.resize(static_cast<std::size_t>(N) * capacity);
     NN_angular.resize(N);
-    NL_angular.resize(N * MN);
-    r12.resize(N * MN * 6);
+    NL_angular.resize(static_cast<std::size_t>(N) * capacity);
+    r12.resize(static_cast<std::size_t>(N) * capacity * 6);
     Fp.resize(N * annmb.dim);
     sum_fxyz.resize(N * (paramb.n_max_angular + 1) * NUM_OF_ABC);
     if (paramb.charge_mode > 0) {
@@ -8987,7 +9174,7 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const int size_x12 = N * MN;
+  const std::size_t size_x12 = N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9035,7 +9222,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity, box, position,
+    num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
@@ -9154,7 +9342,8 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
   if (!paramb.spin_mode) {
     throw std::runtime_error("spin descriptor requested for a non-spin model");
   }
@@ -9165,7 +9354,8 @@ void NEP::find_descriptor(
 
   allocate_memory(N);
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox,
     NN_radial, NL_radial, NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9221,7 +9411,8 @@ void NEP::compute(
   double phase_spin_gradient = 0.0;
   SpinPhaseBreakdown spin_phase;
 
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
   allocate_memory(N);
   std::fill(force.begin(), force.end(), 0.0);
   std::fill(virial.begin(), virial.end(), 0.0);
@@ -9235,7 +9426,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox,
     NN_radial, NL_radial, NN_angular, NL_angular, r12);
   if (phase_timing) {
     phase_neighbor = nep_phase_elapsed(phase_mark);
@@ -9279,9 +9471,8 @@ void NEP::compute(
     for (int d = 0; d < annmb.dim; ++d) {
       q[d] = descriptor[static_cast<std::size_t>(d) * N + atom];
     }
-    apply_ann_one_layer(
-      annmb.dim, annmb.num_neurons1, annmb.w0[type[atom]], annmb.b0[type[atom]],
-      annmb.w1[type[atom]], annmb.b1, q, F, Fp_local, latent, false, nullptr);
+    apply_ann_model(
+      annmb, type[atom], q, F, Fp_local, latent);
     potential[atom] = F + spin_baseline[static_cast<std::size_t>(type[atom])];
     for (int d = 0; d < annmb.dim; ++d) {
       Fp[atom * annmb.dim + d] = Fp_local[d] * paramb.q_scaler[d];
@@ -9372,7 +9563,8 @@ void NEP::compute(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9418,7 +9610,8 @@ void NEP::compute(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 
   find_descriptor_small_box(
@@ -9633,7 +9826,8 @@ void NEP::find_descriptor(
   std::vector<double>& descriptor)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9647,7 +9841,8 @@ void NEP::find_descriptor(
   allocate_memory(N);
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9682,7 +9877,8 @@ void NEP::find_latent_space(
   std::vector<double>& latent_space)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9696,7 +9892,8 @@ void NEP::find_latent_space(
   allocate_memory(N);
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9722,7 +9919,8 @@ void NEP::find_B_projection(
   std::vector<double>& B_projection)
 {
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9735,7 +9933,8 @@ void NEP::find_B_projection(
 
   allocate_memory(N);
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9766,7 +9965,8 @@ void NEP::find_dipole(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9785,7 +9985,8 @@ void NEP::find_dipole(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -9840,7 +10041,8 @@ void NEP::find_polarizability(
   }
 
   const std::size_t N = type.size();
-  const std::size_t size_x12 = N * MN;
+  const std::size_t size_x12 =
+    N * static_cast<std::size_t>(batch_neighbor_capacity);
 
   if (N * 3 != position.size()) {
     std::cout << "Type and position sizes are inconsistent.\n";
@@ -9859,7 +10061,8 @@ void NEP::find_polarizability(
   }
 
   find_neighbor_list_small_box(
-    paramb.rc_radial_max, paramb.rc_angular_max, N, MN, box, position, num_cells, ebox, NN_radial, NL_radial,
+    paramb.rc_neighbor_max, paramb.rc_angular_max, N, batch_neighbor_capacity,
+    box, position, num_cells, ebox, NN_radial, NL_radial,
     NN_angular, NL_angular, r12);
 #ifdef USE_TABLE_FOR_RADIAL_FUNCTIONS
   prepare_table_small_box(
@@ -10399,6 +10602,23 @@ void NEP::compute_for_lammps(
       lammps_scratch, force, total_virial, virial, mforce, spin_transfer);
   }
 #endif
+
+  const bool spin_dof_all_active =
+    paramb.spin_dof_type_active.empty() ||
+    std::all_of(
+      paramb.spin_dof_type_active.begin(),
+      paramb.spin_dof_type_active.end(),
+      [](const int value) { return value != 0; });
+  if (!spin_dof_all_active) {
+    for (int atom = 0; atom < atom_capacity; ++atom) {
+      const int atom_type = lammps_spin_types[static_cast<std::size_t>(atom)];
+      if (paramb.spin_dof_type_active[static_cast<std::size_t>(atom_type)] == 0) {
+        mforce[atom][0] = 0.0;
+        mforce[atom][1] = 0.0;
+        mforce[atom][2] = 0.0;
+      }
+    }
+  }
 
   if (phase_timing) {
     NepPhaseTotals& totals = nep_phase_timer_state().lammps;

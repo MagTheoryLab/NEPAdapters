@@ -140,7 +140,7 @@ int main() {
   int atom_offsets[] = {0};
   int types[] = {0};
   double positions[] = {0.0, 0.0, 0.0};
-  double boxes[] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+  double boxes[] = {20.0, 0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 0.0, 20.0};
   int pbc[] = {1, 1, 1};
   double energy[] = {0.0};
   double forces[] = {0.0, 0.0, 0.0};
@@ -613,6 +613,45 @@ int main() {
       boundary_protocol.hidden_neurons != 120) {
     return EXIT_FAILURE;
   }
+  const auto type_dependent_cutoff = parse_protocol_case(
+      "type_dependent_cutoff",
+      "cutoff 5 4 6 3 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 0 0",
+      "ANN 1 0",
+      "nep4 2 C H");
+  if (type_dependent_cutoff.cutoff_radial != 6.0 ||
+      type_dependent_cutoff.cutoff_angular != 4.0 ||
+      type_dependent_cutoff.cutoff_radial_by_type.size() != 2 ||
+      type_dependent_cutoff.cutoff_radial_by_type[0] != 5.0 ||
+      type_dependent_cutoff.cutoff_radial_by_type[1] != 6.0) {
+    return EXIT_FAILURE;
+  }
+  const auto typewise_zbl = parse_protocol_case(
+      "typewise_zbl",
+      "cutoff 5 4 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 0 0",
+      "ANN 1 0",
+      "nep4_zbl 1 C",
+      "zbl 1 2 0.7");
+  if (!typewise_zbl.use_typewise_cutoff_zbl ||
+      typewise_zbl.typewise_cutoff_zbl_factor != 0.7) {
+    return EXIT_FAILURE;
+  }
+  const auto two_hidden_layers = parse_protocol_case(
+      "two_hidden_layers",
+      "cutoff 5 4 8 6",
+      "n_max 0 0",
+      "basis_size 0 0",
+      "l_max 4 0 0",
+      "ANN 32 16");
+  if (two_hidden_layers.hidden_neurons2 != 16 ||
+      two_hidden_layers.ann_parameter_count != 737) {
+    return EXIT_FAILURE;
+  }
   std::string too_many_types = "nep4 119";
   for (int type = 0; type < 119; ++type) {
     too_many_types += " C";
@@ -687,31 +726,7 @@ int main() {
           "n_max 0 8",
           "basis_size 0 0",
           "l_max 8 1 1 1 1 1 1",
-          "ANN 1 0") ||
-      !protocol_case_unsupported(
-          "type_dependent_cutoff",
-          "cutoff 5 4 6 3 8 6",
-          "n_max 0 0",
-          "basis_size 0 0",
-          "l_max 4 0 0",
-          "ANN 1 0",
-          "nep4 2 C H") ||
-      !protocol_case_unsupported(
-          "typewise_zbl",
-          "cutoff 5 4 8 6",
-          "n_max 0 0",
-          "basis_size 0 0",
-          "l_max 4 0 0",
-          "ANN 1 0",
-          "nep4_zbl 1 C",
-          "zbl 1 2 0.7") ||
-      !protocol_case_unsupported(
-          "two_hidden_layers",
-          "cutoff 5 4 8 6",
-          "n_max 0 0",
-          "basis_size 0 0",
-          "l_max 4 0 0",
-          "ANN 32 16")) {
+          "ANN 1 0")) {
     return EXIT_FAILURE;
   }
 

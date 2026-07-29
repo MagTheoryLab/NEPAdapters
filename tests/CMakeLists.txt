@@ -244,12 +244,13 @@ if(TARGET NEPAdapters::cpu)
   if(TARGET nep_adapters_cpu_nep_cpu_reference_test AND
      EXISTS "${NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR}/descriptor_ref.out")
     add_test(
-      NAME nep_adapters_cpu_nep_cpu_nep_reference_test
+      NAME nep_adapters_cpu_nep3_unsupported_test
       COMMAND nep_adapters_cpu_nep_cpu_reference_test
-              "${NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR}")
+              "${NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR}"
+              --expect-unsupported)
     set_tests_properties(
-      nep_adapters_cpu_nep_cpu_nep_reference_test
-      PROPERTIES LABELS "parity;oracle;engine;cpu;nep_cpu;nep")
+      nep_adapters_cpu_nep3_unsupported_test
+      PROPERTIES LABELS "contract;engine;cpu;nep3;unsupported")
   endif()
 
   if(TARGET nep_adapters_cpu_nep_cpu_reference_test AND
@@ -379,6 +380,7 @@ if(TARGET NEPAdapters::cuda AND
       nep_adapters_cuda_qnep_reference_test
       PRIVATE
         NEPAdapters::cuda
+        NEPAdapters::cpu
     )
     target_compile_definitions(
       nep_adapters_cuda_qnep_reference_test
@@ -672,6 +674,23 @@ if(TARGET NEPAdapters::cuda AND
     COMMAND nep_adapters_cuda_q134_batch_force_test)
   set_tests_properties(nep_adapters_cuda_q134_batch_force_test PROPERTIES
     LABELS "parity;engine;cuda;device;force")
+endif()
+
+if(TARGET NEPAdapters::cuda AND TARGET NEPAdapters::cpu)
+  add_executable(
+    nep_adapters_cuda_protocol_extensions_test
+    test_cuda_protocol_extensions.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_protocol_extensions_test
+    PRIVATE
+      NEPAdapters::cuda
+      NEPAdapters::cpu)
+  add_test(
+    NAME nep_adapters_cuda_protocol_extensions_test
+    COMMAND nep_adapters_cuda_protocol_extensions_test)
+  set_tests_properties(
+    nep_adapters_cuda_protocol_extensions_test
+    PROPERTIES LABELS "parity;protocol;engine;cpu;cuda;device")
 endif()
 
 if(TARGET NEPAdapters::cuda AND

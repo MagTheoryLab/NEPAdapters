@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -81,21 +82,6 @@ void require(bool condition, const char* message) {
   }
 }
 
-bool all_active(const std::vector<int>& mask, int num_types) {
-  if (mask.empty()) {
-    return true;
-  }
-  if (static_cast<int>(mask.size()) != num_types) {
-    return false;
-  }
-  for (int value : mask) {
-    if (value == 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
 class PhaseTimer {
  public:
   explicit PhaseTimer(bool enabled) : enabled_(enabled) {
@@ -157,6 +143,8 @@ void launch_spin_descriptor_core(
           static_cast<float>(protocol.spin_cutoff_radial),
           box,
           view.types,
+          model_view.spin_dof_type_active,
+          model_view.spin_env_type_active,
           view.positions_soa3,
           view.spins_soa3,
           view.nn_radial,
@@ -302,6 +290,8 @@ void launch_spin_density_force_shape(
         static_cast<float>(protocol.spin_cutoff_radial),
         box,
         view.types,
+        model_view.spin_dof_type_active,
+        model_view.spin_env_type_active,
         view.positions_soa3,
         view.spins_soa3,
         view.nn_radial,
@@ -462,6 +452,8 @@ void launch_spin_chiral_force_shape(
         static_cast<float>(protocol.spin_cutoff_radial),
         box,
         view.types,
+        model_view.spin_dof_type_active,
+        model_view.spin_env_type_active,
         view.positions_soa3,
         view.spins_soa3,
         view.nn_radial,
@@ -587,9 +579,6 @@ void build_spin_descriptors_on_device(
           "spin descriptor kernel supports spin_basis_size + 1 <= 8");
   require(protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4,
           "spin descriptor kernel supports spin_l_max <= 4");
-  require(all_active(protocol.spin_dof_type_active, protocol.num_types) &&
-              all_active(protocol.spin_env_type_active, protocol.num_types),
-          "CUDA spin path currently requires all types active for spin dof/env");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
   const SpinCoreLayout layout = make_spin_core_layout(protocol);
@@ -598,6 +587,9 @@ void build_spin_descriptors_on_device(
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
+  require(model_view.spin_dof_type_active != nullptr &&
+              model_view.spin_env_type_active != nullptr,
+          "model missing spin type masks");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.spins_soa3 != nullptr, "workspace missing spins");
   require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
@@ -638,15 +630,19 @@ void build_spin_descriptors_on_device(
 static void accumulate_spin_onsite_mforces_impl(
     const ModelProtocol& protocol,
     int atom_count,
+    const DeviceModel& model,
     DeviceWorkspace& workspace) {
   require(protocol.spin_mode != 0, "spin onsite mforce requires spin model");
   require(protocol.spin_descriptor_dim >= 2, "spin descriptor is missing onsite terms");
   const DeviceWorkspaceView view = workspace.view();
+  const DeviceModelView model_view = model.view();
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.spins_soa3 != nullptr, "workspace missing spins");
   require(view.fp != nullptr, "workspace missing descriptor derivatives");
   require(view.mforce_soa3 != nullptr, "workspace missing mforce output");
+  require(model_view.spin_dof_type_active != nullptr,
+          "model missing spin dof mask");
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
@@ -654,6 +650,8 @@ static void accumulate_spin_onsite_mforces_impl(
         atom_count,
         static_cast<int>(view.atom_capacity),
         protocol.struct_descriptor_dim,
+        view.types,
+        model_view.spin_dof_type_active,
         view.spins_soa3,
         view.fp,
         view.mforce_soa3);
@@ -678,14 +676,14 @@ static void accumulate_spin_density_forces_impl(
           "spin density force kernel supports spin_basis_size + 1 <= 8");
   require(protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4,
           "spin density force kernel supports spin_l_max <= 4");
-  require(all_active(protocol.spin_dof_type_active, protocol.num_types) &&
-              all_active(protocol.spin_env_type_active, protocol.num_types),
-          "CUDA spin path currently requires all types active for spin dof/env");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
+  require(model_view.spin_dof_type_active != nullptr &&
+              model_view.spin_env_type_active != nullptr,
+          "model missing spin type masks");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.spins_soa3 != nullptr, "workspace missing spins");
   require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
@@ -744,14 +742,14 @@ static void accumulate_spin_chiral_forces_impl(
   require(
       supports_cuda_spin_shape(protocol),
       "CUDA chiral spin force received an unsupported spin shape");
-  require(all_active(protocol.spin_dof_type_active, protocol.num_types) &&
-              all_active(protocol.spin_env_type_active, protocol.num_types),
-          "CUDA spin path currently requires all types active for spin dof/env");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
+  require(model_view.spin_dof_type_active != nullptr &&
+              model_view.spin_env_type_active != nullptr,
+          "model missing spin type masks");
   require(view.positions_soa3 != nullptr, "workspace missing positions");
   require(view.spins_soa3 != nullptr, "workspace missing spins");
   require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
@@ -836,7 +834,8 @@ void accumulate_spin_forces_on_device(
       break;
   }
 
-  accumulate_spin_onsite_mforces_impl(protocol, atom_count, workspace);
+  accumulate_spin_onsite_mforces_impl(
+      protocol, atom_count, model, workspace);
   timer.split(measured.onsite_ms);
 
   accumulate_spin_density_forces_impl(
@@ -860,6 +859,25 @@ void accumulate_spin_forces_on_device(
         accumulate_spin_transfer);
   }
   timer.split(measured.chiral_ms);
+
+  const bool has_inactive_dof = std::any_of(
+      protocol.spin_dof_type_active.begin(),
+      protocol.spin_dof_type_active.end(),
+      [](const int value) { return value == 0; });
+  if (has_inactive_dof) {
+    const DeviceModelView model_view = model.view();
+    const int threads = 128;
+    const int blocks = (atom_count + threads - 1) / threads;
+    if (blocks > 0) {
+      mask_inactive_spin_mforces<<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          view.types,
+          model_view.spin_dof_type_active,
+          view.mforce_soa3);
+    }
+    check_cuda(cudaGetLastError(), "mask inactive spin mforces");
+  }
 }
 
 }  // namespace nep_adapters::cuda_backend

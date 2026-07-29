@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <fstream>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -74,10 +75,8 @@ class CpuModel final : public Model {
     out = {};
     out.cutoff_radial = nep_.paramb.rc_radial_max;
     out.cutoff_angular = nep_.paramb.rc_angular_max;
-    out.cutoff_max = std::max(out.cutoff_radial, out.cutoff_angular);
-    if (nep_.zbl.enabled) {
-      out.cutoff_max = std::max(out.cutoff_max, nep_.zbl.rc_outer);
-    }
+    out.cutoff_max =
+        std::max(nep_.paramb.rc_neighbor_max, out.cutoff_angular);
     const NepaModelKind kind = model_kind();
     if (kind == NEPA_MODEL_KIND_DIPOLE) {
       out.capabilities = to_mask(Capability::dipole) |
@@ -97,7 +96,9 @@ class CpuModel final : public Model {
         out.capabilities |= to_mask(Capability::spin_energy_transfer);
       } else {
         out.capabilities |= to_mask(Capability::dftd3);
-        out.capabilities |= NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS;
+        if (nep_.annmb.num_neurons2 == 0) {
+          out.capabilities |= NEPA_CAPABILITY_EVALUATE_WITH_DESCRIPTORS;
+        }
       }
     }
     out.num_types = static_cast<std::int32_t>(nep_.paramb.num_types);
@@ -1001,6 +1002,11 @@ class CpuEngine final : public Engine {
       std::unique_ptr<Model>& out) override {
     if (model_path.empty()) {
       return NEPA_STATUS_INVALID_ARGUMENT;
+    }
+    std::ifstream header(model_path);
+    std::string version_tag;
+    if (header >> version_tag && version_tag.rfind("nep3", 0) == 0) {
+      return NEPA_STATUS_UNSUPPORTED;
     }
 
     out = std::make_unique<CpuModel<NativeNep>>(model_path);
