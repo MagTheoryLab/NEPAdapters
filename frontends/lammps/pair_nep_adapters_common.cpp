@@ -184,6 +184,10 @@ void PairNEPAdaptersCommon::load_model(const std::string& model_path) {
   }
   cutoff_ = info.cutoff_max;
   spin_model_ = (info.capabilities & NEPA_CAPABILITY_SPIN) != 0;
+  // Full NEP neighbor lists accumulate force (and, for spin models, magnetic
+  // force) contributions on periodic/MPI ghost atoms even with Newton off.
+  // Reserve enough classic reverse-communication storage for f, fm, and raw9.
+  comm_reverse_off = spin_model_ ? 15 : 12;
 }
 
 void PairNEPAdaptersCommon::log_loaded_model(
@@ -247,7 +251,25 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
   ev_init(eflag, vflag);
 
   const int nlocal = atom->nlocal;
+  const int nall = atom->nlocal + atom->nghost;
   if (nlocal <= 0) {
+    // A rank with no owned atoms still has to enter the Newton-off reverse
+    // exchange.  Other ranks may send contributions through its ghost layers;
+    // returning here would leave their point-to-point communication pending
+    // and can hang MPI finalization (for example, four ranks for four atoms).
+    const bool want_atom_virial = (vatom != nullptr || cvatom != nullptr);
+    if (want_atom_virial) {
+      virials_per_atom_.assign(static_cast<std::size_t>(nall) * 9, 0.0);
+    }
+    classic_reverse_per_atom_virial_ =
+        !force->newton && want_atom_virial;
+    if (!force->newton && nall > 0) {
+      const int force_width = spin_model_ ? 6 : 3;
+      const int reverse_width =
+          force_width + (classic_reverse_per_atom_virial_ ? 9 : 0);
+      comm->reverse_comm(this, reverse_width);
+    }
+    classic_reverse_per_atom_virial_ = false;
     return;
   }
   if (list == nullptr) {
@@ -255,7 +277,6 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     error->all(FLERR, message.c_str());
   }
 
-  const int nall = atom->nlocal + atom->nghost;
   if (spin_model_ && (!atom->sp_flag || atom->sp == nullptr || atom->fm == nullptr)) {
     const std::string message =
         label_ + ": spin model requires atom_style spin";
@@ -344,6 +365,20 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     error->all(FLERR, nepa_status_message(status));
   }
 
+  // LAMMPS skips its normal atom reverse communication when Newton is off,
+  // but the center-based NEP force decomposition still writes neighbor rows,
+  // including ghost rows.  Pull those contributions back to their owners.
+  // Per-atom virial uses the same neighbor ownership and must travel with f/fm.
+  classic_reverse_per_atom_virial_ =
+      !force->newton && want_atom_virial;
+  if (!force->newton && nall > nlocal) {
+    const int force_width = spin_model_ ? 6 : 3;
+    const int reverse_width =
+        force_width + (classic_reverse_per_atom_virial_ ? 9 : 0);
+    comm->reverse_comm(this, reverse_width);
+  }
+  classic_reverse_per_atom_virial_ = false;
+
   if (eflag) {
     eng_vdwl += total_potential;
   }
@@ -382,6 +417,57 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
       const double* raw9 = virials_per_atom_.data() + 9 * static_cast<std::size_t>(i);
       for (int component = 0; component < 9; ++component) {
         cvatom[i][component] += raw9[component];
+      }
+    }
+  }
+}
+
+int PairNEPAdaptersCommon::pack_reverse_comm(
+    int n,
+    int first,
+    double* buffer) {
+  const int force_width = spin_model_ ? 6 : 3;
+  const int width = force_width + (classic_reverse_per_atom_virial_ ? 9 : 0);
+  int offset = 0;
+  for (int i = first; i < first + n; ++i) {
+    buffer[offset++] = atom->f[i][0];
+    buffer[offset++] = atom->f[i][1];
+    buffer[offset++] = atom->f[i][2];
+    if (spin_model_) {
+      buffer[offset++] = atom->fm[i][0];
+      buffer[offset++] = atom->fm[i][1];
+      buffer[offset++] = atom->fm[i][2];
+    }
+    if (classic_reverse_per_atom_virial_) {
+      const double* raw9 = virials_per_atom_.data() + 9 * static_cast<std::size_t>(i);
+      for (int component = 0; component < 9; ++component) {
+        buffer[offset++] = raw9[component];
+      }
+    }
+  }
+  return width * n;
+}
+
+void PairNEPAdaptersCommon::unpack_reverse_comm(
+    int n,
+    int* list,
+    double* buffer) {
+  int offset = 0;
+  for (int i = 0; i < n; ++i) {
+    const int atom_index = list[i];
+    atom->f[atom_index][0] += buffer[offset++];
+    atom->f[atom_index][1] += buffer[offset++];
+    atom->f[atom_index][2] += buffer[offset++];
+    if (spin_model_) {
+      atom->fm[atom_index][0] += buffer[offset++];
+      atom->fm[atom_index][1] += buffer[offset++];
+      atom->fm[atom_index][2] += buffer[offset++];
+    }
+    if (classic_reverse_per_atom_virial_) {
+      double* raw9 = virials_per_atom_.data() +
+          9 * static_cast<std::size_t>(atom_index);
+      for (int component = 0; component < 9; ++component) {
+        raw9[component] += buffer[offset++];
       }
     }
   }

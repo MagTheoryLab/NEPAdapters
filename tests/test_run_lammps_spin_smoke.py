@@ -47,6 +47,23 @@ class LammpsSpinSmokeTest(unittest.TestCase):
     self.assertIn("newton off", contents)
     self.assertNotIn("plugin load", contents)
 
+  def test_cpu_input_writes_requested_newton_mode(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "in.spin"
+      smoke.write_input(
+          path,
+          "cpu.so",
+          "nep.txt",
+          self.structure,
+          "nep/cpu",
+          "environment",
+          newton="on",
+      )
+      contents = path.read_text(encoding="utf-8")
+
+    self.assertIn("newton on\n", contents)
+    self.assertNotIn("newton off\n", contents)
+
   def test_builtin_input_needs_no_plugin(self):
     with tempfile.TemporaryDirectory() as directory:
       path = Path(directory) / "in.spin"

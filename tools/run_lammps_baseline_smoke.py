@@ -107,6 +107,7 @@ def write_input(
     elements,
     pair_style="nep/cpu",
     plugin_load_mode="environment",
+    newton="on",
 ):
     stress_cols = " ".join(f"c_satom[{index}]" for index in range(1, 7))
     atom_style = "atomic/kk" if pair_style == "nep/gpu" else "atomic"
@@ -121,6 +122,7 @@ def write_input(
                 "units metal",
                 f"atom_style {atom_style}",
                 "boundary p p p",
+                f"newton {newton}",
                 *plugin_command,
                 "read_data data.baseline",
                 f"run_style {run_style}",
@@ -298,6 +300,7 @@ def main():
     parser.add_argument(
         "--pair-style", choices=("nep/cpu", "nep/gpu"), default="nep/cpu"
     )
+    parser.add_argument("--newton", choices=("on", "off"), default="on")
     parser.add_argument(
         "--plugin-load-mode",
         choices=("environment", "command", "builtin"),
@@ -335,6 +338,7 @@ def main():
         elements,
         args.pair_style,
         args.plugin_load_mode,
+        args.newton,
     )
 
     run_env = (
@@ -355,6 +359,7 @@ def main():
         "model": args.model,
         "fixture": args.fixture,
         "pair_style": args.pair_style,
+        "newton": args.newton,
         "plugin_load_mode": args.plugin_load_mode,
         "result": compare(
             fixture,

@@ -48,7 +48,15 @@ def spin_magnitude_and_direction(spin):
     return magnitude, [component / magnitude for component in spin]
 
 
-def write_input(path, plugin, model, structure, pair_style, plugin_load_mode):
+def write_input(
+    path,
+    plugin,
+    model,
+    structure,
+    pair_style,
+    plugin_load_mode,
+    newton="off",
+):
     gpu = pair_style in {"nep/gpu", "nep/gpu/kk"}
     atom_style = "spin/kk" if gpu else "spin"
     run_style = "verlet/kk" if gpu else "verlet"
@@ -62,7 +70,7 @@ def write_input(path, plugin, model, structure, pair_style, plugin_load_mode):
         f"atom_style {atom_style}",
         "atom_modify map array",
         "boundary p p p",
-        "newton off",
+        f"newton {newton}",
         *plugin_command,
         f"region box block 0.0 {xhi:.17g} 0.0 {yhi:.17g} 0.0 {zhi:.17g} units box",
         f"create_box {len(structure['elements'])} box",
@@ -233,6 +241,7 @@ def main():
     parser.add_argument(
         "--pair-style", choices=("nep/cpu", "nep/gpu", "nep/gpu/kk"), default="nep/cpu"
     )
+    parser.add_argument("--newton", choices=("on", "off"), default="off")
     parser.add_argument(
         "--plugin-load-mode",
         choices=("builtin", "environment", "command"),
@@ -268,6 +277,7 @@ def main():
         structure,
         args.pair_style,
         args.plugin_load_mode,
+        args.newton,
     )
 
     run_env = (
@@ -301,6 +311,7 @@ def main():
         "plugin": args.plugin,
         "model": args.model,
         "pair_style": args.pair_style,
+        "newton": args.newton,
         "mpi_ranks": args.mpi_ranks,
         "observed_mpi_ranks": observed_mpi_ranks,
         "result": compare(
