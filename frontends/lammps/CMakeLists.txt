@@ -433,6 +433,40 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         nep_adapters_lammps_spin_cuda_plugin_test PROPERTIES
         LABELS "smoke;frontend;lammps;plugin;spin;cuda;kokkos;device;real_lammps"
         DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
+
+      foreach(_spin2_shape IN ITEMS o2c2 o3c2)
+        set(_spin2_model
+          "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_spin2_shape}.nep")
+        set(_spin2_fixture_dir
+          "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_${_spin2_shape}_lammps")
+        if(EXISTS "${_spin2_model}" AND
+           EXISTS "${_spin2_fixture_dir}/structure.json" AND
+           EXISTS "${_spin2_fixture_dir}/reference.txt")
+          add_test(
+            NAME "nep_adapters_lammps_spin2_${_spin2_shape}_cuda_plugin_test"
+            COMMAND
+              "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
+              --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+              --plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
+              --model "${_spin2_model}"
+              --structure "${_spin2_fixture_dir}/structure.json"
+              --reference "${_spin2_fixture_dir}/reference.txt"
+              --pair-style nep/gpu/kk
+              --work-dir
+                "${CMAKE_BINARY_DIR}/lammps_spin2_${_spin2_shape}_cuda_smoke"
+              --energy-tolerance 1.0e-6
+              --force-tolerance 2.0e-4
+              --mforce-tolerance 2.0e-4
+              --virial-tolerance 2.0e-4)
+          set_tests_properties(
+            "nep_adapters_lammps_spin2_${_spin2_shape}_cuda_plugin_test"
+            PROPERTIES
+              LABELS
+                "oracle;frontend;lammps;plugin;spin2;${_spin2_shape};cuda;kokkos;device;real_lammps"
+              DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
+        endif()
+      endforeach()
     endif()
   endif()
 endif()

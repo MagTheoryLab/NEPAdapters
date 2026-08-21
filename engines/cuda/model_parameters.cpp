@@ -238,6 +238,12 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
     }
   }
   raw_offset += protocol.descriptor_parameter_count;
+  append_range(
+      packed.spin_projection_parameters,
+      raw,
+      raw_offset,
+      protocol.spin_projection_parameter_count);
+  raw_offset += protocol.spin_projection_parameter_count;
 
   if (raw_offset != protocol.model_parameter_count) {
     throw std::runtime_error("model parameter layout did not consume all model parameters");

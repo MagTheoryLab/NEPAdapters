@@ -19,6 +19,17 @@ set(NEP_ADAPTERS_NEP89_XYZ_PATH "" CACHE FILEPATH
   "Path to an extxyz file compatible with the nep89 model")
 set(NEP_ADAPTERS_QNEP_TEST_DATA_DIR "" CACHE PATH
   "Path to qNEP test data containing nep.txt and xyz.in")
+set(NEP_ADAPTERS_SPIN2_MODEL_PATH "" CACHE FILEPATH
+  "Path to a nep4_spin2 model file for CUDA protocol and oracle tests")
+if((NOT NEP_ADAPTERS_SPIN2_MODEL_PATH OR
+    NEP_ADAPTERS_SPIN2_MODEL_PATH STREQUAL
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_light46_matched.nep") AND
+   EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c2.nep")
+  set(NEP_ADAPTERS_SPIN2_MODEL_PATH
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c2.nep"
+    CACHE FILEPATH
+    "Path to a nep4_spin2 model file for CUDA protocol and oracle tests" FORCE)
+endif()
 set(NEP_ADAPTERS_NEP_CPU_NEP_TEST_DATA_DIR
   "${PROJECT_SOURCE_DIR}/tests/fixtures/nep_cpu_reference/nep")
 

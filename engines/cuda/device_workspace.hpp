@@ -129,6 +129,8 @@ struct DeviceWorkspaceView {
   float* spin_chiral_octupoles_raw = nullptr;
   float* spin_chiral_hexadecapoles_raw = nullptr;
   float* spin_chiral_chirals = nullptr;
+  float* spin2_moments = nullptr;
+  float* spin2_pulls = nullptr;
 };
 
 class DeviceWorkspace {

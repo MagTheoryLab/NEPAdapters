@@ -68,7 +68,7 @@ __device__ __forceinline__ void compute_spin_edge_geometry_f32(
   }
 }
 
-template <int C, bool NeedDerivatives>
+template <int C, bool NeedDerivatives, bool FuseStructuralRadial = false>
 __device__ __forceinline__ void evaluate_spin_edge_weights_b4_f32(
     float spin_cutoff,
     float dist,
@@ -77,7 +77,9 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_b4_f32(
     const float* __restrict__ descriptor_coefficients,
     int spin_coefficient_offset,
     float* weights,
-    float* weight_derivatives) {
+    float* weight_derivatives,
+    const float* structural_radial_pull = nullptr,
+    float* structural_radial_scale = nullptr) {
   constexpr int BasisCount = 4;
   constexpr float Pi = 3.14159265358979323846f;
   const float rcinv = 1.0f / spin_cutoff;
@@ -109,6 +111,14 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_b4_f32(
     fnp[2] = 2.0f * u1 * radial_derivative * fc + fn_raw[2] * fcp;
     fnp[3] = 3.0f * u2 * radial_derivative * fc + fn_raw[3] * fcp;
   }
+  if constexpr (FuseStructuralRadial) {
+    float scale = 0.0f;
+#pragma unroll
+    for (int k = 0; k < BasisCount; ++k) {
+      scale += fnp[k] * structural_radial_pull[k];
+    }
+    *structural_radial_scale = scale;
+  }
 
   #pragma unroll
   for (int c = 0; c < C; ++c) {
@@ -131,7 +141,119 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_b4_f32(
   }
 }
 
-template <int C, bool NeedDerivatives>
+template <int C, bool NeedDerivatives, bool FuseStructuralRadial = false>
+__device__ __forceinline__ void evaluate_spin_edge_weights_b9_f32(
+    float spin_cutoff,
+    float dist,
+    int num_types,
+    int type_pair,
+    const float* __restrict__ descriptor_coefficients,
+    int spin_coefficient_offset,
+    float* weights,
+    float* weight_derivatives,
+    const float* structural_radial_pull = nullptr,
+    float* structural_radial_scale = nullptr) {
+  constexpr int BasisCount = 9;
+  constexpr float Pi = 3.14159265358979323846f;
+  const int pair_count = num_types * num_types;
+  const float rcinv = 1.0f / spin_cutoff;
+  const float r_scaled = dist * rcinv;
+  const float cutoff_phase = Pi * r_scaled;
+  const float fc = 0.5f * cosf(cutoff_phase) + 0.5f;
+  const float shifted = r_scaled - 1.0f;
+  const float x = 2.0f * shifted * shifted - 1.0f;
+  const float radial_derivative = 2.0f * shifted * rcinv;
+  float fcp = 0.0f;
+  if constexpr (NeedDerivatives) {
+    fcp = -0.5f * Pi * sinf(cutoff_phase) * rcinv;
+  }
+
+  float weight[C] = {};
+  float derivative[C] = {};
+  float radial_scale = 0.0f;
+  if constexpr (FuseStructuralRadial) {
+    radial_scale = fcp * structural_radial_pull[0];
+  }
+#pragma unroll
+  for (int c = 0; c < C; ++c) {
+    const int channel_offset =
+        spin_coefficient_offset + c * BasisCount * pair_count + type_pair;
+    const float coefficient = descriptor_coefficients[channel_offset];
+    weight[c] = fc * coefficient;
+    if constexpr (NeedDerivatives) {
+      derivative[c] = fcp * coefficient;
+    }
+  }
+
+  const float raw1 = 0.5f * (x + 1.0f);
+  const float fn1 = raw1 * fc;
+  float fnp1 = 0.0f;
+  if constexpr (NeedDerivatives) {
+    fnp1 = radial_derivative * fc + raw1 * fcp;
+  }
+  if constexpr (FuseStructuralRadial) {
+    radial_scale += fnp1 * structural_radial_pull[1];
+  }
+#pragma unroll
+  for (int c = 0; c < C; ++c) {
+    const int coefficient_index =
+        spin_coefficient_offset +
+        (c * BasisCount + 1) * pair_count + type_pair;
+    const float coefficient = descriptor_coefficients[coefficient_index];
+    weight[c] += fn1 * coefficient;
+    if constexpr (NeedDerivatives) {
+      derivative[c] += fnp1 * coefficient;
+    }
+  }
+
+  float t0 = 1.0f;
+  float t1 = x;
+  float u0 = 1.0f;
+  float u1 = 2.0f * x;
+#pragma unroll
+  for (int n = 2; n < BasisCount; ++n) {
+    const float t2 = 2.0f * x * t1 - t0;
+    const float raw = 0.5f * (t2 + 1.0f);
+    const float fn = raw * fc;
+    float fnp = 0.0f;
+    if constexpr (NeedDerivatives) {
+      fnp = static_cast<float>(n) * u1 * radial_derivative * fc +
+          raw * fcp;
+    }
+    if constexpr (FuseStructuralRadial) {
+      radial_scale += fnp * structural_radial_pull[n];
+    }
+#pragma unroll
+    for (int c = 0; c < C; ++c) {
+      const int coefficient_index =
+          spin_coefficient_offset +
+          (c * BasisCount + n) * pair_count + type_pair;
+      const float coefficient = descriptor_coefficients[coefficient_index];
+      weight[c] += fn * coefficient;
+      if constexpr (NeedDerivatives) {
+        derivative[c] += fnp * coefficient;
+      }
+    }
+    const float u2 = 2.0f * x * u1 - u0;
+    t0 = t1;
+    t1 = t2;
+    u0 = u1;
+    u1 = u2;
+  }
+
+#pragma unroll
+  for (int c = 0; c < C; ++c) {
+    weights[c] = weight[c];
+    if constexpr (NeedDerivatives) {
+      weight_derivatives[c] = derivative[c];
+    }
+  }
+  if constexpr (FuseStructuralRadial) {
+    *structural_radial_scale = radial_scale;
+  }
+}
+
+template <int C, bool NeedDerivatives, bool FuseStructuralRadial = false>
 __device__ __noinline__ void evaluate_spin_edge_weights_generic_f32(
     int spin_basis_size,
     float spin_cutoff,
@@ -141,7 +263,9 @@ __device__ __noinline__ void evaluate_spin_edge_weights_generic_f32(
     const float* __restrict__ descriptor_coefficients,
     int spin_coefficient_offset,
     float* weights,
-    float* weight_derivatives) {
+    float* weight_derivatives,
+    const float* structural_radial_pull = nullptr,
+    float* structural_radial_scale = nullptr) {
   constexpr float Pi = 3.14159265358979323846f;
   const int basis_count = spin_basis_size + 1;
   const float rcinv = 1.0f / spin_cutoff;
@@ -203,9 +327,16 @@ __device__ __noinline__ void evaluate_spin_edge_weights_generic_f32(
       weight_derivatives[c] = derivative;
     }
   }
+  if constexpr (FuseStructuralRadial) {
+    float scale = 0.0f;
+    for (int k = 0; k < basis_count; ++k) {
+      scale += fnp[k] * structural_radial_pull[k];
+    }
+    *structural_radial_scale = scale;
+  }
 }
 
-template <int C, bool NeedDerivatives>
+template <int C, bool NeedDerivatives, bool FuseStructuralRadial = false>
 __device__ __forceinline__ void evaluate_spin_edge_weights_f32(
     int spin_basis_size,
     float spin_cutoff,
@@ -215,9 +346,12 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_f32(
     const float* __restrict__ descriptor_coefficients,
     int spin_coefficient_offset,
     float* weights,
-    float* weight_derivatives) {
+    float* weight_derivatives,
+    const float* structural_radial_pull = nullptr,
+    float* structural_radial_scale = nullptr) {
   if (spin_basis_size == 3) {
-    evaluate_spin_edge_weights_b4_f32<C, NeedDerivatives>(
+    evaluate_spin_edge_weights_b4_f32<
+        C, NeedDerivatives, FuseStructuralRadial>(
         spin_cutoff,
         dist,
         num_types,
@@ -225,10 +359,28 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_f32(
         descriptor_coefficients,
         spin_coefficient_offset,
         weights,
-        weight_derivatives);
+        weight_derivatives,
+        structural_radial_pull,
+        structural_radial_scale);
     return;
   }
-  evaluate_spin_edge_weights_generic_f32<C, NeedDerivatives>(
+  if (spin_basis_size == 8) {
+    evaluate_spin_edge_weights_b9_f32<
+        C, NeedDerivatives, FuseStructuralRadial>(
+        spin_cutoff,
+        dist,
+        num_types,
+        type_pair,
+        descriptor_coefficients,
+        spin_coefficient_offset,
+        weights,
+        weight_derivatives,
+        structural_radial_pull,
+        structural_radial_scale);
+    return;
+  }
+  evaluate_spin_edge_weights_generic_f32<
+      C, NeedDerivatives, FuseStructuralRadial>(
       spin_basis_size,
       spin_cutoff,
       dist,
@@ -237,7 +389,9 @@ __device__ __forceinline__ void evaluate_spin_edge_weights_f32(
       descriptor_coefficients,
       spin_coefficient_offset,
       weights,
-      weight_derivatives);
+      weight_derivatives,
+      structural_radial_pull,
+      structural_radial_scale);
 }
 
 // Compact float moment helpers shared by the descriptor and force cores.
@@ -673,7 +827,6 @@ build_spin_descriptor_core_streaming(
   if (task >= Raw1DotTaskBase && LMax < 1 && !Chiral) {
     active_task = false;
   }
-
   float channel_acc[C] = {};
   const int count = center_active ? nn_radial[atom] : 0;
   int chunk_count =
@@ -727,7 +880,6 @@ build_spin_descriptor_core_streaming(
         }
       }
     }
-
     if (chunk + 1 == chunk_count) {
       if (scalar_term >= 0) {
         for (int c = 0; c < C; ++c) {

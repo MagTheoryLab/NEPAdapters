@@ -1142,7 +1142,8 @@ void accumulate_lammps_radial_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
-    bool accumulate_zbl_energy) {
+    bool accumulate_zbl_energy,
+    bool defer_to_spin) {
   const bool accumulate_virial = accumulates_virial(virial_target);
   require(atom_count >= 0, "atom_count must be non-negative");
   require(protocol.num_types > 0, "num_types must be positive");
@@ -1200,6 +1201,9 @@ void accumulate_lammps_radial_forces_on_device(
             0,
             view.atom_capacity * 9 * sizeof(double)),
         "clear virial output");
+  }
+  if (defer_to_spin) {
+    return;
   }
 
   const int basis_count = protocol.basis_size_radial + 1;

@@ -44,10 +44,24 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   if (!supports_cuda_spin_shape(protocol)) {
     throw std::runtime_error(
         "CUDA spin workspace requires 1 <= spin_compress <= 4, "
-        "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
+        "spin_compress <= spin_basis_size + 1 <= 9, and spin_l_max <= 4");
   }
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
+  if (protocol.spin_mode == 2) {
+    const SpinPolynomialLayout layout = make_spin_polynomial_layout(protocol);
+    add_array(
+        plan,
+        "spin2_moments",
+        ScalarType::float32,
+        plan.atom_capacity * static_cast<std::size_t>(layout.moment_count));
+    add_array(
+        plan,
+        "spin2_pulls",
+        ScalarType::float32,
+        plan.atom_capacity * static_cast<std::size_t>(layout.moment_count));
+    return;
+  }
   const std::size_t spin_compress =
       static_cast<std::size_t>(protocol.spin_compress);
   add_array(

@@ -62,6 +62,7 @@ def write_input(path, plugin, model, structure, pair_style, plugin_load_mode):
         f"atom_style {atom_style}",
         "atom_modify map array",
         "boundary p p p",
+        "newton off",
         *plugin_command,
         f"region box block 0.0 {xhi:.17g} 0.0 {yhi:.17g} 0.0 {zhi:.17g} units box",
         f"create_box {len(structure['elements'])} box",
@@ -225,7 +226,7 @@ def write_markdown(path, payload):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--lmp", required=True)
-    parser.add_argument("--plugin", required=True)
+    parser.add_argument("--plugin", default="")
     parser.add_argument("--model", required=True)
     parser.add_argument("--structure", required=True)
     parser.add_argument("--reference", required=True)
@@ -233,7 +234,9 @@ def main():
         "--pair-style", choices=("nep/cpu", "nep/gpu", "nep/gpu/kk"), default="nep/cpu"
     )
     parser.add_argument(
-        "--plugin-load-mode", choices=("environment", "command"), default="environment"
+        "--plugin-load-mode",
+        choices=("builtin", "environment", "command"),
+        default="environment",
     )
     parser.add_argument("--work-dir", default="build-lammps-spin-smoke")
     parser.add_argument("--mpiexec", default="")
@@ -249,7 +252,9 @@ def main():
     args = parser.parse_args()
 
     args.lmp = str(Path(args.lmp).resolve())
-    args.plugin = str(Path(args.plugin).resolve())
+    if args.plugin_load_mode != "builtin" and not args.plugin:
+        parser.error("--plugin is required unless --plugin-load-mode=builtin")
+    args.plugin = str(Path(args.plugin).resolve()) if args.plugin else ""
     args.model = str(Path(args.model).resolve())
     structure = read_structure(args.structure)
     reference = read_reference(args.reference)
