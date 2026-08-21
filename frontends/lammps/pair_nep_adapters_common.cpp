@@ -252,6 +252,30 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
 
   const int nlocal = atom->nlocal;
   const int nall = atom->nlocal + atom->nghost;
+  if (spin_model_ &&
+      (!atom->sp_flag || atom->sp == nullptr || atom->fm == nullptr)) {
+    const std::string message =
+        label_ + ": spin model requires atom_style spin";
+    error->all(FLERR, message.c_str());
+  }
+
+  if (!force->newton) {
+    // Verlet only clears owned force rows when Newton is off. This pair style
+    // deliberately accumulates center-based neighbor contributions on ghost
+    // rows and reverse-communicates them, so every ghost row must start from
+    // zero. This is especially important on ranks with no owned atoms, where
+    // LAMMPS clears no force storage at all.
+    for (int i = nlocal; i < nall; ++i) {
+      atom->f[i][0] = 0.0;
+      atom->f[i][1] = 0.0;
+      atom->f[i][2] = 0.0;
+      if (spin_model_) {
+        atom->fm[i][0] = 0.0;
+        atom->fm[i][1] = 0.0;
+        atom->fm[i][2] = 0.0;
+      }
+    }
+  }
   if (nlocal <= 0) {
     // A rank with no owned atoms still has to enter the Newton-off reverse
     // exchange.  Other ranks may send contributions through its ghost layers;
@@ -277,11 +301,6 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     error->all(FLERR, message.c_str());
   }
 
-  if (spin_model_ && (!atom->sp_flag || atom->sp == nullptr || atom->fm == nullptr)) {
-    const std::string message =
-        label_ + ": spin model requires atom_style spin";
-    error->all(FLERR, message.c_str());
-  }
   for (int i = 0; i < nall; ++i) {
     const int lammps_type = atom->type[i];
     if (lammps_type < 1 || lammps_type > atom->ntypes ||
