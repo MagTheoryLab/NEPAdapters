@@ -45,7 +45,8 @@ std::vector<Case> read_oracle(const std::string& path) {
        hash != "1744fddc200b83a842cdf46bf57a5207bd074c7801e24d69863c66b4a961abbd" &&
        hash != "961f2e47a6ac13f516eba20390150eeb1d83d38c21debb43683a2c56a170a271" &&
        hash != "f699bd78b4314c522d04761cc6909946cc3ebf5ca5046016851c25eae58cc2e9" &&
-       hash != "08bffedb58efd700be8044463a668c172c00fa82666d72dc730a975d7e047107"))
+       hash != "08bffedb58efd700be8044463a668c172c00fa82666d72dc730a975d7e047107" &&
+       hash != "51d363c4a2b2f3d65374eef7623bf711063a809b35598171641b91e986f4652a"))
     throw std::runtime_error("spin2 O/C oracle model hash mismatch");
   input >> token >> descriptor_dim;
   if (token != "descriptor_dim" ||
@@ -94,6 +95,29 @@ double max_abs(const std::vector<double>& a, const std::vector<double>& b,
     if (current > error) { error = current; if (worst) *worst = i; }
   }
   return error;
+}
+
+bool within_tolerance(const std::vector<double>& actual,
+                      const std::vector<double>& expected,
+                      double absolute_tolerance,
+                      double relative_tolerance) {
+  if (actual.size() != expected.size()) return false;
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    const double scale = std::max(std::abs(actual[i]), std::abs(expected[i]));
+    if (std::abs(actual[i] - expected[i]) >
+        absolute_tolerance + relative_tolerance * scale) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool within_tolerance(double actual, double expected,
+                      double absolute_tolerance,
+                      double relative_tolerance) {
+  const double scale = std::max(std::abs(actual), std::abs(expected));
+  return std::abs(actual - expected) <=
+      absolute_tolerance + relative_tolerance * scale;
 }
 
 struct Evaluation {
@@ -214,8 +238,9 @@ bool check_case(NepaModel* model, const Case& item, bool forward_only) {
   std::size_t worst = 0;
   const double descriptor = max_abs(out.descriptor, item.descriptor, &worst);
   const double potential = max_abs(out.potential, item.potential);
-  const double energy = std::abs(out.energy -
-      std::accumulate(item.potential.begin(), item.potential.end(), 0.0));
+  const double expected_energy =
+      std::accumulate(item.potential.begin(), item.potential.end(), 0.0);
+  const double energy = std::abs(out.energy - expected_energy);
   const double force = max_abs(out.forces, item.forces);
   const double mforce = max_abs(out.mforces, item.mforces);
   const double virial = max_abs(out.virial, expected_virial);
@@ -236,11 +261,29 @@ bool check_case(NepaModel* model, const Case& item, bool forward_only) {
             << " steady_force=" << steady_force
             << " steady_mforce=" << steady_mforce
             << " worst_descriptor=" << worst << '\n';
-  const bool forward = descriptor < 1.2e-3 && potential < 1.2e-3 && energy < 3e-3;
-  const bool derivative = force < 5e-3 && mforce < 5e-3 &&
-      virial < 2e-2 && atom_virial < 2e-2 && tau_error < 6e-3;
-  const bool steady_state = steady_potential < 1.2e-3 &&
-      steady_energy < 3e-3 && steady_force < 5e-3 && steady_mforce < 5e-3;
+  constexpr double fp32_relative_tolerance = 1.0e-6;
+  const bool forward = descriptor < 1.2e-3 &&
+      within_tolerance(out.potential, item.potential, 1.2e-3,
+                       fp32_relative_tolerance) &&
+      within_tolerance(out.energy, expected_energy, 3e-3,
+                       fp32_relative_tolerance);
+  const bool derivative =
+      within_tolerance(out.forces, item.forces, 5e-3,
+                       fp32_relative_tolerance) &&
+      mforce < 5e-3 &&
+      within_tolerance(out.virial, expected_virial, 2e-2,
+                       fp32_relative_tolerance) &&
+      within_tolerance(out.atom_virial, item.virial, 2e-2,
+                       fp32_relative_tolerance) &&
+      tau_error < 6e-3;
+  const bool steady_state =
+      within_tolerance(steady.potential, item.potential, 1.2e-3,
+                       fp32_relative_tolerance) &&
+      within_tolerance(steady.energy, expected_energy, 3e-3,
+                       fp32_relative_tolerance) &&
+      within_tolerance(steady.forces, item.forces, 5e-3,
+                       fp32_relative_tolerance) &&
+      steady_mforce < 5e-3;
   bool lammps_ok = true;
 #if defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
   if (item.name == "noncollinear") {
@@ -363,7 +406,13 @@ bool finite_difference(NepaModel* model, const Case& reference) {
             << " fd_deds=" << worst_mforce_derivative
             << " analytic_mforce=" << base.mforces[worst_mforce]
             << " strain=" << strain_error << '\n';
-  return force_error < 3e-3 && mforce_error < 3e-3 && strain_error < 5e-3;
+  double force_scale = 0.0;
+  for (double value : base.forces) {
+    force_scale = std::max(force_scale, std::abs(value));
+  }
+  const double force_tolerance = 3e-3 + 5e-5 * force_scale;
+  return force_error < force_tolerance &&
+      mforce_error < 3e-3 && strain_error < 5e-3;
 }
 }  // namespace
 

@@ -39,9 +39,11 @@ int expected_dim(int c, int lmax, int order, int soc) {
 }
 
 std::vector<std::string> header(
-    int c, int lmax, int order, int soc, bool masks = false) {
+    int c, int lmax, int order, int soc, bool masks = false,
+    bool zbl = false) {
   std::vector<std::string> lines = {
-      "nep4_spin2 3 Fe Ge C", "spin_mode 2 " + std::to_string(masks ? 11 : 9),
+      std::string(zbl ? "nep4_spin2_zbl" : "nep4_spin2") + " 3 Fe Ge C",
+      "spin_mode 2 " + std::to_string(masks ? 11 : 9),
       "spin_baseline -1 -2 -3", "spin_basis_size 8",
       "spin_l_max " + std::to_string(lmax),
       "spin_compress " + std::to_string(c), "spin_cutoff 6",
@@ -52,6 +54,7 @@ std::vector<std::string> header(
     lines.push_back("spin_dof_type Fe C");
     lines.push_back("spin_env_type Fe Ge C");
   }
+  if (zbl) lines.push_back("zbl 1.25 2.5");
   lines.insert(lines.end(), {"cutoff 6 5 64 64", "n_max 0 0",
       "basis_size 0 0", "l_max 0 0 0", "ANN 1 0"});
   return lines;
@@ -117,15 +120,18 @@ int main(int argc, char** argv) {
     }
   }
   for (int c = 1; c <= 9; ++c) for (int l = 0; l <= 2; ++l)
-    for (int o = 1; o <= 3; ++o) for (int s = 0; s <= 1; ++s) {
+    for (int o = 1; o <= 3; ++o) for (int s = 0; s <= 1; ++s)
+      for (bool zbl : {false, true}) {
       const ModelProtocol p = parse_model_protocol(write_lines(
-          "spin2_matrix.nep", header(c, l, o, s)));
+          "spin2_matrix.nep", header(c, l, o, s, false, zbl)));
       if (p.spin_descriptor_dim != expected_dim(c, l, o, s) ||
           p.spin_projection_size != 4 * c * c ||
           p.spin_projection_parameter_count !=
-              static_cast<std::size_t>(4 * c * c)) {
+              static_cast<std::size_t>(4 * c * c) ||
+          p.has_zbl != zbl) {
         std::cerr << "dimension mismatch C=" << c << " l=" << l
-                  << " O=" << o << " SOC=" << s << '\n';
+                  << " O=" << o << " SOC=" << s
+                  << " ZBL=" << zbl << '\n';
         return EXIT_FAILURE;
       }
     }
@@ -140,6 +146,21 @@ int main(int argc, char** argv) {
     std::cerr << "representative O3-C3 semantics mismatch\n";
     return EXIT_FAILURE;
   }
+
+  const auto zbl_rep = header(3, 2, 3, 1, true, true);
+  const std::string zbl_valid = complete("spin2_zbl_valid.nep", zbl_rep);
+  const HostModelParameters zbl_loaded = load_host_model_parameters(zbl_valid);
+  if (zbl_loaded.protocol.spin_mode != 2 ||
+      !zbl_loaded.protocol.has_zbl ||
+      zbl_loaded.protocol.zbl_inner != 1.25 ||
+      zbl_loaded.protocol.zbl_outer != 2.5 ||
+      zbl_loaded.protocol.cutoff_neighbor != 6.0) {
+    std::cerr << "spin2 ZBL protocol semantics mismatch\n";
+    return EXIT_FAILURE;
+  }
+  auto bad_zbl = header(2, 2, 3, 1, false, true);
+  bad_zbl.erase(bad_zbl.begin() + 11);
+  if (!header_fails(bad_zbl, "expected zbl line")) return EXIT_FAILURE;
 
   auto bad = header(2, 2, 3, 1);
   bad[0] = "nep4_spin3 3 Fe Ge C";
@@ -162,6 +183,15 @@ int main(int argc, char** argv) {
   if (nepa_load_model("cpu", valid.c_str(), &cpu_model) != NEPA_STATUS_OK ||
       nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
       cpu_info.descriptor_dim != loaded.protocol.descriptor_dim ||
+      (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
+    nepa_free_model(cpu_model);
+    return EXIT_FAILURE;
+  }
+  nepa_free_model(cpu_model);
+
+  cpu_model = nullptr;
+  if (nepa_load_model("cpu", zbl_valid.c_str(), &cpu_model) != NEPA_STATUS_OK ||
+      nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
       (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
     nepa_free_model(cpu_model);
     return EXIT_FAILURE;

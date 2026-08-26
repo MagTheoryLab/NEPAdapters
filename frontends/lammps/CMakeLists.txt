@@ -475,7 +475,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         LABELS "smoke;frontend;lammps;plugin;spin;cuda;kokkos;device;real_lammps"
         DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
 
-      foreach(_spin2_shape IN ITEMS o2c2 o3c2)
+      foreach(_spin2_shape IN ITEMS o2c2 o3c2 zbl_o3c2)
         set(_spin2_model
           "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_spin2_shape}.nep")
         set(_spin2_fixture_dir
@@ -483,6 +483,10 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         if(EXISTS "${_spin2_model}" AND
            EXISTS "${_spin2_fixture_dir}/structure.json" AND
            EXISTS "${_spin2_fixture_dir}/reference.txt")
+          set(_spin2_energy_tolerance 1.0e-6)
+          if(_spin2_shape STREQUAL "zbl_o3c2")
+            set(_spin2_energy_tolerance 1.0e-5)
+          endif()
           add_test(
             NAME "nep_adapters_lammps_spin2_${_spin2_shape}_cuda_plugin_test"
             COMMAND
@@ -497,7 +501,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
               --newton off
               --work-dir
                 "${CMAKE_BINARY_DIR}/lammps_spin2_${_spin2_shape}_cuda_smoke"
-              --energy-tolerance 1.0e-6
+              --energy-tolerance "${_spin2_energy_tolerance}"
               --force-tolerance 2.0e-4
               --mforce-tolerance 2.0e-4
               --virial-tolerance 2.0e-4)
@@ -512,7 +516,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
     endif()
 
     if(TARGET nepadapterscpuplugin)
-      foreach(_spin2_shape IN ITEMS o2c2 o3c2)
+      foreach(_spin2_shape IN ITEMS o2c2 o3c2 zbl_o3c2)
         set(_spin2_model
           "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_spin2_shape}.nep")
         set(_spin2_fixture_dir
@@ -520,6 +524,10 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         if(EXISTS "${_spin2_model}" AND
            EXISTS "${_spin2_fixture_dir}/structure.json" AND
            EXISTS "${_spin2_fixture_dir}/reference.txt")
+          set(_spin2_virial_tolerance 1.0e-5)
+          if(_spin2_shape STREQUAL "zbl_o3c2")
+            set(_spin2_virial_tolerance 2.0e-5)
+          endif()
           foreach(_newton_mode IN ITEMS on off)
             add_test(
               NAME
@@ -534,6 +542,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
                 --reference "${_spin2_fixture_dir}/reference.txt"
                 --pair-style nep/cpu
                 --newton "${_newton_mode}"
+                --virial-tolerance "${_spin2_virial_tolerance}"
                 --work-dir
                   "${CMAKE_BINARY_DIR}/lammps_spin2_${_spin2_shape}_cpu_newton_${_newton_mode}_smoke")
             set_tests_properties(

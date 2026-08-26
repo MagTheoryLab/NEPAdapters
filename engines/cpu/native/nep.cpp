@@ -8740,6 +8740,11 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     paramb.version = 4;
     paramb.spin_mode = 2;
     zbl.enabled = false;
+  } else if (tokens[0] == "nep4_spin2_zbl") {
+    paramb.model_type = 0;
+    paramb.version = 4;
+    paramb.spin_mode = 2;
+    zbl.enabled = true;
   } else if (tokens[0] == "nep4_spin3") {
     throw std::invalid_argument(
       "nep4_spin3 is unsupported by the CPU backend; CPU fallback is disabled");

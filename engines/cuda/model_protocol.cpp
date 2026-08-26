@@ -106,7 +106,7 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
 
   if (tag == "nep4" || tag == "nep4_zbl" ||
       tag == "nep4_spin" || tag == "nep4_spin1" ||
-      tag == "nep4_spin2") {
+      tag == "nep4_spin2" || tag == "nep4_spin2_zbl") {
     protocol.version = 4;
   } else if (tag == "nep4_charge1" || tag == "nep4_zbl_charge1") {
     protocol.version = 4;
@@ -124,7 +124,7 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
         "CUDA engine only accepts supported NEP4/NEP5 models");
   }
   protocol.has_zbl = tag.find("_zbl") != std::string::npos;
-  if (tag == "nep4_spin2") {
+  if (tag == "nep4_spin2" || tag == "nep4_spin2_zbl") {
     protocol.spin_mode = 2;
   } else {
     protocol.spin_mode = tag.find("_spin") != std::string::npos ? 1 : 0;

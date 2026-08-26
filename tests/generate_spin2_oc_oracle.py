@@ -47,8 +47,9 @@ def spin_descriptor_dim(compress: int, lmax: int, order: int, soc: int) -> int:
 
 
 def model_config(order: int = 3, compress: int = 2,
-                 lmax: int = 2, soc: int = 1):
-    return {
+                 lmax: int = 2, soc: int = 1,
+                 zbl: float | None = None):
+    config = {
         "num_types": 2,
         "type_names": ["Fe", "Ge"],
         "cutoff_radial": 6.0,
@@ -69,13 +70,17 @@ def model_config(order: int = 3, compress: int = 2,
         "spin_dof_type": ["Fe"],
         "spin_env_type": ["Fe", "Ge"],
     }
+    if zbl is not None:
+        config["zbl"] = zbl
+    return config
 
 
 def write_model(path: Path, order: int = 3, compress: int = 2,
-                lmax: int = 2, soc: int = 1):
+                lmax: int = 2, soc: int = 1,
+                zbl: float | None = None):
     torch.manual_seed(20260812)
     model = NEPModel(model_config(
-        order=order, compress=compress, lmax=lmax, soc=soc)).double()
+        order=order, compress=compress, lmax=lmax, soc=soc, zbl=zbl)).double()
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.copy_(0.08 * torch.randn_like(parameter))
@@ -218,11 +223,12 @@ def main():
     parser.add_argument("--compress", type=int, choices=range(1, 10), default=2)
     parser.add_argument("--lmax", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--soc", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--zbl", type=float)
     args = parser.parse_args()
     model_path = Path(args.model)
     if args.create_model:
         write_model(model_path, order=args.order, compress=args.compress,
-                    lmax=args.lmax, soc=args.soc)
+                    lmax=args.lmax, soc=args.soc, zbl=args.zbl)
     calculator = NEPCalculator(str(model_path), dtype=DTYPE)
     if (args.order, args.compress, args.lmax, args.soc) == (3, 2, 2, 1):
         assert_literal_o2_prefix(calculator)

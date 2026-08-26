@@ -37,7 +37,8 @@ if(TARGET NEPAdapters::cpu)
       o3c2
       o3c2_soc0
       o3c3
-      o2c9_l1_soc1)
+      o2c9_l1_soc1
+      zbl_o3c2)
     add_test(
       NAME nep_adapters_cpu_spin2_${_case}_oracle_test
       COMMAND
@@ -460,6 +461,15 @@ if(TARGET NEPAdapters::cuda AND
   set_tests_properties(
     nep_adapters_cuda_spin2_o3c2_oracle_test
     PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3c2")
+  add_test(
+    NAME nep_adapters_cuda_spin2_zbl_o3c2_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_zbl_o3c2.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_zbl_o3c2_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_zbl_o3c2_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;zbl;o3c2")
   add_test(
     NAME nep_adapters_cuda_spin2_o2c2_oracle_test
     COMMAND
