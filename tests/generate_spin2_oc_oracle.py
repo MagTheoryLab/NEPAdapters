@@ -32,15 +32,15 @@ def spin_descriptor_dim(compress: int, lmax: int, order: int, soc: int) -> int:
             dim += compress
         dim += compress + 2 * pairs
         if soc and lmax >= 1:
-            dim += 2 * compress
+            dim += (2 if compress >= 2 else 1) * compress
         if soc and lmax >= 2:
-            dim += 2 * compress
+            dim += (2 if compress >= 2 else 1) * compress
     if order >= 3:
         dim += compress
         if soc and lmax >= 1:
-            dim += 2 * compress
+            dim += (2 if compress >= 2 else 1) * compress
         if soc and lmax >= 2:
-            dim += 3 * compress
+            dim += (3 if compress >= 2 else 1) * compress
         if soc and lmax >= 1 and compress >= 3:
             dim += compress
     return dim

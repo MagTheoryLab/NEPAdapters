@@ -439,7 +439,7 @@ __global__ void contract_spin2_oc_descriptors(
     }
   }
   for (int row = 0; row < C; ++row) {
-    if (layout.coupling_l11_axial >= 0) {
+    if (layout.edge_l11_axial >= 0) {
       float m0[3], p0[3], p1[3], x0[3], l0[1], t0[5], w0[3];
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 0, row, m0);
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcP, 0, row, p0);
@@ -451,19 +451,24 @@ __global__ void contract_spin2_oc_descriptors(
       float p_axis[3], l11_axis[3];
       spin2_cross3(p0, p1, p_axis);
       spin2_oc_l11_axis_from_canonical(si, l0[0], x0, t0, l11_axis);
-      NEP_SPIN2_OC_STORE_AT(
-          layout.coupling_l11_axial + row, spin2_dot3(p_axis, w0));
+      if (layout.coupling_l11_axial >= 0) {
+        NEP_SPIN2_OC_STORE_AT(
+            layout.coupling_l11_axial + row, spin2_dot3(p_axis, w0));
+      }
       NEP_SPIN2_OC_STORE_AT(
           layout.edge_l11_axial + row, spin2_dot3(p0, l11_axis));
       if (layout.coupling_l11_dot_response >= 0) {
-        float dm0[3], dw0[3], m1[3], x2[3], cross_value[3];
+        float dm0[3], dw0[3];
         spin2_oc_project_density<3>(center, projection, C, kSpin2OcDM, 0, row, dm0);
-        spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 1, row, m1);
-        spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
         spin2_cross3(si, dm0, dw0);
         NEP_SPIN2_OC_STORE_AT(
             layout.coupling_l11_dot_response + row,
             spin2_dot3(p_axis, dw0));
+      }
+      if (layout.coupling_l111_p_m_x >= 0) {
+        float m1[3], x2[3], cross_value[3];
+        spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 1, row, m1);
+        spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
         spin2_cross3(m1, x2, cross_value);
         NEP_SPIN2_OC_STORE_AT(
             layout.coupling_l111_p_m_x + row,
@@ -479,7 +484,7 @@ __global__ void contract_spin2_oc_descriptors(
             -spin2_dot3(p0, cross12) * spin2_dot3(si, x3));
       }
     }
-    if (layout.coupling_l22_axial >= 0) {
+    if (layout.edge_l22_axial >= 0) {
       float m0[3], p0[3], p1[3], x0[3], q0[5], q1[5], qp0[15];
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 0, row, m0);
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcP, 0, row, p0);
@@ -491,25 +496,32 @@ __global__ void contract_spin2_oc_descriptors(
       float q_axis[3], w0[3];
       spin2_oc_axial_commutator(q0, q1, q_axis);
       spin2_cross3(si, m0, w0);
-      NEP_SPIN2_OC_STORE_AT(
-          layout.coupling_l22_axial + row, spin2_dot3(q_axis, w0));
+      if (layout.coupling_l22_axial >= 0) {
+        NEP_SPIN2_OC_STORE_AT(
+            layout.coupling_l22_axial + row, spin2_dot3(q_axis, w0));
+      }
       NEP_SPIN2_OC_STORE_AT(
           layout.edge_l22_axial + row,
           spin2_oc_l22_scalar_from_canonical(si, m0, q0, qp0));
       if (layout.coupling_l22_dot_response >= 0) {
-        float dm0[3], dw0[3], qp1[15], qs1[3], x2[3], cross_value[3];
+        float dm0[3], dw0[3];
         spin2_oc_project_density<3>(center, projection, C, kSpin2OcDM, 0, row, dm0);
-        spin2_oc_project_density<15>(center, projection, C, kSpin2OcQP, 1, row, qp1);
-        spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
         spin2_cross3(si, dm0, dw0);
-        spin2_oc_qp_vector(qp1, qs1);
         NEP_SPIN2_OC_STORE_AT(
             layout.coupling_l22_dot_response + row,
             spin2_dot3(q_axis, dw0));
+      }
+      if (layout.coupling_l111_p_qs_x >= 0) {
+        float qp1[15], qs1[3], x2[3], cross_value[3];
+        spin2_oc_project_density<15>(center, projection, C, kSpin2OcQP, 1, row, qp1);
+        spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
+        spin2_oc_qp_vector(qp1, qs1);
         spin2_cross3(qs1, x2, cross_value);
         NEP_SPIN2_OC_STORE_AT(
             layout.coupling_l111_p_qs_x + row,
             spin2_dot3(p0, cross_value));
+      }
+      if (layout.coupling_l112_edge_response >= 0) {
         float q_on_p1[3], mixed_axis[3];
         spin2_oc_stf5_matvec(q0, p1, q_on_p1);
         spin2_cross3(p1, q_on_p1, mixed_axis);

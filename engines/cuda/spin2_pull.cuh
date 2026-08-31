@@ -360,7 +360,7 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
 
   __syncwarp(active_mask);
 
-  if (layout.coupling_l11_axial >= 0) {
+  if (layout.edge_l11_axial >= 0) {
     float m0[3], p0[3], p1[3], x0[3], l0[1], t0[5], w0[3];
     spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 0, row, m0);
     spin2_oc_project_density<3>(center, projection, C, kSpin2OcP, 0, row, p0);
@@ -373,11 +373,13 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
     float gl0[1] = {}, gt0[5] = {}, gw0[3] = {};
     float p_axis[3], p_axis_pull[3] = {};
     spin2_cross3(p0, p1, p_axis);
-    const float a_l11 = NEP_SPIN2_OC_FP_DYNAMIC(
-        layout.coupling_l11_axial + row);
-    for (int d = 0; d < 3; ++d) {
-      p_axis_pull[d] += a_l11 * w0[d];
-      gw0[d] += a_l11 * p_axis[d];
+    if (layout.coupling_l11_axial >= 0) {
+      const float a_l11 = NEP_SPIN2_OC_FP_DYNAMIC(
+          layout.coupling_l11_axial + row);
+      for (int d = 0; d < 3; ++d) {
+        p_axis_pull[d] += a_l11 * w0[d];
+        gw0[d] += a_l11 * p_axis[d];
+      }
     }
     float l11_axis[3], l11_axis_pull[3];
     spin2_oc_l11_axis_from_canonical(si, l0[0], x0, t0, l11_axis);
@@ -390,11 +392,9 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
         si, l0[0], x0, t0, l11_axis_pull, direct_spin_pull,
         gl0, gx0, gt0);
     if (layout.coupling_l11_dot_response >= 0) {
-      float dm0[3], dw0[3], m1[3], x2[3];
-      float gdm0[3] = {}, gdw0[3] = {}, gm1[3] = {}, gx2[3] = {};
+      float dm0[3], dw0[3];
+      float gdm0[3] = {}, gdw0[3] = {};
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcDM, 0, row, dm0);
-      spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 1, row, m1);
-      spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
       spin2_cross3(si, dm0, dw0);
       const float a_dot = NEP_SPIN2_OC_FP_DYNAMIC(
           layout.coupling_l11_dot_response + row);
@@ -402,13 +402,18 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
         p_axis_pull[d] += a_dot * dw0[d];
         gdw0[d] += a_dot * p_axis[d];
       }
+      spin2_add_cross_pull(si, dm0, gdw0, direct_spin_pull, gdm0);
+      spin2_oc_add_projected_pull<C, 3, AtomicPull>(
+          pull, projection, kSpin2OcDM, 0, row, gdm0);
+    }
+    if (layout.coupling_l111_p_m_x >= 0) {
+      float m1[3], x2[3], gm1[3] = {}, gx2[3] = {};
+      spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 1, row, m1);
+      spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
       spin2_oc_reverse_triple_product(
           p0, m1, x2,
           NEP_SPIN2_OC_FP_DYNAMIC(layout.coupling_l111_p_m_x + row),
           gp0, gm1, gx2);
-      spin2_add_cross_pull(si, dm0, gdw0, direct_spin_pull, gdm0);
-      spin2_oc_add_projected_pull<C, 3, AtomicPull>(
-          pull, projection, kSpin2OcDM, 0, row, gdm0);
       spin2_oc_add_projected_pull<C, 3, AtomicPull>(
           pull, projection, kSpin2OcM, 1, row, gm1);
       spin2_oc_add_projected_pull<C, 3, AtomicPull>(
@@ -445,7 +450,7 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
     spin2_oc_add_projected_pull<C, 5, AtomicPull>(pull, projection, kSpin2OcT, 0, row, gt0);
   }
 
-  if (layout.coupling_l22_axial >= 0) {
+  if (layout.edge_l22_axial >= 0) {
     float m0[3], p0[3], p1[3], x0[3], q0[5], q1[5], qp0[15], w0[3];
     spin2_oc_project_density<3>(center, projection, C, kSpin2OcM, 0, row, m0);
     spin2_oc_project_density<3>(center, projection, C, kSpin2OcP, 0, row, p0);
@@ -459,34 +464,47 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
     float gq0[5] = {}, gq1[5] = {}, gqp0[15] = {}, gw0[3] = {};
     float q_axis[3], q_axis_pull[3] = {};
     spin2_oc_axial_commutator(q0, q1, q_axis);
-    const float a_l22 = NEP_SPIN2_OC_FP_DYNAMIC(
-        layout.coupling_l22_axial + row);
-    for (int d = 0; d < 3; ++d) {
-      q_axis_pull[d] += a_l22 * w0[d];
-      gw0[d] += a_l22 * q_axis[d];
+    if (layout.coupling_l22_axial >= 0) {
+      const float a_l22 = NEP_SPIN2_OC_FP_DYNAMIC(
+          layout.coupling_l22_axial + row);
+      for (int d = 0; d < 3; ++d) {
+        q_axis_pull[d] += a_l22 * w0[d];
+        gw0[d] += a_l22 * q_axis[d];
+      }
     }
     spin2_oc_reverse_l22_scalar_from_canonical(
         si, m0, q0, qp0,
         NEP_SPIN2_OC_FP_DYNAMIC(layout.edge_l22_axial + row),
         direct_spin_pull, gm0, gq0, gqp0);
     if (layout.coupling_l22_dot_response >= 0) {
-      float dm0[3], dw0[3], qp1[15], qs1[3], x2[3];
-      float gdm0[3] = {}, gdw0[3] = {}, gqp1[15] = {}, gqs1[3] = {}, gx2[3] = {};
+      float dm0[3], dw0[3];
+      float gdm0[3] = {}, gdw0[3] = {};
       spin2_oc_project_density<3>(center, projection, C, kSpin2OcDM, 0, row, dm0);
-      spin2_oc_project_density<15>(center, projection, C, kSpin2OcQP, 1, row, qp1);
-      spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
       spin2_cross3(si, dm0, dw0);
-      spin2_oc_qp_vector(qp1, qs1);
       const float a_dot = NEP_SPIN2_OC_FP_DYNAMIC(
           layout.coupling_l22_dot_response + row);
       for (int d = 0; d < 3; ++d) {
         q_axis_pull[d] += a_dot * dw0[d];
         gdw0[d] += a_dot * q_axis[d];
       }
+      spin2_add_cross_pull(si, dm0, gdw0, direct_spin_pull, gdm0);
+      spin2_oc_add_projected_pull<C, 3, AtomicPull>(pull, projection, kSpin2OcDM, 0, row, gdm0);
+    }
+    if (layout.coupling_l111_p_qs_x >= 0) {
+      float qp1[15], qs1[3], x2[3];
+      float gqp1[15] = {}, gqs1[3] = {}, gx2[3] = {};
+      spin2_oc_project_density<15>(center, projection, C, kSpin2OcQP, 1, row, qp1);
+      spin2_oc_project_density<3>(center, projection, C, kSpin2OcX, 2, row, x2);
+      spin2_oc_qp_vector(qp1, qs1);
       spin2_oc_reverse_triple_product(
           p0, qs1, x2,
           NEP_SPIN2_OC_FP_DYNAMIC(layout.coupling_l111_p_qs_x + row),
           gp0, gqs1, gx2);
+      spin2_oc_add_qp_vector_pull(gqs1, gqp1);
+      spin2_oc_add_projected_pull<C, 15, AtomicPull>(pull, projection, kSpin2OcQP, 1, row, gqp1);
+      spin2_oc_add_projected_pull<C, 3, AtomicPull>(pull, projection, kSpin2OcX, 2, row, gx2);
+    }
+    if (layout.coupling_l112_edge_response >= 0) {
       float q_on_p1[3], mixed_axis[3];
       spin2_oc_stf5_matvec(q0, p1, q_on_p1);
       spin2_cross3(p1, q_on_p1, mixed_axis);
@@ -501,11 +519,6 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
         gx0[d] -= edge_pull * si[d];
         direct_spin_pull[d] -= edge_pull * x0[d];
       }
-      spin2_oc_add_qp_vector_pull(gqs1, gqp1);
-      spin2_add_cross_pull(si, dm0, gdw0, direct_spin_pull, gdm0);
-      spin2_oc_add_projected_pull<C, 3, AtomicPull>(pull, projection, kSpin2OcDM, 0, row, gdm0);
-      spin2_oc_add_projected_pull<C, 15, AtomicPull>(pull, projection, kSpin2OcQP, 1, row, gqp1);
-      spin2_oc_add_projected_pull<C, 3, AtomicPull>(pull, projection, kSpin2OcX, 2, row, gx2);
     }
     spin2_oc_add_commutator_axial_pull(q0, q1, q_axis_pull, gq0, gq1);
     spin2_add_cross_pull(si, m0, gw0, direct_spin_pull, gm0);

@@ -26,13 +26,13 @@ int expected_dim(int c, int lmax, int order, int soc) {
     if (lmax >= 1) dim += (soc ? 3 : 1) * c;
     if (lmax >= 2) dim += c;
     dim += c + 2 * pairs;
-    if (soc && lmax >= 1) dim += 2 * c;
-    if (soc && lmax >= 2) dim += 2 * c;
+    if (soc && lmax >= 1) dim += (c >= 2 ? 2 : 1) * c;
+    if (soc && lmax >= 2) dim += (c >= 2 ? 2 : 1) * c;
   }
   if (order >= 3) {
     dim += c;
-    if (soc && lmax >= 1) dim += 2 * c;
-    if (soc && lmax >= 2) dim += 3 * c;
+    if (soc && lmax >= 1) dim += (c >= 2 ? 2 : 1) * c;
+    if (soc && lmax >= 2) dim += (c >= 2 ? 3 : 1) * c;
     if (soc && lmax >= 1 && c >= 3) dim += c;
   }
   return dim;

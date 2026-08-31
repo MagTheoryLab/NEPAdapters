@@ -33,6 +33,7 @@ if(TARGET NEPAdapters::cpu)
     PRIVATE NEPAdapters::cpu)
   foreach(_case IN ITEMS
       o1c1_l0_soc0
+      o3c1_l2_soc1
       o2c2
       o3c2
       o3c2_soc0
@@ -488,6 +489,15 @@ if(TARGET NEPAdapters::cuda AND
   set_tests_properties(
     nep_adapters_cuda_spin2_o1c1_l0_soc0_oracle_test
     PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o1;c1;l0;soc0")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o3c1_l2_soc1_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c1_l2_soc1.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c1_l2_soc1_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o3c1_l2_soc1_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3;c1;l2;soc1")
   add_test(
     NAME nep_adapters_cuda_spin2_o3c3_oracle_test
     COMMAND

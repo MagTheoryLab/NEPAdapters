@@ -71,24 +71,34 @@ inline SpinPolynomialLayout make_spin_polynomial_layout(
     layout.correlation_same_edge = offset; offset += layout.pair_count;
     layout.correlation_distinct_neighbor = offset; offset += layout.pair_count;
     if (soc != 0 && l_max >= 1) {
-      layout.coupling_l11_axial = offset; offset += channels;
+      if (channels >= 2) {
+        layout.coupling_l11_axial = offset; offset += channels;
+      }
       layout.edge_l11_axial = offset; offset += channels;
     }
     if (soc != 0 && l_max >= 2) {
-      layout.coupling_l22_axial = offset; offset += channels;
+      if (channels >= 2) {
+        layout.coupling_l22_axial = offset; offset += channels;
+      }
       layout.edge_l22_axial = offset; offset += channels;
     }
   }
   if (order >= 3) {
     layout.edge_l0_moment_gate = offset; offset += channels;
     if (soc != 0 && l_max >= 1) {
-      layout.coupling_l11_dot_response = offset; offset += channels;
+      if (channels >= 2) {
+        layout.coupling_l11_dot_response = offset; offset += channels;
+      }
       layout.coupling_l111_p_m_x = offset; offset += channels;
     }
     if (soc != 0 && l_max >= 2) {
-      layout.coupling_l22_dot_response = offset; offset += channels;
+      if (channels >= 2) {
+        layout.coupling_l22_dot_response = offset; offset += channels;
+      }
       layout.coupling_l111_p_qs_x = offset; offset += channels;
-      layout.coupling_l112_edge_response = offset; offset += channels;
+      if (channels >= 2) {
+        layout.coupling_l112_edge_response = offset; offset += channels;
+      }
     }
     if (soc != 0 && l_max >= 1 && channels >= 3) {
       layout.coupling_l111_bulk = offset; offset += channels;

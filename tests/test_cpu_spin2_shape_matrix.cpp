@@ -16,6 +16,41 @@ using nep_adapters::cpu_spin2::Edge;
 constexpr double kStep = 2.0e-6;
 constexpr double kTolerance = 3.0e-6;
 
+int torchnep_descriptor_dim(
+    int channels, int l_max, int order, int soc) {
+  const int pairs = channels * (channels + 1) / 2;
+  int dim = 1 + 2 * channels;
+  if (soc != 0 && l_max >= 2) dim += 2 * channels;
+  if (order >= 2) {
+    dim += 2 * channels;
+    if (l_max >= 1) dim += (soc != 0 ? 3 : 1) * channels;
+    if (l_max >= 2) dim += channels;
+    dim += channels + 2 * pairs;
+    if (soc != 0 && l_max >= 1) {
+      if (channels >= 2) dim += channels;
+      dim += channels;
+    }
+    if (soc != 0 && l_max >= 2) {
+      if (channels >= 2) dim += channels;
+      dim += channels;
+    }
+  }
+  if (order >= 3) {
+    dim += channels;
+    if (soc != 0 && l_max >= 1) {
+      if (channels >= 2) dim += channels;
+      dim += channels;
+    }
+    if (soc != 0 && l_max >= 2) {
+      if (channels >= 2) dim += channels;
+      dim += channels;
+      if (channels >= 2) dim += channels;
+    }
+    if (soc != 0 && l_max >= 1 && channels >= 3) dim += channels;
+  }
+  return dim;
+}
+
 struct ShapeCase {
   SpinPolynomialLayout layout;
   std::array<double, 3> center_spin = {0.43, -0.27, 0.61};
@@ -125,6 +160,15 @@ double finite_difference(ShapeCase& shape, Access access) {
 
 bool check_shape(int channels, int l_max, int order, int soc) {
   ShapeCase shape = make_shape(channels, l_max, order, soc);
+  const int expected_dim =
+      torchnep_descriptor_dim(channels, l_max, order, soc);
+  if (shape.layout.descriptor_dim != expected_dim) {
+    std::cerr << "descriptor dimension mismatch C=" << channels
+              << " L=" << l_max << " O=" << order << " SOC=" << soc
+              << " actual=" << shape.layout.descriptor_dim
+              << " expected=" << expected_dim << '\n';
+    return false;
+  }
   CenterScratch scratch;
   nep_adapters::cpu_spin2::build_state(
       shape.layout, shape.center_spin.data(), shape.spins.data(),
@@ -171,9 +215,53 @@ bool check_shape(int channels, int l_max, int order, int soc) {
   return ok;
 }
 
+bool check_rank_one_pruning_and_survivors() {
+  ShapeCase shape = make_shape(1, 2, 3, 1);
+  const SpinPolynomialLayout& layout = shape.layout;
+  if (layout.descriptor_dim != 19 ||
+      layout.coupling_l11_axial >= 0 ||
+      layout.coupling_l22_axial >= 0 ||
+      layout.coupling_l11_dot_response >= 0 ||
+      layout.coupling_l22_dot_response >= 0 ||
+      layout.coupling_l112_edge_response >= 0 ||
+      layout.coupling_l111_bulk >= 0 ||
+      layout.edge_l11_axial < 0 ||
+      layout.edge_l22_axial < 0 ||
+      layout.edge_l0_moment_gate < 0 ||
+      layout.coupling_l111_p_m_x < 0 ||
+      layout.coupling_l111_p_qs_x < 0) {
+    std::cerr << "rank-one radial pruning contract mismatch\n";
+    return false;
+  }
+
+  CenterScratch scratch;
+  nep_adapters::cpu_spin2::build_state(
+      layout, shape.center_spin.data(), shape.spins.data(),
+      shape.edges, scratch.state);
+  std::vector<double> descriptor(
+      static_cast<std::size_t>(layout.descriptor_dim), 0.0);
+  nep_adapters::cpu_spin2::descriptors(
+      layout, shape.center_spin.data(), shape.projection.data(),
+      scratch.state, descriptor.data());
+  for (int offset : {
+           layout.edge_l11_axial,
+           layout.edge_l22_axial,
+           layout.edge_l0_moment_gate,
+           layout.coupling_l111_p_m_x,
+           layout.coupling_l111_p_qs_x}) {
+    if (std::abs(descriptor[static_cast<std::size_t>(offset)]) <= 1.0e-12) {
+      std::cerr << "rank-one surviving channel is inactive at offset "
+                << offset << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
+  if (!check_rank_one_pruning_and_survivors()) return EXIT_FAILURE;
   int checked = 0;
   for (int channels = 1; channels <= 9; ++channels) {
     for (int l_max = 0; l_max <= 2; ++l_max) {

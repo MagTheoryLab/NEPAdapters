@@ -463,7 +463,7 @@ void contract(
     }
   }
   for (int row = 0; row < channels; ++row) {
-    if (layout.coupling_l11_axial >= 0) {
+    if (layout.edge_l11_axial >= 0) {
       Scalar m0[3], p0[3], p1[3], x0[3], l0[1], t0[5], w0[3];
       project_density<3>(center, projection, channels, kM, 0, row, m0);
       project_density<3>(center, projection, channels, kP, 0, row, p0);
@@ -475,15 +475,20 @@ void contract(
       Scalar p_axis[3], axis[3];
       cross3(p0, p1, p_axis);
       l11_axis(si, l0[0], x0, t0, axis);
-      emit(layout.coupling_l11_axial + row, dot3(p_axis, w0));
+      if (layout.coupling_l11_axial >= 0) {
+        emit(layout.coupling_l11_axial + row, dot3(p_axis, w0));
+      }
       emit(layout.edge_l11_axial + row, dot3(p0, axis));
       if (layout.coupling_l11_dot_response >= 0) {
-        Scalar dm0[3], dw0[3], m1[3], x2[3], cross_value[3];
+        Scalar dm0[3], dw0[3];
         project_density<3>(center, projection, channels, kDM, 0, row, dm0);
-        project_density<3>(center, projection, channels, kM, 1, row, m1);
-        project_density<3>(center, projection, channels, kX, 2, row, x2);
         cross3(si, dm0, dw0);
         emit(layout.coupling_l11_dot_response + row, dot3(p_axis, dw0));
+      }
+      if (layout.coupling_l111_p_m_x >= 0) {
+        Scalar m1[3], x2[3], cross_value[3];
+        project_density<3>(center, projection, channels, kM, 1, row, m1);
+        project_density<3>(center, projection, channels, kX, 2, row, x2);
         cross3(m1, x2, cross_value);
         emit(layout.coupling_l111_p_m_x + row, dot3(p0, cross_value));
       }
@@ -496,7 +501,7 @@ void contract(
              -dot3(p0, cross12) * dot3(si, x3));
       }
     }
-    if (layout.coupling_l22_axial >= 0) {
+    if (layout.edge_l22_axial >= 0) {
       Scalar m0[3], p0[3], p1[3], x0[3], q0[5], q1[5], qp0[15];
       project_density<3>(center, projection, channels, kM, 0, row, m0);
       project_density<3>(center, projection, channels, kP, 0, row, p0);
@@ -508,18 +513,25 @@ void contract(
       Scalar q_axis[3], w0[3];
       axial_commutator(q0, q1, q_axis);
       cross3(si, m0, w0);
-      emit(layout.coupling_l22_axial + row, dot3(q_axis, w0));
+      if (layout.coupling_l22_axial >= 0) {
+        emit(layout.coupling_l22_axial + row, dot3(q_axis, w0));
+      }
       emit(layout.edge_l22_axial + row, l22_scalar(si, m0, q0, qp0));
       if (layout.coupling_l22_dot_response >= 0) {
-        Scalar dm0[3], dw0[3], qp1[15], qs1[3], x2[3], cross_value[3];
+        Scalar dm0[3], dw0[3];
         project_density<3>(center, projection, channels, kDM, 0, row, dm0);
+        cross3(si, dm0, dw0);
+        emit(layout.coupling_l22_dot_response + row, dot3(q_axis, dw0));
+      }
+      if (layout.coupling_l111_p_qs_x >= 0) {
+        Scalar qp1[15], qs1[3], x2[3], cross_value[3];
         project_density<15>(center, projection, channels, kQP, 1, row, qp1);
         project_density<3>(center, projection, channels, kX, 2, row, x2);
-        cross3(si, dm0, dw0);
         qp_vector(qp1, qs1);
-        emit(layout.coupling_l22_dot_response + row, dot3(q_axis, dw0));
         cross3(qs1, x2, cross_value);
         emit(layout.coupling_l111_p_qs_x + row, dot3(p0, cross_value));
+      }
+      if (layout.coupling_l112_edge_response >= 0) {
         Scalar q_on_p1[3], mixed_axis[3];
         stf5_matvec(q0, p1, q_on_p1);
         cross3(p1, q_on_p1, mixed_axis);
@@ -631,7 +643,7 @@ inline void accumulate_descriptor_gradients(
   for (int d = 0; d < 3; ++d) si_gradient[d] += local_q_si_gradient[d];
 
   for (int row = 0; row < channels; ++row) {
-    if (layout.coupling_l11_axial >= 0) {
+    if (layout.edge_l11_axial >= 0) {
       double m0[3], p0[3], p1[3], x0[3], l0[1], t0[5];
       project_density<3>(center, projection, channels, kM, 0, row, m0);
       project_density<3>(center, projection, channels, kP, 0, row, p0);
@@ -644,9 +656,11 @@ inline void accumulate_descriptor_gradients(
       cross3(p0, p1, p_axis);
       cross3(si, m0, w0);
       double p_axis_gradient[3] = {}, w0_gradient[3] = {};
-      add_dot_gradient(
-          p_axis, w0, g(layout.coupling_l11_axial + row),
-          p_axis_gradient, w0_gradient);
+      if (layout.coupling_l11_axial >= 0) {
+        add_dot_gradient(
+            p_axis, w0, g(layout.coupling_l11_axial + row),
+            p_axis_gradient, w0_gradient);
+      }
       double p0_gradient[3] = {}, p1_gradient[3] = {}, m0_gradient[3] = {};
       add_cross_gradient(si, m0, w0_gradient, si_gradient, m0_gradient);
 
@@ -659,10 +673,8 @@ inline void accumulate_descriptor_gradients(
           si_gradient, l0_gradient, x0_gradient, t0_gradient);
 
       if (layout.coupling_l11_dot_response >= 0) {
-        double dm0[3], m1[3], x2[3];
+        double dm0[3];
         project_density<3>(center, projection, channels, kDM, 0, row, dm0);
-        project_density<3>(center, projection, channels, kM, 1, row, m1);
-        project_density<3>(center, projection, channels, kX, 2, row, x2);
         double dw0[3], dw0_gradient[3] = {};
         cross3(si, dm0, dw0);
         add_dot_gradient(
@@ -670,6 +682,12 @@ inline void accumulate_descriptor_gradients(
             p_axis_gradient, dw0_gradient);
         double dm0_gradient[3] = {};
         add_cross_gradient(si, dm0, dw0_gradient, si_gradient, dm0_gradient);
+        add_projected_density_gradient<3>(projection, channels, kDM, 0, row, dm0_gradient, center_gradient);
+      }
+      if (layout.coupling_l111_p_m_x >= 0) {
+        double m1[3], x2[3];
+        project_density<3>(center, projection, channels, kM, 1, row, m1);
+        project_density<3>(center, projection, channels, kX, 2, row, x2);
         double cross_value[3], cross_gradient[3] = {};
         cross3(m1, x2, cross_value);
         add_dot_gradient(
@@ -677,7 +695,6 @@ inline void accumulate_descriptor_gradients(
             p0_gradient, cross_gradient);
         double m1_gradient[3] = {}, x2_gradient[3] = {};
         add_cross_gradient(m1, x2, cross_gradient, m1_gradient, x2_gradient);
-        add_projected_density_gradient<3>(projection, channels, kDM, 0, row, dm0_gradient, center_gradient);
         add_projected_density_gradient<3>(projection, channels, kM, 1, row, m1_gradient, center_gradient);
         add_projected_density_gradient<3>(projection, channels, kX, 2, row, x2_gradient, center_gradient);
       }
@@ -709,7 +726,7 @@ inline void accumulate_descriptor_gradients(
       add_projected_density_gradient<5>(projection, channels, kT, 0, row, t0_gradient, center_gradient);
     }
 
-    if (layout.coupling_l22_axial >= 0) {
+    if (layout.edge_l22_axial >= 0) {
       double m0[3], p0[3], p1[3], x0[3], q0[5], q1[5], qp0[15];
       project_density<3>(center, projection, channels, kM, 0, row, m0);
       project_density<3>(center, projection, channels, kP, 0, row, p0);
@@ -722,9 +739,11 @@ inline void accumulate_descriptor_gradients(
       axial_commutator(q0, q1, q_axis);
       cross3(si, m0, w0);
       double q_axis_gradient[3] = {}, w0_gradient[3] = {};
-      add_dot_gradient(
-          q_axis, w0, g(layout.coupling_l22_axial + row),
-          q_axis_gradient, w0_gradient);
+      if (layout.coupling_l22_axial >= 0) {
+        add_dot_gradient(
+            q_axis, w0, g(layout.coupling_l22_axial + row),
+            q_axis_gradient, w0_gradient);
+      }
       double q0_gradient[5] = {}, q1_gradient[5] = {}, m0_gradient[3] = {};
       add_cross_gradient(si, m0, w0_gradient, si_gradient, m0_gradient);
       double qp0_gradient[15] = {};
@@ -734,18 +753,22 @@ inline void accumulate_descriptor_gradients(
 
       double p0_gradient[3] = {}, p1_gradient[3] = {}, x0_gradient[3] = {};
       if (layout.coupling_l22_dot_response >= 0) {
-        double dm0[3], qp1[15], x2[3], dw0[3], qs1[3];
+        double dm0[3], dw0[3];
         project_density<3>(center, projection, channels, kDM, 0, row, dm0);
-        project_density<15>(center, projection, channels, kQP, 1, row, qp1);
-        project_density<3>(center, projection, channels, kX, 2, row, x2);
         cross3(si, dm0, dw0);
-        qp_vector(qp1, qs1);
         double dw0_gradient[3] = {};
         add_dot_gradient(
             q_axis, dw0, g(layout.coupling_l22_dot_response + row),
             q_axis_gradient, dw0_gradient);
         double dm0_gradient[3] = {};
         add_cross_gradient(si, dm0, dw0_gradient, si_gradient, dm0_gradient);
+        add_projected_density_gradient<3>(projection, channels, kDM, 0, row, dm0_gradient, center_gradient);
+      }
+      if (layout.coupling_l111_p_qs_x >= 0) {
+        double qp1[15], x2[3], qs1[3];
+        project_density<15>(center, projection, channels, kQP, 1, row, qp1);
+        project_density<3>(center, projection, channels, kX, 2, row, x2);
+        qp_vector(qp1, qs1);
         double cross_value[3], cross_gradient[3] = {}, qs1_gradient[3] = {}, x2_gradient[3] = {};
         cross3(qs1, x2, cross_value);
         add_dot_gradient(
@@ -754,7 +777,10 @@ inline void accumulate_descriptor_gradients(
         add_cross_gradient(qs1, x2, cross_gradient, qs1_gradient, x2_gradient);
         double qp1_gradient[15] = {};
         add_qp_vector_gradient(qp1, qs1_gradient, qp1_gradient);
-
+        add_projected_density_gradient<15>(projection, channels, kQP, 1, row, qp1_gradient, center_gradient);
+        add_projected_density_gradient<3>(projection, channels, kX, 2, row, x2_gradient, center_gradient);
+      }
+      if (layout.coupling_l112_edge_response >= 0) {
         double q_on_p1[3], mixed_axis[3];
         stf5_matvec(q0, p1, q_on_p1);
         cross3(p1, q_on_p1, mixed_axis);
@@ -772,9 +798,6 @@ inline void accumulate_descriptor_gradients(
         add_cross_gradient(p1, q_on_p1, mixed_gradient, p1_gradient, q_on_p1_gradient);
         add_stf5_matvec_gradient(q0, p1, q_on_p1_gradient, q0_gradient, p1_gradient);
 
-        add_projected_density_gradient<3>(projection, channels, kDM, 0, row, dm0_gradient, center_gradient);
-        add_projected_density_gradient<15>(projection, channels, kQP, 1, row, qp1_gradient, center_gradient);
-        add_projected_density_gradient<3>(projection, channels, kX, 2, row, x2_gradient, center_gradient);
       }
       add_axial_commutator_gradient(q0, q1, q_axis_gradient, q0_gradient, q1_gradient);
       add_projected_density_gradient<3>(projection, channels, kM, 0, row, m0_gradient, center_gradient);
@@ -790,7 +813,7 @@ inline void accumulate_descriptor_gradients(
 
 inline bool uses_dense_edge_primitives(const SpinPolynomialLayout& layout) {
   return layout.edge_l0_moment_gate >= 0 &&
-      layout.coupling_l11_axial >= 0 &&
+      layout.edge_l11_axial >= 0 &&
       layout.edge_l2_pair >= 0;
 }
 
@@ -803,8 +826,8 @@ inline void add_edge_state(
   const bool has_order2 = Dense || layout.density_l0_self >= 0;
   const bool has_order3 = Dense || layout.edge_l0_moment_gate >= 0;
   const bool needs_l1 = Dense || layout.density_l1_product_self >= 0 ||
-      layout.coupling_l11_axial >= 0;
-  const bool needs_p = Dense || layout.coupling_l11_axial >= 0;
+      layout.edge_l11_axial >= 0;
+  const bool needs_p = Dense || layout.edge_l11_axial >= 0;
   const bool needs_q = Dense || layout.edge_l2_pair >= 0;
   const bool needs_qp = Dense || needs_q || layout.density_l2_product_self >= 0;
   const double si2 = has_order3 ? dot3(si, si) : 0.0;
@@ -882,8 +905,8 @@ inline void accumulate_edge_gradients(
   const bool has_order2 = Dense || layout.density_l0_self >= 0;
   const bool has_order3 = Dense || layout.edge_l0_moment_gate >= 0;
   const bool needs_l1 = Dense || layout.density_l1_product_self >= 0 ||
-      layout.coupling_l11_axial >= 0;
-  const bool needs_p = Dense || layout.coupling_l11_axial >= 0;
+      layout.edge_l11_axial >= 0;
+  const bool needs_p = Dense || layout.edge_l11_axial >= 0;
   const bool needs_q = Dense || layout.edge_l2_pair >= 0;
   const bool needs_qp = Dense || needs_q || layout.density_l2_product_self >= 0;
   const double si2 = has_order3 ? dot3(si, si) : 0.0;
