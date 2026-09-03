@@ -88,6 +88,7 @@ __device__ __forceinline__ bool load_spin_edge_f32(
     int num_types,
     int spin_basis_size,
     float spin_cutoff,
+    const float* __restrict__ spin_cutoff_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const double* __restrict__ positions_soa3,
@@ -115,15 +116,17 @@ __device__ __forceinline__ bool load_spin_edge_f32(
     si[d] = static_cast<float>(spins_soa3[d * atom_stride + atom]);
     sj[d] = static_cast<float>(spins_soa3[d * atom_stride + neighbor]);
   }
-  if (!(dist > 1.0e-12f && dist < spin_cutoff)) {
+  const int type_pair = types[atom] * num_types + types[neighbor];
+  const float resolved_spin_cutoff = spin_cutoff_pair == nullptr
+      ? spin_cutoff : spin_cutoff_pair[type_pair];
+  if (!(dist > 1.0e-12f && dist < resolved_spin_cutoff)) {
     return false;
   }
-  const int type_pair = types[atom] * num_types + types[neighbor];
   const int neighbor_type = types[neighbor];
   evaluate_spin_edge_weights_f32<
       C, NeedDerivatives, FuseStructuralRadial>(
       spin_basis_size,
-      spin_cutoff,
+      resolved_spin_cutoff,
       dist,
       num_types,
       type_pair,
@@ -1081,6 +1084,7 @@ accumulate_spin_density_forces_tile_f32(
         num_types,
         spin_basis_size,
         spin_cutoff,
+        nullptr,
         box,
         types,
         positions_soa3,
@@ -1819,6 +1823,7 @@ accumulate_spin_chiral_forces_tile_f32(
         num_types,
         spin_basis_size,
         spin_cutoff,
+        nullptr,
         box,
         types,
         positions_soa3,

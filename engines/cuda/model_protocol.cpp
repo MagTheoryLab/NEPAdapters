@@ -106,7 +106,8 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
 
   if (tag == "nep4" || tag == "nep4_zbl" ||
       tag == "nep4_spin" || tag == "nep4_spin1" ||
-      tag == "nep4_spin2" || tag == "nep4_spin2_zbl") {
+      tag == "nep4_spin2" || tag == "nep4_spin2_zbl" ||
+      tag == "nep4_spin3" || tag == "nep4_spin3_zbl") {
     protocol.version = 4;
   } else if (tag == "nep4_charge1" || tag == "nep4_zbl_charge1") {
     protocol.version = 4;
@@ -126,6 +127,8 @@ void parse_version_tag(const std::string& tag, ModelProtocol& protocol) {
   protocol.has_zbl = tag.find("_zbl") != std::string::npos;
   if (tag == "nep4_spin2" || tag == "nep4_spin2_zbl") {
     protocol.spin_mode = 2;
+  } else if (tag == "nep4_spin3" || tag == "nep4_spin3_zbl") {
+    protocol.spin_mode = 3;
   } else {
     protocol.spin_mode = tag.find("_spin") != std::string::npos ? 1 : 0;
   }
@@ -376,7 +379,7 @@ void parse_spin_header_line(
           parse_double(tokens[static_cast<std::size_t>(1 + type)]);
     }
   } else if (tokens[0] == "spin_chiral") {
-    if (protocol.spin_mode == 2) {
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
       throw std::runtime_error(
           "spin_chiral is not part of the nep4_spin2 O/C protocol");
     }
@@ -393,52 +396,81 @@ void parse_spin_header_line(
     }
     protocol.spin_compress = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_basis_size") {
-    const std::size_t expected_size = protocol.spin_mode == 2 ? 2 : 3;
+    const std::size_t expected_size =
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3) ? 2 : 3;
     if (tokens.size() != expected_size) {
       throw std::runtime_error(
-          protocol.spin_mode == 2
-              ? "nep4_spin2 spin_basis_size requires exactly one value"
+          (protocol.spin_mode == 2 || protocol.spin_mode == 3)
+              ? "versioned O/C spin_basis_size requires exactly one value"
               : "spin_basis_size requires radial and reserved angular values");
     }
     protocol.spin_basis_size = parse_int(tokens[1]);
     protocol.spin_basis_size_angular =
-        protocol.spin_mode == 2 ? 0 : parse_int(tokens[2]);
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3)
+            ? 0 : parse_int(tokens[2]);
     if (protocol.spin_basis_size < 0 ||
         protocol.spin_basis_size_angular < 0) {
       throw std::runtime_error("spin_basis_size values must be non-negative");
     }
   } else if (tokens[0] == "spin_l_max") {
-    const std::size_t expected_size = protocol.spin_mode == 2 ? 2 : 4;
+    const std::size_t expected_size =
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3) ? 2 : 4;
     if (tokens.size() != expected_size) {
       throw std::runtime_error(
-          protocol.spin_mode == 2
-              ? "nep4_spin2 spin_l_max requires exactly one value"
+          (protocol.spin_mode == 2 || protocol.spin_mode == 3)
+              ? "versioned O/C spin_l_max requires exactly one value"
               : "spin_l_max requires 3body, 4body, and 5body values");
     }
     protocol.spin_l_max = parse_int(tokens[1]);
     const int l_max_4body =
-        protocol.spin_mode == 2 ? 0 : parse_int(tokens[2]);
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3)
+            ? 0 : parse_int(tokens[2]);
     const int l_max_5body =
-        protocol.spin_mode == 2 ? 0 : parse_int(tokens[3]);
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3)
+            ? 0 : parse_int(tokens[3]);
     if (l_max_4body != 0 || l_max_5body != 0) {
       throw std::runtime_error(
           "reserved spin_l_max values must be zero for Spin Lite");
     }
   } else if (tokens[0] == "spin_cutoff") {
-    const std::size_t expected_size = protocol.spin_mode == 2 ? 2 : 3;
-    if (tokens.size() != expected_size) {
-      throw std::runtime_error(
-          protocol.spin_mode == 2
-              ? "nep4_spin2 spin_cutoff requires exactly one value"
-              : "spin_cutoff requires radial and reserved angular values");
-    }
-    protocol.spin_cutoff_radial = parse_double(tokens[1]);
-    const double angular =
-        protocol.spin_mode == 2
-            ? protocol.spin_cutoff_radial
-            : parse_double(tokens[2]);
-    if (protocol.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
-      throw std::runtime_error("spin_cutoff values must be positive");
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
+      if (tokens.size() != 2 &&
+          tokens.size() != static_cast<std::size_t>(1 + protocol.num_types)) {
+        throw std::runtime_error(
+            "versioned O/C spin_cutoff requires one value or one per type");
+      }
+      protocol.spin_cutoff_by_type.clear();
+      if (tokens.size() == 2) {
+        const double cutoff = parse_double(tokens[1]);
+        protocol.spin_cutoff_by_type.assign(
+            static_cast<std::size_t>(protocol.num_types), cutoff);
+      } else {
+        for (int type = 0; type < protocol.num_types; ++type) {
+          protocol.spin_cutoff_by_type.push_back(
+              parse_double(tokens[static_cast<std::size_t>(1 + type)]));
+        }
+      }
+      if (protocol.spin_cutoff_by_type.empty() ||
+          *std::min_element(protocol.spin_cutoff_by_type.begin(),
+                            protocol.spin_cutoff_by_type.end()) <= 0.0) {
+        throw std::runtime_error("spin_cutoff values must be positive");
+      }
+      protocol.spin_cutoff_radial = *std::max_element(
+          protocol.spin_cutoff_by_type.begin(),
+          protocol.spin_cutoff_by_type.end());
+    } else {
+      if (tokens.size() != 3) {
+        throw std::runtime_error(
+            "spin_cutoff requires radial and reserved angular values");
+      }
+      protocol.spin_cutoff_radial = parse_double(tokens[1]);
+      const double angular = parse_double(tokens[2]);
+      if (protocol.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
+        throw std::runtime_error("spin_cutoff values must be positive");
+      }
+      protocol.spin_cutoff_by_type.assign(
+          static_cast<std::size_t>(protocol.num_types),
+          protocol.spin_cutoff_radial);
     }
   } else if (tokens[0] == "spin_dof_type") {
     if (tokens.size() < 2) {
@@ -479,18 +511,18 @@ void parse_spin_header_line(
       throw std::runtime_error("only spin_scaler 1 is supported by CUDA");
     }
   } else if (tokens[0] == "spin_order") {
-    if (protocol.spin_mode != 2) {
+    if (protocol.spin_mode != 2 && protocol.spin_mode != 3) {
       throw std::runtime_error(
-          "spin_order is only valid for nep4_spin2");
+          "spin_order is only valid for versioned O/C spin models");
     }
     if (tokens.size() != 2) {
       throw std::runtime_error("spin_order requires exactly one value");
     }
     protocol.spin_order = parse_int(tokens[1]);
   } else if (tokens[0] == "spin_soc") {
-    if (protocol.spin_mode != 2) {
+    if (protocol.spin_mode != 2 && protocol.spin_mode != 3) {
       throw std::runtime_error(
-          "spin_soc is only valid for nep4_spin2");
+          "spin_soc is only valid for versioned O/C spin models");
     }
     if (tokens.size() != 2) {
       throw std::runtime_error("spin_soc requires exactly one value");
@@ -500,9 +532,9 @@ void parse_spin_header_line(
       throw std::runtime_error("spin_soc must be 0 or 1");
     }
   } else if (tokens[0] == "spin_projection_size") {
-    if (protocol.spin_mode != 2) {
+    if (protocol.spin_mode != 2 && protocol.spin_mode != 3) {
       throw std::runtime_error(
-          "spin_projection_size is only valid for nep4_spin2");
+          "spin_projection_size is only valid for versioned O/C spin models");
     }
     if (tokens.size() != 2) {
       throw std::runtime_error(
@@ -514,7 +546,7 @@ void parse_spin_header_line(
           "spin_projection_size must be non-negative");
     }
   } else if (tokens[0] == "spin_n_max") {
-    if (protocol.spin_mode == 2) {
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
       throw std::runtime_error(
           "spin_n_max is not part of the nep4_spin2 O/C protocol");
     }
@@ -552,10 +584,12 @@ std::vector<std::string> parse_spin_block(
     throw std::runtime_error(
         "spin_mode metadata does not match model header tag");
   }
-  if (declared_spin_mode != 1 && declared_spin_mode != 2) {
-    throw std::runtime_error("only spin_mode 1 or 2 is supported");
+  if (declared_spin_mode != 1 && declared_spin_mode != 2 &&
+      declared_spin_mode != 3) {
+    throw std::runtime_error("only spin_mode 1, 2, or 3 is supported");
   }
-  if (protocol.spin_mode == 2 && tokens.size() != 3) {
+  if ((protocol.spin_mode == 2 || protocol.spin_mode == 3) &&
+      tokens.size() != 3) {
     throw std::runtime_error(
         "nep4_spin2 requires counted spin_mode N metadata");
   }
@@ -577,7 +611,7 @@ std::vector<std::string> parse_spin_block(
       }
       parse_spin_header_line(header, protocol);
     }
-    if (protocol.spin_mode == 2) {
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
       static const std::array<const char*, 9> required = {
           "spin_baseline", "spin_basis_size", "spin_l_max",
           "spin_compress", "spin_cutoff", "spin_order", "spin_soc",
@@ -613,7 +647,7 @@ void finalize_counts(ModelProtocol& protocol) {
         protocol.spin_l_max > 4) {
       throw std::runtime_error("invalid spin settings");
     }
-    if (protocol.spin_mode == 2) {
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
       if (protocol.spin_compress < 1 || protocol.spin_compress > 9 ||
           protocol.spin_l_max < 0 || protocol.spin_l_max > 2 ||
           protocol.spin_order < 1 || protocol.spin_order > 3 ||
@@ -675,7 +709,8 @@ void finalize_counts(ModelProtocol& protocol) {
             "spin_dof_type must be a subset of spin_env_type");
       }
     }
-    protocol.spin_descriptor_dim = protocol.spin_mode == 2
+    protocol.spin_descriptor_dim =
+        (protocol.spin_mode == 2 || protocol.spin_mode == 3)
         ? make_spin_polynomial_layout(protocol).descriptor_dim
         : make_spin_core_layout(protocol).descriptor_dim;
   }
@@ -711,7 +746,7 @@ void finalize_counts(ModelProtocol& protocol) {
         type_pairs * static_cast<std::size_t>(protocol.spin_compress) *
         (static_cast<std::size_t>(protocol.spin_basis_size) + 1);
   }
-  if (protocol.spin_mode == 2) {
+  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
     protocol.spin_projection_parameter_count =
         static_cast<std::size_t>(protocol.spin_projection_size);
   }

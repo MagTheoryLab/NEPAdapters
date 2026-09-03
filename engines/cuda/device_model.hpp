@@ -41,6 +41,7 @@ struct HostModelParameters {
   std::vector<float> q_scaler;
   std::vector<float> cutoff_radial_pair;
   std::vector<float> cutoff_angular_pair;
+  std::vector<float> spin_cutoff_pair;
   std::vector<float> zbl_parameters_pair;
   std::vector<double> spin_baseline;
   std::vector<int> atomic_numbers;
@@ -64,6 +65,7 @@ struct DeviceModelUploadSummary {
   std::size_t q_scaler_bytes = 0;
   std::size_t cutoff_radial_pair_bytes = 0;
   std::size_t cutoff_angular_pair_bytes = 0;
+  std::size_t spin_cutoff_pair_bytes = 0;
   std::size_t zbl_parameters_pair_bytes = 0;
   std::size_t spin_baseline_bytes = 0;
   std::size_t spin_dof_type_active_bytes = 0;
@@ -82,6 +84,7 @@ struct DeviceModelView {
   const float* q_scaler = nullptr;
   const float* cutoff_radial_pair = nullptr;
   const float* cutoff_angular_pair = nullptr;
+  const float* spin_cutoff_pair = nullptr;
   const float* zbl_parameters_pair = nullptr;
   const double* spin_baseline = nullptr;
   const int* spin_dof_type_active = nullptr;
@@ -96,6 +99,7 @@ struct DeviceModelView {
   std::size_t q_scaler_count = 0;
   std::size_t cutoff_radial_pair_count = 0;
   std::size_t cutoff_angular_pair_count = 0;
+  std::size_t spin_cutoff_pair_count = 0;
   std::size_t zbl_parameters_pair_count = 0;
   std::size_t spin_baseline_count = 0;
   std::size_t spin_dof_type_active_count = 0;
@@ -128,6 +132,7 @@ class DeviceModel {
   float* q_scaler_device_ = nullptr;
   float* cutoff_radial_pair_device_ = nullptr;
   float* cutoff_angular_pair_device_ = nullptr;
+  float* spin_cutoff_pair_device_ = nullptr;
   float* zbl_parameters_pair_device_ = nullptr;
   double* spin_baseline_device_ = nullptr;
   int* spin_dof_type_active_device_ = nullptr;

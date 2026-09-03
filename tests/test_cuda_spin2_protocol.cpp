@@ -162,9 +162,38 @@ int main(int argc, char** argv) {
   bad_zbl.erase(bad_zbl.begin() + 11);
   if (!header_fails(bad_zbl, "expected zbl line")) return EXIT_FAILURE;
 
+  auto spin3 = header(2, 2, 3, 1);
+  spin3[0] = "nep4_spin3 3 Fe Ge C";
+  spin3[1] = "spin_mode 3 9";
+  spin3[6] = "spin_cutoff 4 6 5";
+  const ModelProtocol spin3_protocol = parse_model_protocol(
+      write_lines("spin3_typewise.nep", spin3));
+  if (spin3_protocol.spin_mode != 3 ||
+      spin3_protocol.spin_descriptor_dim != 55 ||
+      spin3_protocol.spin_cutoff_radial != 6.0 ||
+      spin3_protocol.spin_cutoff_by_type !=
+          std::vector<double>({4.0, 6.0, 5.0})) {
+    std::cerr << "spin3 typewise-cutoff protocol mismatch\n";
+    return EXIT_FAILURE;
+  }
+  auto spin3_zbl = header(2, 2, 3, 1, false, true);
+  spin3_zbl[0] = "nep4_spin3_zbl 3 Fe Ge C";
+  spin3_zbl[1] = "spin_mode 3 9";
+  spin3_zbl[6] = "spin_cutoff 4 6 5";
+  const std::string spin3_zbl_valid = complete(
+      "spin3_zbl_valid.nep", spin3_zbl);
+  const HostModelParameters spin3_zbl_loaded =
+      load_host_model_parameters(spin3_zbl_valid);
+  if (spin3_zbl_loaded.protocol.spin_mode != 3 ||
+      !spin3_zbl_loaded.protocol.has_zbl ||
+      spin3_zbl_loaded.protocol.spin_descriptor_dim != 55 ||
+      spin3_zbl_loaded.spin_cutoff_pair !=
+          std::vector<float>({4.0f, 5.0f, 4.5f, 5.0f, 6.0f,
+                              5.5f, 4.5f, 5.5f, 5.0f})) {
+    std::cerr << "spin3 ZBL protocol semantics mismatch\n";
+    return EXIT_FAILURE;
+  }
   auto bad = header(2, 2, 3, 1);
-  bad[0] = "nep4_spin3 3 Fe Ge C";
-  if (!header_fails(bad, "supported NEP4/NEP5")) return EXIT_FAILURE;
   bad = header(2, 2, 3, 1); bad[9] = "spin_projection_size 17";
   if (!header_fails(bad, "4 * spin_compress^2")) return EXIT_FAILURE;
   bad = header(2, 2, 3, 1); bad[1] = "spin_mode 2";
@@ -192,6 +221,17 @@ int main(int argc, char** argv) {
   cpu_model = nullptr;
   if (nepa_load_model("cpu", zbl_valid.c_str(), &cpu_model) != NEPA_STATUS_OK ||
       nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
+      (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
+    nepa_free_model(cpu_model);
+    return EXIT_FAILURE;
+  }
+  nepa_free_model(cpu_model);
+
+  cpu_model = nullptr;
+  if (nepa_load_model("cpu", spin3_zbl_valid.c_str(), &cpu_model) !=
+          NEPA_STATUS_OK ||
+      nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
+      cpu_info.descriptor_dim != spin3_zbl_loaded.protocol.descriptor_dim ||
       (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
     nepa_free_model(cpu_model);
     return EXIT_FAILURE;

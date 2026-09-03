@@ -39,6 +39,8 @@ struct ForcePipelineTimings {
   float zbl_force_ms = 0.0f;
   float spin_onsite_ms = 0.0f;
   float spin_density_ms = 0.0f;
+  float spin_density_pull_ms = 0.0f;
+  float spin_density_edge_ms = 0.0f;
   float spin_chiral_ms = 0.0f;
 };
 

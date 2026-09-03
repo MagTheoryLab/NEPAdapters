@@ -17,7 +17,8 @@ constexpr double kStep = 2.0e-6;
 constexpr double kTolerance = 3.0e-6;
 
 int torchnep_descriptor_dim(
-    int channels, int l_max, int order, int soc) {
+    int channels, int l_max, int order, int soc,
+    bool angular_exchange = false) {
   const int pairs = channels * (channels + 1) / 2;
   int dim = 1 + 2 * channels;
   if (soc != 0 && l_max >= 2) dim += 2 * channels;
@@ -48,6 +49,7 @@ int torchnep_descriptor_dim(
     }
     if (soc != 0 && l_max >= 1 && channels >= 3) dim += channels;
   }
+  if (angular_exchange && order >= 2) dim += l_max * pairs;
   return dim;
 }
 
@@ -79,10 +81,12 @@ void refresh_edges(ShapeCase& shape) {
   }
 }
 
-ShapeCase make_shape(int channels, int l_max, int order, int soc) {
+ShapeCase make_shape(
+    int channels, int l_max, int order, int soc,
+    bool angular_exchange = false) {
   ShapeCase shape;
   shape.layout = nep_adapters::common::make_spin_polynomial_layout(
-      channels, l_max, order, soc);
+      channels, l_max, order, soc, angular_exchange);
   shape.edges[0].neighbor = 1;
   shape.edges[0].displacement[0] = 1.21;
   shape.edges[0].displacement[1] = -0.37;
@@ -158,10 +162,13 @@ double finite_difference(ShapeCase& shape, Access access) {
   return (plus - minus) / (2.0 * kStep);
 }
 
-bool check_shape(int channels, int l_max, int order, int soc) {
-  ShapeCase shape = make_shape(channels, l_max, order, soc);
+bool check_shape(
+    int channels, int l_max, int order, int soc,
+    bool angular_exchange = false) {
+  ShapeCase shape = make_shape(channels, l_max, order, soc, angular_exchange);
   const int expected_dim =
-      torchnep_descriptor_dim(channels, l_max, order, soc);
+      torchnep_descriptor_dim(
+          channels, l_max, order, soc, angular_exchange);
   if (shape.layout.descriptor_dim != expected_dim) {
     std::cerr << "descriptor dimension mismatch C=" << channels
               << " L=" << l_max << " O=" << order << " SOC=" << soc
@@ -215,6 +222,18 @@ bool check_shape(int channels, int l_max, int order, int soc) {
   return ok;
 }
 
+bool check_spin3_production_schema() {
+  const auto layout = nep_adapters::common::make_spin_polynomial_layout(
+      2, 2, 3, 1, true);
+  return layout.descriptor_dim == 55 &&
+      layout.correlation_distinct_neighbor == 26 &&
+      layout.correlation_distinct_l1 == 29 &&
+      layout.correlation_distinct_l2 == 32 &&
+      layout.coupling_l11_axial == 35 &&
+      layout.edge_l22_axial == 41 &&
+      layout.edge_l0_moment_gate == 43;
+}
+
 bool check_rank_one_pruning_and_survivors() {
   ShapeCase shape = make_shape(1, 2, 3, 1);
   const SpinPolynomialLayout& layout = shape.layout;
@@ -262,6 +281,8 @@ bool check_rank_one_pruning_and_survivors() {
 
 int main() {
   if (!check_rank_one_pruning_and_survivors()) return EXIT_FAILURE;
+  if (!check_spin3_production_schema() ||
+      !check_shape(2, 2, 3, 1, true)) return EXIT_FAILURE;
   int checked = 0;
   for (int channels = 1; channels <= 9; ++channels) {
     for (int l_max = 0; l_max <= 2; ++l_max) {

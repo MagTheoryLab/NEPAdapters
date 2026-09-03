@@ -1,14 +1,13 @@
 #pragma once
 
-constexpr int kSpin2OcCooperativeAtomsPerWarp = 8;
-
-// Cooperative steady-state LAMMPS path.  Eight atoms
-// share a warp and four lanes process independent edges for each atom.  Lane
-// ordering keeps equal edge slots adjacent across the eight atoms:
-// lane = edge_lane * 8 + atom_lane.
-template <SpinVirialMode VirialMode, bool FuseStructuralRadial = false>
+// Cooperative steady-state force path. AtomsPerWarp centers share a warp and
+// the remaining lanes process independent edges for each center. Lane ordering
+// keeps equal edge slots adjacent across the center tile.
+template <int C, int MomentCount, int AtomsPerWarp, bool InlinePull,
+          SpinVirialMode VirialMode,
+          bool FuseStructuralRadial = false>
 __global__ __launch_bounds__(128, 3)
-void accumulate_spin2_oc_native_forces_cooperative_o3c2(
+void accumulate_spin2_oc_native_forces_cooperative_o3(
     SpinPolynomialLayout layout,
     int atom_count,
     int atom_stride,
@@ -16,6 +15,7 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     int num_types,
     int spin_basis_size,
     float spin_cutoff,
+    const float* __restrict__ spin_cutoff_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const int* __restrict__ spin_dof_type_active,
@@ -29,18 +29,18 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     const float* __restrict__ structural_radial_coefficients,
     const float* __restrict__ projection,
     const float* __restrict__ moments,
+    const float* __restrict__ materialized_pulls,
     int spin_coefficient_offset,
     double* __restrict__ force_soa3,
     double* __restrict__ mforce_soa3,
     double* __restrict__ virial_soa9) {
   constexpr bool AccumulateCenterVirial =
       VirialMode == SpinVirialMode::center_owned;
-  constexpr int AtomsPerWarp = kSpin2OcCooperativeAtomsPerWarp;
   constexpr int EdgeLanes = 32 / AtomsPerWarp;
   constexpr int WarpsPerBlock = 4;
-  constexpr int MomentCount = 79;
-  __shared__ float pull_storage
-      [WarpsPerBlock][AtomsPerWarp][2][MomentCount];
+  static_assert(C <= EdgeLanes, "each O/C row needs one pull-builder lane");
+  __shared__ float pull_storage[WarpsPerBlock][AtomsPerWarp]
+      [InlinePull ? C : 1][InlinePull ? MomentCount : 1];
   extern __shared__ float structural_radial_pull_storage[];
   const int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
   const int lane = threadIdx.x & 31;
@@ -52,40 +52,49 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
   const bool valid = atom < atom_count;
   const bool spin_active =
       valid && spin_dof_type_active[types[atom]] != 0;
-  float* pull_banks = &pull_storage[warp_in_block][atom_lane][0][0];
-  float* pull_row0 = pull_storage[warp_in_block][atom_lane][0];
-  float* pull_row1 = pull_storage[warp_in_block][atom_lane][1];
-  for (int component = edge_lane; component < 2 * MomentCount;
-       component += EdgeLanes) {
-    pull_banks[component] = 0.0f;
+  const float* pull = valid
+      ? materialized_pulls + atom * layout.moment_count
+      : nullptr;
+  if constexpr (InlinePull) {
+    float* pull_banks = &pull_storage[warp_in_block][atom_lane][0][0];
+    float* pull_row0 = pull_storage[warp_in_block][atom_lane][0];
+    for (int component = edge_lane; component < C * MomentCount;
+         component += EdgeLanes) {
+      pull_banks[component] = 0.0f;
+    }
+    __syncwarp();
+    const bool builds_pull = spin_active && edge_lane < C;
+    const unsigned pull_builder_mask =
+        __ballot_sync(0xffffffffu, builds_pull);
+    if (builds_pull) {
+      float* row_pull = pull_storage[warp_in_block][atom_lane][edge_lane];
+      build_spin2_oc_center_pull_row<C, false>(
+          layout,
+          atom,
+          edge_lane,
+          pull_builder_mask,
+          atom_stride,
+          struct_dim,
+          spins_soa3,
+          fp,
+          projection,
+          moments,
+          row_pull,
+          mforce_soa3);
+    }
+    __syncwarp();
+    for (int component = edge_lane; component < MomentCount;
+         component += EdgeLanes) {
+      float value = pull_row0[component];
+#pragma unroll
+      for (int row = 1; row < C; ++row) {
+        value += pull_storage[warp_in_block][atom_lane][row][component];
+      }
+      pull_row0[component] = value;
+    }
+    __syncwarp();
+    pull = pull_row0;
   }
-  __syncwarp();
-  const bool builds_pull = spin_active && edge_lane < 2;
-  const unsigned pull_builder_mask =
-      __ballot_sync(0xffffffffu, builds_pull);
-  if (builds_pull) {
-    float* row_pull = edge_lane == 0 ? pull_row0 : pull_row1;
-    build_spin2_oc_center_pull_row<2, false>(
-        layout,
-        atom,
-        edge_lane,
-        pull_builder_mask,
-        atom_stride,
-        struct_dim,
-        spins_soa3,
-        fp,
-        projection,
-        moments,
-        row_pull,
-        mforce_soa3);
-  }
-  __syncwarp();
-  for (int component = edge_lane; component < MomentCount;
-       component += EdgeLanes) {
-    pull_row0[component] += pull_row1[component];
-  }
-  __syncwarp();
-  const float* pull = pull_row0;
   float* structural_radial_pulls = nullptr;
   if constexpr (FuseStructuralRadial) {
     constexpr int StructuralBasisCount = 9;
@@ -131,15 +140,16 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     const bool spin_neighbor_active =
         spin_env_type_active[types[neighbor]] != 0;
     if (!FuseStructuralRadial && !spin_neighbor_active) continue;
-    float r[3], dist, si[3], sj[3], weights[2], weight_derivatives[2];
+    float r[3], dist, si[3], sj[3], weights[C], weight_derivatives[C];
     float structural_radial_scale = 0.0f;
-    if (!load_spin_edge_f32<2, true, FuseStructuralRadial>(
+    if (!load_spin_edge_f32<C, true, FuseStructuralRadial>(
             atom,
             neighbor,
             atom_stride,
             num_types,
             spin_basis_size,
             spin_cutoff,
+            spin_cutoff_pair,
             box,
             types,
             positions_soa3,
@@ -189,7 +199,7 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     spin2_oc_stf5_outer(r, r, qrr);
     spin2_oc_stf5_outer(r, sj, edge_stf);
 
-    float grad_weight[2] = {};
+    float grad_weight[C] = {};
     float grad_r[3] = {};
     float grad_si[3] = {};
     float grad_sj[3] = {};
@@ -204,7 +214,7 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     float grad_dot = 0.0f;
     float grad_longitudinal = 0.0f;
 
-    for (int c = 0; c < 2; ++c) {
+    for (int c = 0; c < C; ++c) {
       const int base = spin2_oc_channel_offset(c);
       const float w = weights[c];
       const float a_sj2 =
@@ -233,6 +243,12 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
       const float* gq = pull + base + kSpin2OcQ;
       const float* gqp = pull + base + kSpin2OcQP;
       const float* gdm = pull + base + kSpin2OcDM;
+      const float* ga1 = layout.angular_l1_moment_offset >= 0
+          ? pull + layout.angular_l1_moment_offset + 3 * c
+          : nullptr;
+      const float* ga2 = layout.angular_l2_moment_offset >= 0
+          ? pull + layout.angular_l2_moment_offset + 5 * c
+          : nullptr;
       grad_weight[c] += spin2_dot3(gm, sj) + spin2_dot3(gp, r) +
           gl * longitudinal + spin2_dot3(gx, axial) +
           spin2_oc_dotn<5>(gt, edge_stf) +
@@ -248,11 +264,21 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
         weighted_p[d] += w * gp[d];
         weighted_x[d] += w * gx[d];
         weighted_dm[d] += w * gdm[d];
+        if (ga1 != nullptr) {
+          grad_weight[c] += ga1[d] * dot * r[d];
+          grad_dot += w * ga1[d] * r[d];
+          grad_r[d] += w * dot * ga1[d];
+        }
       }
       grad_longitudinal += w * gl;
       for (int k = 0; k < 5; ++k) {
         weighted_t[k] += w * gt[k];
         weighted_q[k] += w * gq[k];
+        if (ga2 != nullptr) {
+          grad_weight[c] += ga2[k] * dot * qrr[k];
+          grad_dot += w * ga2[k] * qrr[k];
+          grad_q[k] += w * dot * ga2[k];
+        }
         for (int d = 0; d < 3; ++d) {
           weighted_qp[3 * k + d] += w * gqp[3 * k + d];
         }
@@ -289,16 +315,20 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     }
 
     const float dot2 = dot * dot;
-    grad_weight[0] +=
-        2.0f * pull[spin2_oc_same_offset(2)] * weights[0] * dot2 +
-        pull[spin2_oc_same_offset(2) + 1] * weights[1] * dot2;
-    grad_weight[1] +=
-        pull[spin2_oc_same_offset(2) + 1] * weights[0] * dot2 +
-        2.0f * pull[spin2_oc_same_offset(2) + 2] * weights[1] * dot2;
-    grad_dot += 2.0f * dot *
-        (pull[spin2_oc_same_offset(2)] * weights[0] * weights[0] +
-         pull[spin2_oc_same_offset(2) + 1] * weights[0] * weights[1] +
-         pull[spin2_oc_same_offset(2) + 2] * weights[1] * weights[1]);
+    const int same_offset = spin2_oc_same_offset(C);
+    for (int left = 0; left < C; ++left) {
+      for (int right = left; right < C; ++right) {
+        const float a =
+            pull[same_offset + spin2_oc_pair_index(C, left, right)];
+        if (left == right) {
+          grad_weight[left] += 2.0f * a * weights[left] * dot2;
+        } else {
+          grad_weight[left] += a * weights[right] * dot2;
+          grad_weight[right] += a * weights[left] * dot2;
+        }
+        grad_dot += 2.0f * a * weights[left] * weights[right] * dot;
+      }
+    }
 
     float qr_left[3] = {}, qr_right[3] = {};
     spin2_oc_add_stf5_outer_pull(r, r, grad_q, 1.0f, qr_left, qr_right);
@@ -313,7 +343,7 @@ void accumulate_spin2_oc_native_forces_cooperative_o3c2(
     }
 
     float grad_dist = 0.0f;
-    for (int c = 0; c < 2; ++c) {
+    for (int c = 0; c < C; ++c) {
       grad_dist += grad_weight[c] * weight_derivatives[c];
     }
     const float dot_r = spin2_dot3(grad_r, r);

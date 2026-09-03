@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic unified nep4_spin2 models and FP64 oracles."""
+"""Generate deterministic versioned O/C spin models and FP64 oracles."""
 
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ from torchnep.nep import NEPCalculator
 DTYPE = torch.float64
 
 
-def spin_descriptor_dim(compress: int, lmax: int, order: int, soc: int) -> int:
+def spin_descriptor_dim(compress: int, lmax: int, order: int, soc: int,
+                        spin_mode: int = 2) -> int:
     pairs = compress * (compress + 1) // 2
     dim = 1 + 2 * compress
     if soc and lmax >= 2:
@@ -43,12 +44,15 @@ def spin_descriptor_dim(compress: int, lmax: int, order: int, soc: int) -> int:
             dim += (3 if compress >= 2 else 1) * compress
         if soc and lmax >= 1 and compress >= 3:
             dim += compress
+    if spin_mode == 3 and order >= 2:
+        dim += lmax * pairs
     return dim
 
 
 def model_config(order: int = 3, compress: int = 2,
                  lmax: int = 2, soc: int = 1,
-                 zbl: float | None = None):
+                 zbl: float | None = None, spin_mode: int = 2,
+                 spin_cutoff=(6.0, 6.0)):
     config = {
         "num_types": 2,
         "type_names": ["Fe", "Ge"],
@@ -60,11 +64,12 @@ def model_config(order: int = 3, compress: int = 2,
         "basis_size_angular": 8,
         "l_max": [4, 2, 0],
         "neuron": 30,
-        "spin_mode": 2,
+        "spin_mode": spin_mode,
         "spin_compress": compress,
         "spin_basis_size": [8, 0],
         "spin_l_max": [lmax, 0, 0],
-        "spin_cutoff": [6.0, 6.0],
+        "spin_cutoff": list(spin_cutoff),
+        "spin_cutoff_by_type": list(spin_cutoff),
         "spin_order": order,
         "spin_soc": soc,
         "spin_dof_type": ["Fe"],
@@ -77,10 +82,12 @@ def model_config(order: int = 3, compress: int = 2,
 
 def write_model(path: Path, order: int = 3, compress: int = 2,
                 lmax: int = 2, soc: int = 1,
-                zbl: float | None = None):
+                zbl: float | None = None, spin_mode: int = 2,
+                spin_cutoff=(6.0, 6.0)):
     torch.manual_seed(20260812)
     model = NEPModel(model_config(
-        order=order, compress=compress, lmax=lmax, soc=soc, zbl=zbl)).double()
+        order=order, compress=compress, lmax=lmax, soc=soc, zbl=zbl,
+        spin_mode=spin_mode, spin_cutoff=spin_cutoff)).double()
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.copy_(0.08 * torch.randn_like(parameter))
@@ -89,7 +96,8 @@ def write_model(path: Path, order: int = 3, compress: int = 2,
             torch.linspace(-0.31, 0.43, 4 * compress * compress,
                            dtype=DTYPE).reshape(4, compress, compress)
         )
-        descriptor_dim = 30 + spin_descriptor_dim(compress, lmax, order, soc)
+        descriptor_dim = 30 + spin_descriptor_dim(
+            compress, lmax, order, soc, spin_mode)
         model.q_scaler.copy_(
             torch.linspace(0.55, 1.35, descriptor_dim, dtype=DTYPE))
         model.energy_baseline.copy_(torch.tensor([-0.17, 0.23], dtype=DTYPE))
@@ -224,21 +232,25 @@ def main():
     parser.add_argument("--lmax", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--soc", type=int, choices=(0, 1), default=1)
     parser.add_argument("--zbl", type=float)
+    parser.add_argument("--spin-mode", type=int, choices=(2, 3), default=2)
+    parser.add_argument("--spin-cutoff", type=float, nargs="+", default=[6.0])
     args = parser.parse_args()
     model_path = Path(args.model)
     if args.create_model:
         write_model(model_path, order=args.order, compress=args.compress,
-                    lmax=args.lmax, soc=args.soc, zbl=args.zbl)
+                    lmax=args.lmax, soc=args.soc, zbl=args.zbl,
+                    spin_mode=args.spin_mode, spin_cutoff=args.spin_cutoff)
     calculator = NEPCalculator(str(model_path), dtype=DTYPE)
-    if (args.order, args.compress, args.lmax, args.soc) == (3, 2, 2, 1):
+    if (args.spin_mode, args.order, args.compress, args.lmax, args.soc) == (
+            2, 3, 2, 2, 1):
         assert_literal_o2_prefix(calculator)
     assert_symmetries(calculator)
     digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
     with Path(args.output).open("w", encoding="utf-8") as handle:
-        handle.write("spin2_oc_oracle_v1\n")
+        handle.write(f"spin{args.spin_mode}_oc_oracle_v1\n")
         handle.write(f"model_sha256 {digest}\n")
         spin_dim = spin_descriptor_dim(
-            args.compress, args.lmax, args.order, args.soc)
+            args.compress, args.lmax, args.order, args.soc, args.spin_mode)
         handle.write(f"descriptor_dim {30 + spin_dim}\n")
         handle.write(f"spin_descriptor_dim {spin_dim}\n")
         for name, species, positions, cell, spins in cases():

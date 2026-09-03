@@ -5357,6 +5357,20 @@ bool spin_type_active(
   return mask.empty() || mask[static_cast<std::size_t>(type)] != 0;
 }
 
+double spin_pair_cutoff(
+  const NEP::ParaMB& paramb,
+  const int type_pair)
+{
+  if (paramb.spin_cutoff_by_type.empty()) {
+    return paramb.spin_cutoff_radial;
+  }
+  const int center_type = type_pair / paramb.num_types;
+  const int neighbor_type = type_pair % paramb.num_types;
+  return 0.5 * (
+    paramb.spin_cutoff_by_type[static_cast<std::size_t>(center_type)] +
+    paramb.spin_cutoff_by_type[static_cast<std::size_t>(neighbor_type)]);
+}
+
 void make_spin2_edge_weights(
   const NEP::ParaMB& paramb,
   const NEP::ANN& annmb,
@@ -5366,13 +5380,14 @@ void make_spin2_edge_weights(
 {
   const int channels = paramb.spin_compress;
   const int basis_count = paramb.spin_basis_size + 1;
-  const double cutoff_inverse = 1.0 / paramb.spin_cutoff_radial;
+  const double cutoff = spin_pair_cutoff(paramb, type_pair);
+  const double cutoff_inverse = 1.0 / cutoff;
   double fc = 0.0;
   double fcp = 0.0;
   double fn[MAX_NUM_N];
   double fnp[MAX_NUM_N];
   find_fc_and_fcp(
-    paramb.spin_cutoff_radial, cutoff_inverse, distance, fc, fcp);
+    cutoff, cutoff_inverse, distance, fc, fcp);
   find_fn_and_fnp(
     paramb.spin_basis_size, cutoff_inverse, distance, fc, fcp, fn, fnp);
   for (int channel = 0; channel < channels; ++channel) {
@@ -5418,7 +5433,10 @@ void make_spin2_batch_edges(
     const double dy = y12[index];
     const double dz = z12[index];
     const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (!(distance > 1.0e-12 && distance < paramb.spin_cutoff_radial)) {
+    const int type_pair =
+      types[center] * static_cast<int>(paramb.num_types) + types[neighbor];
+    if (!(distance > 1.0e-12 &&
+          distance < spin_pair_cutoff(paramb, type_pair))) {
       continue;
     }
     nep_adapters::cpu_spin2::Edge edge;
@@ -5429,7 +5447,7 @@ void make_spin2_batch_edges(
     edge.distance = distance;
     make_spin2_edge_weights(
       paramb, annmb,
-      types[center] * static_cast<int>(paramb.num_types) + types[neighbor],
+      type_pair,
       distance, edge);
     edges.push_back(edge);
   }
@@ -5449,7 +5467,8 @@ void fill_spin2_batch_descriptor(
   double* descriptor_soa)
 {
   const auto layout = nep_adapters::common::make_spin_polynomial_layout(
-    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc);
+    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc,
+    paramb.spin_mode == 3);
   std::vector<double> spins_aos3(static_cast<std::size_t>(atom_count) * 3);
   for (int atom = 0; atom < atom_count; ++atom) {
     for (int d = 0; d < 3; ++d) {
@@ -5498,7 +5517,8 @@ void add_spin2_batch_gradient(
   double* spin_transfer_soa9)
 {
   const auto layout = nep_adapters::common::make_spin_polynomial_layout(
-    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc);
+    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc,
+    paramb.spin_mode == 3);
   std::vector<double> spins_aos3(static_cast<std::size_t>(atom_count) * 3);
   std::vector<double> spin_gradient(static_cast<std::size_t>(atom_count) * 3, 0.0);
   for (int atom = 0; atom < atom_count; ++atom) {
@@ -8128,11 +8148,12 @@ bool compute_spin2_lammps_centers(
   double** spin_transfer,
   LammpsThreadLocalScratchView* lammps_scratch)
 {
-  if (paramb.spin_mode != 2) {
+  if (paramb.spin_mode != 2 && paramb.spin_mode != 3) {
     return false;
   }
   const auto layout = nep_adapters::common::make_spin_polynomial_layout(
-    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc);
+    paramb.spin_compress, paramb.spin_l_max, paramb.spin_order,
+    paramb.spin_soc, paramb.spin_mode == 3);
   const bool use_private = lammps_spin_scratch_active(lammps_scratch);
 #if defined(_OPENMP)
   const int num_threads = use_private ? lammps_scratch->num_threads : 1;
@@ -8190,7 +8211,10 @@ bool compute_spin2_lammps_centers(
           const double dy = positions[neighbor][1] - positions[atom][1];
           const double dz = positions[neighbor][2] - positions[atom][2];
           const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-          if (!(distance > 1.0e-12 && distance < paramb.spin_cutoff_radial)) {
+          const int type_pair = spin_types[atom] *
+            static_cast<int>(paramb.num_types) + spin_types[neighbor];
+          if (!(distance > 1.0e-12 &&
+                distance < spin_pair_cutoff(paramb, type_pair))) {
             continue;
           }
           nep_adapters::cpu_spin2::Edge edge;
@@ -8201,7 +8225,7 @@ bool compute_spin2_lammps_centers(
           edge.distance = distance;
           make_spin2_edge_weights(
             paramb, annmb,
-            spin_types[atom] * static_cast<int>(paramb.num_types) + spin_types[neighbor],
+            type_pair,
             distance, edge);
           edges.push_back(edge);
         }
@@ -8746,8 +8770,15 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     paramb.spin_mode = 2;
     zbl.enabled = true;
   } else if (tokens[0] == "nep4_spin3") {
-    throw std::invalid_argument(
-      "nep4_spin3 is unsupported by the CPU backend; CPU fallback is disabled");
+    paramb.model_type = 0;
+    paramb.version = 4;
+    paramb.spin_mode = 3;
+    zbl.enabled = false;
+  } else if (tokens[0] == "nep4_spin3_zbl") {
+    paramb.model_type = 0;
+    paramb.version = 4;
+    paramb.spin_mode = 3;
+    zbl.enabled = true;
   } else if (tokens[0] == "nep4_spin" || tokens[0] == "nep4_spin1") {
     paramb.model_type = 0;
     paramb.version = 4;
@@ -8863,7 +8894,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       }
       saw_spin_baseline = true;
     } else if (spin_tokens[0] == "spin_chiral") {
-      if (paramb.spin_mode == 2) {
+      if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
         throw std::runtime_error(
           "spin_chiral is not part of the nep4_spin2 O/C protocol");
       }
@@ -8880,46 +8911,70 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       }
       paramb.spin_compress = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_basis_size") {
-      const std::size_t expected_size = paramb.spin_mode == 2 ? 2 : 3;
+      const std::size_t expected_size =
+        (paramb.spin_mode == 2 || paramb.spin_mode == 3) ? 2 : 3;
       if (spin_tokens.size() != expected_size) {
-        throw std::runtime_error(paramb.spin_mode == 2
-          ? "nep4_spin2 spin_basis_size requires exactly one value"
+        throw std::runtime_error((paramb.spin_mode == 2 || paramb.spin_mode == 3)
+          ? "versioned O/C spin_basis_size requires exactly one value"
           : "spin_basis_size requires radial and reserved angular values");
       }
       paramb.spin_basis_size = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
-      spin_basis_size_angular = paramb.spin_mode == 2 ? 0 :
+      spin_basis_size_angular = (paramb.spin_mode == 2 || paramb.spin_mode == 3) ? 0 :
         get_int_from_token(spin_tokens[2], __FILE__, __LINE__);
       if (paramb.spin_basis_size < 0 || spin_basis_size_angular < 0) {
         throw std::runtime_error("spin_basis_size values must be non-negative");
       }
     } else if (spin_tokens[0] == "spin_l_max") {
-      const std::size_t expected_size = paramb.spin_mode == 2 ? 2 : 4;
+      const std::size_t expected_size =
+        (paramb.spin_mode == 2 || paramb.spin_mode == 3) ? 2 : 4;
       if (spin_tokens.size() != expected_size) {
-        throw std::runtime_error(paramb.spin_mode == 2
-          ? "nep4_spin2 spin_l_max requires exactly one value"
+        throw std::runtime_error((paramb.spin_mode == 2 || paramb.spin_mode == 3)
+          ? "versioned O/C spin_l_max requires exactly one value"
           : "spin_l_max requires 3body, 4body, and 5body values");
       }
       paramb.spin_l_max = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
-      const int l_max_4body = paramb.spin_mode == 2 ? 0 :
+      const int l_max_4body = (paramb.spin_mode == 2 || paramb.spin_mode == 3) ? 0 :
         get_int_from_token(spin_tokens[2], __FILE__, __LINE__);
-      const int l_max_5body = paramb.spin_mode == 2 ? 0 :
+      const int l_max_5body = (paramb.spin_mode == 2 || paramb.spin_mode == 3) ? 0 :
         get_int_from_token(spin_tokens[3], __FILE__, __LINE__);
       if (l_max_4body != 0 || l_max_5body != 0) {
         throw std::runtime_error(
           "reserved spin_l_max values must be zero for Spin Lite");
       }
     } else if (spin_tokens[0] == "spin_cutoff") {
-      const std::size_t expected_size = paramb.spin_mode == 2 ? 2 : 3;
-      if (spin_tokens.size() != expected_size) {
-        throw std::runtime_error(paramb.spin_mode == 2
-          ? "nep4_spin2 spin_cutoff requires exactly one value"
-          : "spin_cutoff requires radial and reserved angular values");
-      }
-      paramb.spin_cutoff_radial = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
-      const double angular = paramb.spin_mode == 2 ? paramb.spin_cutoff_radial :
-        get_double_from_token(spin_tokens[2], __FILE__, __LINE__);
-      if (paramb.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
-        throw std::runtime_error("spin_cutoff values must be positive");
+      if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
+        if (spin_tokens.size() != 2 && spin_tokens.size() != 1 + paramb.num_types) {
+          throw std::runtime_error(
+            "versioned O/C spin_cutoff requires one value or one per type");
+        }
+        paramb.spin_cutoff_by_type.clear();
+        if (spin_tokens.size() == 2) {
+          const double cutoff = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
+          paramb.spin_cutoff_by_type.assign(paramb.num_types, cutoff);
+        } else {
+          for (std::size_t type = 0; type < paramb.num_types; ++type) {
+            paramb.spin_cutoff_by_type.push_back(
+              get_double_from_token(spin_tokens[1 + type], __FILE__, __LINE__));
+          }
+        }
+        if (paramb.spin_cutoff_by_type.empty() ||
+            *std::min_element(paramb.spin_cutoff_by_type.begin(),
+                              paramb.spin_cutoff_by_type.end()) <= 0.0) {
+          throw std::runtime_error("spin_cutoff values must be positive");
+        }
+        paramb.spin_cutoff_radial = *std::max_element(
+          paramb.spin_cutoff_by_type.begin(), paramb.spin_cutoff_by_type.end());
+      } else {
+        if (spin_tokens.size() != 3) {
+          throw std::runtime_error(
+            "spin_cutoff requires radial and reserved angular values");
+        }
+        paramb.spin_cutoff_radial = get_double_from_token(spin_tokens[1], __FILE__, __LINE__);
+        const double angular = get_double_from_token(spin_tokens[2], __FILE__, __LINE__);
+        if (paramb.spin_cutoff_radial <= 0.0 || angular <= 0.0) {
+          throw std::runtime_error("spin_cutoff values must be positive");
+        }
+        paramb.spin_cutoff_by_type.assign(paramb.num_types, paramb.spin_cutoff_radial);
       }
     } else if (spin_tokens[0] == "spin_scaler") {
       if (spin_tokens.size() != 2) {
@@ -8930,7 +8985,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         throw std::runtime_error("only spin_scaler 1 is supported by cpu");
       }
     } else if (spin_tokens[0] == "spin_n_max") {
-      if (paramb.spin_mode == 2) {
+      if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
         throw std::runtime_error(
           "spin_n_max is not part of the nep4_spin2 O/C protocol");
       }
@@ -8946,22 +9001,22 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         throw std::runtime_error("spin_n_max values must be non-negative");
       }
     } else if (spin_tokens[0] == "spin_order") {
-      if (paramb.spin_mode != 2 || spin_tokens.size() != 2) {
-        throw std::runtime_error("spin_order is only valid for nep4_spin2 and requires one value");
+      if ((paramb.spin_mode != 2 && paramb.spin_mode != 3) || spin_tokens.size() != 2) {
+        throw std::runtime_error("spin_order is only valid for versioned O/C spin models and requires one value");
       }
       paramb.spin_order = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
     } else if (spin_tokens[0] == "spin_soc") {
-      if (paramb.spin_mode != 2 || spin_tokens.size() != 2) {
-        throw std::runtime_error("spin_soc is only valid for nep4_spin2 and requires one value");
+      if ((paramb.spin_mode != 2 && paramb.spin_mode != 3) || spin_tokens.size() != 2) {
+        throw std::runtime_error("spin_soc is only valid for versioned O/C spin models and requires one value");
       }
       paramb.spin_soc = get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
       if (paramb.spin_soc != 0 && paramb.spin_soc != 1) {
         throw std::runtime_error("spin_soc must be 0 or 1");
       }
     } else if (spin_tokens[0] == "spin_projection_size") {
-      if (paramb.spin_mode != 2 || spin_tokens.size() != 2) {
+      if ((paramb.spin_mode != 2 && paramb.spin_mode != 3) || spin_tokens.size() != 2) {
         throw std::runtime_error(
-          "spin_projection_size is only valid for nep4_spin2 and requires one value");
+          "spin_projection_size is only valid for versioned O/C spin models and requires one value");
       }
       paramb.spin_projection_size =
         get_int_from_token(spin_tokens[1], __FILE__, __LINE__);
@@ -9004,10 +9059,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       throw std::runtime_error(
         "spin_mode metadata does not match model header tag");
     }
-    if (declared_spin_mode != 1 && declared_spin_mode != 2) {
-      throw std::runtime_error("only spin_mode 1 or 2 is supported");
+    if (declared_spin_mode != 1 && declared_spin_mode != 2 && declared_spin_mode != 3) {
+      throw std::runtime_error("only spin_mode 1, 2, or 3 is supported");
     }
-    if (paramb.spin_mode == 2 && tokens.size() != 3) {
+    if ((paramb.spin_mode == 2 || paramb.spin_mode == 3) && tokens.size() != 3) {
       throw std::runtime_error(
         "nep4_spin2 requires counted spin_mode N metadata");
     }
@@ -9026,7 +9081,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         }
         parse_spin_line(header);
       }
-      if (paramb.spin_mode == 2) {
+      if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
         static const std::array<const char*, 9> required = {
           "spin_baseline", "spin_basis_size", "spin_l_max",
           "spin_compress", "spin_cutoff", "spin_order", "spin_soc",
@@ -9063,7 +9118,7 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
     if (paramb.spin_compress <= 0 || paramb.spin_l_max < 0 || paramb.spin_l_max > 4) {
       throw std::runtime_error("invalid spin settings");
     }
-    if (paramb.spin_mode == 2) {
+    if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
       if (paramb.spin_compress > 9 || paramb.spin_l_max > 2 ||
           paramb.spin_order < 1 || paramb.spin_order > 3 ||
           paramb.spin_basis_size != 8 ||
@@ -9254,10 +9309,10 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       "two-hidden-layer ANN is supported only for ordinary NEP4 models");
   }
   paramb.struct_dim = (paramb.n_max_radial + 1) + paramb.dim_angular;
-  paramb.spin_dim = paramb.spin_mode == 2
+  paramb.spin_dim = (paramb.spin_mode == 2 || paramb.spin_mode == 3)
     ? nep_adapters::common::make_spin_polynomial_layout(
         paramb.spin_compress, paramb.spin_l_max,
-        paramb.spin_order, paramb.spin_soc).descriptor_dim
+        paramb.spin_order, paramb.spin_soc, paramb.spin_mode == 3).descriptor_dim
     : (paramb.spin_mode
         ? spin_descriptor_dim(paramb.spin_compress, paramb.spin_l_max, paramb.spin_chiral != 0)
         : 0);
@@ -9292,7 +9347,8 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
       paramb.num_types_sq * paramb.spin_compress * (paramb.spin_basis_size + 1));
   }
   annmb.num_para = annmb.num_para_ann + num_para_descriptor +
-    (paramb.spin_mode == 2 ? paramb.spin_projection_size : 0);
+    ((paramb.spin_mode == 2 || paramb.spin_mode == 3)
+      ? paramb.spin_projection_size : 0);
 
   paramb.num_c_radial =
     paramb.num_types_sq * (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
@@ -9505,7 +9561,7 @@ void NEP::update_potential(double* parameters, ANN& ann)
     pointer += paramb.num_types_sq * paramb.spin_compress *
       (paramb.spin_basis_size + 1);
   }
-  if (paramb.spin_mode == 2) {
+  if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
     ann.c_spin_projection = pointer;
   }
 }
@@ -9909,7 +9965,7 @@ void NEP::find_descriptor(
 #endif
     Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
     ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
-  if (paramb.spin_mode == 2) {
+  if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
     fill_spin2_batch_descriptor(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
@@ -9996,7 +10052,7 @@ void NEP::compute(
   }
 
   SpinCache spin_cache;
-  if (paramb.spin_mode == 2) {
+  if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
     fill_spin2_batch_descriptor(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
@@ -10060,7 +10116,7 @@ void NEP::compute(
   if (phase_timing) {
     phase_zbl = nep_phase_elapsed(phase_mark);
   }
-  if (paramb.spin_mode == 2) {
+  if (paramb.spin_mode == 2 || paramb.spin_mode == 3) {
     add_spin2_batch_gradient(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
@@ -11073,7 +11129,7 @@ void NEP::compute_for_lammps(
   }
 #endif
 
-  const bool fused_spin = paramb.spin_mode == 2
+  const bool fused_spin = (paramb.spin_mode == 2 || paramb.spin_mode == 3)
     ? compute_spin2_lammps_centers(
         paramb, annmb, atom_capacity, inum, ilist, NN, NL,
         lammps_spin_types.data(), pos, lammps_spin_spins_aos.data(), spin_baseline,

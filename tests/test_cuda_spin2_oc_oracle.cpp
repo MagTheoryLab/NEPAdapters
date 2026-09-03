@@ -37,7 +37,8 @@ std::vector<double> read_array(std::istream& input, const std::string& expected)
 std::vector<Case> read_oracle(const std::string& path) {
   std::ifstream input(path); std::string token, hash; int descriptor_dim = 0;
   input >> token;
-  if (token != "spin2_oc_oracle_v1") throw std::runtime_error("bad spin2 O/C oracle");
+  if (token != "spin2_oc_oracle_v1" && token != "spin3_oc_oracle_v1")
+    throw std::runtime_error("bad versioned O/C spin oracle");
   input >> token >> hash;
   if (token != "model_sha256" ||
       (hash != "2be994d33e029928f98cfb56b8b1b1ce74e323f324919c34dc21291cf50364b8" &&
@@ -47,13 +48,17 @@ std::vector<Case> read_oracle(const std::string& path) {
        hash != "f699bd78b4314c522d04761cc6909946cc3ebf5ca5046016851c25eae58cc2e9" &&
        hash != "08bffedb58efd700be8044463a668c172c00fa82666d72dc730a975d7e047107" &&
        hash != "51d363c4a2b2f3d65374eef7623bf711063a809b35598171641b91e986f4652a" &&
-       hash != "49b0e1dc04d743bec8d1eeb1342048ed86474e4043d36164dbf974a2babb842c"))
-    throw std::runtime_error("spin2 O/C oracle model hash mismatch");
+       hash != "49b0e1dc04d743bec8d1eeb1342048ed86474e4043d36164dbf974a2babb842c" &&
+       hash != "4fe437867031a28e0cfba62d701a7b60c85fe7d6f728653be6552ab3ee57430d" &&
+       hash != "5ad1b0e0ecb4f9174615b69de8e89c3d8e949f85dd35be8564adf77cde88384b" &&
+       hash != "e5df123b708ee57af52d0a442c433dbc2418ff37f552a9e1b987f869d077c974"))
+    throw std::runtime_error("versioned O/C spin oracle model hash mismatch");
   input >> token >> descriptor_dim;
   if (token != "descriptor_dim" ||
       (descriptor_dim != 33 && descriptor_dim != 49 && descriptor_dim != 53 &&
        descriptor_dim != 67 && descriptor_dim != 79 &&
-       descriptor_dim != 109 && descriptor_dim != 211))
+       descriptor_dim != 85 && descriptor_dim != 109 && descriptor_dim != 121 &&
+       descriptor_dim != 211))
     throw std::runtime_error("bad full descriptor dimension");
   g_descriptor_dim = descriptor_dim;
   input >> token >> descriptor_dim;
@@ -251,7 +256,9 @@ bool check_case(NepaModel* model, const Case& item, bool forward_only) {
   const double steady_energy = std::abs(steady.energy -
       std::accumulate(item.potential.begin(), item.potential.end(), 0.0));
   const double steady_force = max_abs(steady.forces, item.forces);
-  const double steady_mforce = max_abs(steady.mforces, item.mforces);
+  std::size_t worst_steady_mforce = 0;
+  const double steady_mforce =
+      max_abs(steady.mforces, item.mforces, &worst_steady_mforce);
   std::cout << item.name << " descriptor=" << descriptor
             << " potential=" << potential << " energy=" << energy
             << " force=" << force << " mforce=" << mforce
@@ -261,6 +268,9 @@ bool check_case(NepaModel* model, const Case& item, bool forward_only) {
             << " steady_energy=" << steady_energy
             << " steady_force=" << steady_force
             << " steady_mforce=" << steady_mforce
+            << " steady_mforce_index=" << worst_steady_mforce
+            << " steady_mforce_actual=" << steady.mforces[worst_steady_mforce]
+            << " steady_mforce_expected=" << item.mforces[worst_steady_mforce]
             << " worst_descriptor=" << worst << '\n';
   constexpr double fp32_relative_tolerance = 1.0e-6;
   const bool forward = descriptor < 1.2e-3 &&

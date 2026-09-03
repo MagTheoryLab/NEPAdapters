@@ -48,7 +48,7 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   }
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
-  if (protocol.spin_mode == 2) {
+  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
     const SpinPolynomialLayout layout = make_spin_polynomial_layout(protocol);
     add_array(
         plan,

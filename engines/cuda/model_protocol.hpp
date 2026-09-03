@@ -78,6 +78,7 @@ struct ModelProtocol {
   std::vector<int> atomic_numbers;
   std::vector<double> cutoff_radial_by_type;
   std::vector<double> cutoff_angular_by_type;
+  std::vector<double> spin_cutoff_by_type;
   std::vector<double> spin_baseline;
   std::vector<int> spin_dof_type_active;
   std::vector<int> spin_env_type_active;
@@ -112,7 +113,7 @@ inline SpinPolynomialLayout make_spin_polynomial_layout(
     const ModelProtocol& protocol) noexcept {
   return nep_adapters::common::make_spin_polynomial_layout(
       protocol.spin_compress, protocol.spin_l_max,
-      protocol.spin_order, protocol.spin_soc);
+      protocol.spin_order, protocol.spin_soc, protocol.spin_mode == 3);
 }
 
 inline SpinCoreLayout make_spin_core_layout(
@@ -166,7 +167,7 @@ inline bool supports_cuda_spin_shape(const ModelProtocol& protocol) noexcept {
   if (protocol.spin_mode == 0) {
     return true;
   }
-  if (protocol.spin_mode == 2) {
+  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
     return protocol.spin_compress >= 1 && protocol.spin_compress <= 9 &&
            protocol.spin_basis_size == 8 && protocol.spin_l_max >= 0 &&
            protocol.spin_l_max <= 2 && protocol.spin_order >= 1 &&

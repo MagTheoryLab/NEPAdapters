@@ -402,6 +402,8 @@ void build_spin_descriptors_on_device(
 struct SpinForceTimings {
   float onsite_ms = 0.0f;
   float density_ms = 0.0f;
+  float density_pull_ms = 0.0f;
+  float density_edge_ms = 0.0f;
   float chiral_ms = 0.0f;
 };
 

@@ -459,6 +459,18 @@ void contract(
         emit(layout.correlation_same_edge + pair, same);
         emit(layout.correlation_distinct_neighbor + pair,
              first_dot[left] * first_dot[right] - same);
+        if (layout.correlation_distinct_l1 >= 0) {
+          const Scalar* l1_left = center + layout.angular_l1_moment_offset + 3 * left;
+          const Scalar* l1_right = center + layout.angular_l1_moment_offset + 3 * right;
+          emit(layout.correlation_distinct_l1 + pair,
+               dotn<3>(l1_left, l1_right) - same);
+        }
+        if (layout.correlation_distinct_l2 >= 0) {
+          const Scalar* l2_left = center + layout.angular_l2_moment_offset + 5 * left;
+          const Scalar* l2_right = center + layout.angular_l2_moment_offset + 5 * right;
+          emit(layout.correlation_distinct_l2 + pair,
+               Scalar(1.5) * dotn<5>(l2_left, l2_right) - same);
+        }
       }
     }
   }
@@ -626,10 +638,37 @@ inline void accumulate_descriptor_gradients(
       for (int right = left; right < channels; ++right) {
         const int pair = pair_index(channels, left, right);
         const double distinct_gradient = g(layout.correlation_distinct_neighbor + pair);
+        const double distinct_l1_gradient =
+            layout.correlation_distinct_l1 >= 0
+                ? g(layout.correlation_distinct_l1 + pair) : 0.0;
+        const double distinct_l2_gradient =
+            layout.correlation_distinct_l2 >= 0
+                ? g(layout.correlation_distinct_l2 + pair) : 0.0;
         center_gradient[offset + pair] +=
-            g(layout.correlation_same_edge + pair) - distinct_gradient;
+            g(layout.correlation_same_edge + pair) - distinct_gradient -
+            distinct_l1_gradient - distinct_l2_gradient;
         first_dot_gradient[left] += distinct_gradient * first_dot[right];
         first_dot_gradient[right] += distinct_gradient * first_dot[left];
+        if (layout.correlation_distinct_l1 >= 0) {
+          const double* l1_left = center + layout.angular_l1_moment_offset + 3 * left;
+          const double* l1_right = center + layout.angular_l1_moment_offset + 3 * right;
+          double* gl1_left = center_gradient + layout.angular_l1_moment_offset + 3 * left;
+          double* gl1_right = center_gradient + layout.angular_l1_moment_offset + 3 * right;
+          for (int d = 0; d < 3; ++d) {
+            gl1_left[d] += distinct_l1_gradient * l1_right[d];
+            gl1_right[d] += distinct_l1_gradient * l1_left[d];
+          }
+        }
+        if (layout.correlation_distinct_l2 >= 0) {
+          const double* l2_left = center + layout.angular_l2_moment_offset + 5 * left;
+          const double* l2_right = center + layout.angular_l2_moment_offset + 5 * right;
+          double* gl2_left = center_gradient + layout.angular_l2_moment_offset + 5 * left;
+          double* gl2_right = center_gradient + layout.angular_l2_moment_offset + 5 * right;
+          for (int k = 0; k < 5; ++k) {
+            gl2_left[k] += 1.5 * distinct_l2_gradient * l2_right[k];
+            gl2_right[k] += 1.5 * distinct_l2_gradient * l2_left[k];
+          }
+        }
       }
     }
   }
@@ -839,7 +878,9 @@ inline void add_edge_state(
     cross3(rhat, sj, axial);
     stf5_outer(rhat, sj, edge_stf);
   }
-  if (needs_q || needs_qp) stf5_outer(rhat, rhat, qrr);
+  if (needs_q || needs_qp || layout.angular_l2_moment_offset >= 0) {
+    stf5_outer(rhat, rhat, qrr);
+  }
   for (int c = 0; c < channels; ++c) {
     const int base = channel_offset(c);
     const double weight = weights[c];
@@ -851,6 +892,10 @@ inline void add_edge_state(
       if (has_order2) {
         center[base + kDM + d] = center[base + kDM + d] + weight * dot * sj[d];
       }
+      if (layout.angular_l1_moment_offset >= 0) {
+        center[layout.angular_l1_moment_offset + 3 * c + d] +=
+            weight * dot * rhat[d];
+      }
       if (needs_l1) {
         center[base + kX + d] = center[base + kX + d] + weight * axial[d];
       }
@@ -858,13 +903,18 @@ inline void add_edge_state(
     if (needs_l1) {
       center[base + kL] = center[base + kL] + weight * longitudinal;
     }
-    if (needs_l1 || needs_q || needs_qp) {
+    if (needs_l1 || needs_q || needs_qp ||
+        layout.angular_l2_moment_offset >= 0) {
       for (int k = 0; k < 5; ++k) {
         if (needs_l1) {
           center[base + kT + k] = center[base + kT + k] + weight * edge_stf[k];
         }
         if (needs_q) {
           center[base + kQ + k] = center[base + kQ + k] + weight * qrr[k];
+        }
+        if (layout.angular_l2_moment_offset >= 0) {
+          center[layout.angular_l2_moment_offset + 5 * c + k] +=
+              weight * dot * qrr[k];
         }
         if (needs_qp) {
           for (int d = 0; d < 3; ++d) {
@@ -918,7 +968,9 @@ inline void accumulate_edge_gradients(
     cross3(rhat, sj, axial);
     stf5_outer(rhat, sj, edge_stf);
   }
-  if (needs_q || needs_qp) stf5_outer(rhat, rhat, qrr);
+  if (needs_q || needs_qp || layout.angular_l2_moment_offset >= 0) {
+    stf5_outer(rhat, rhat, qrr);
+  }
   double si2_gradient = 0.0, sj2_gradient = 0.0, dot_gradient = 0.0;
   double longitudinal_gradient = 0.0, axial_gradient[3] = {};
   double qrr_gradient[5] = {}, edge_stf_gradient[5] = {};
@@ -941,6 +993,13 @@ inline void accumulate_edge_gradients(
         dot_gradient += weight * gdm * sj[d];
         sj_gradient[d] += weight * spin_dot * gdm;
       }
+      if (layout.angular_l1_moment_offset >= 0) {
+        const double ga1 = center_gradient[
+            layout.angular_l1_moment_offset + 3 * c + d];
+        weight_pull += ga1 * spin_dot * rhat[d];
+        dot_gradient += weight * ga1 * rhat[d];
+        rhat_gradient[d] += weight * spin_dot * ga1;
+      }
       if (needs_l1) {
         const double gx = center_gradient[base + kX + d];
         weight_pull += gx * axial[d];
@@ -952,7 +1011,8 @@ inline void accumulate_edge_gradients(
       weight_pull += gl * longitudinal;
       longitudinal_gradient += weight * gl;
     }
-    if (needs_l1 || needs_q || needs_qp) {
+    if (needs_l1 || needs_q || needs_qp ||
+        layout.angular_l2_moment_offset >= 0) {
       for (int k = 0; k < 5; ++k) {
         double edge_stf_pull = edge_stf_gradient[k];
         double qrr_pull = qrr_gradient[k];
@@ -966,6 +1026,13 @@ inline void accumulate_edge_gradients(
           weight_pull += gq * qrr[k];
           qrr_pull += weight * gq;
         }
+        if (layout.angular_l2_moment_offset >= 0) {
+          const double ga2 = center_gradient[
+              layout.angular_l2_moment_offset + 5 * c + k];
+          weight_pull += ga2 * spin_dot * qrr[k];
+          dot_gradient += weight * ga2 * qrr[k];
+          qrr_pull += weight * spin_dot * ga2;
+        }
         if (needs_qp) {
           const double* gqp = center_gradient + base + kQP + 3 * k;
           const double qp_spin_pull =
@@ -978,7 +1045,9 @@ inline void accumulate_edge_gradients(
           }
         }
         if (needs_l1) edge_stf_gradient[k] = edge_stf_pull;
-        if (needs_q || needs_qp) qrr_gradient[k] = qrr_pull;
+        if (needs_q || needs_qp || layout.angular_l2_moment_offset >= 0) {
+          qrr_gradient[k] = qrr_pull;
+        }
       }
     }
     const double gd0 = direct_gradient[c];
@@ -1020,7 +1089,7 @@ inline void accumulate_edge_gradients(
     add_dot_gradient(rhat, sj, longitudinal_gradient, rhat_gradient, sj_gradient);
     add_cross_gradient(rhat, sj, axial_gradient, rhat_gradient, sj_gradient);
   }
-  if (needs_q || needs_qp) {
+  if (needs_q || needs_qp || layout.angular_l2_moment_offset >= 0) {
     double qrr_right_gradient[3] = {};
     add_stf5_outer_gradient(
         rhat, rhat, qrr_gradient, rhat_gradient, qrr_right_gradient);

@@ -260,6 +260,7 @@ __global__ void build_spin2_oc_density_bank(
     int num_types,
     int spin_basis_size,
     float spin_cutoff,
+    const float* __restrict__ spin_cutoff_pair,
     int spin_coefficient_offset,
     SimulationBox box,
     const int* __restrict__ types,
@@ -282,6 +283,8 @@ __global__ void build_spin2_oc_density_bank(
   float edge_sj2 = 0.0f;
   float edge_dot2 = 0.0f;
   float edge_gate = 0.0f;
+  float angular_l1[3] = {};
+  float angular_l2[5] = {};
   const bool active = spin_dof_type_active[types[atom]] != 0;
   if (active) {
     const int neighbor_count = nn_radial[atom];
@@ -291,7 +294,8 @@ __global__ void build_spin2_oc_density_bank(
       float r[3], dist, si[3], sj[3], weights[C], derivatives[C];
       if (!load_spin_edge_f32<C, false>(
               atom, neighbor, atom_stride, num_types, spin_basis_size,
-              spin_cutoff, box, types, positions_soa3, spins_soa3,
+              spin_cutoff, spin_cutoff_pair, box, types,
+              positions_soa3, spins_soa3,
               descriptor_coefficients, spin_coefficient_offset, r, dist, si,
               sj, weights, derivatives)) continue;
       const float weight = weights[channel];
@@ -308,11 +312,17 @@ __global__ void build_spin2_oc_density_bank(
         density[kSpin2OcP + d] += weight * r[d];
         density[kSpin2OcX + d] += weight * axial[d];
         density[kSpin2OcDM + d] += weight * dot * sj[d];
+        if (layout.angular_l1_moment_offset >= 0) {
+          angular_l1[d] += weight * dot * r[d];
+        }
       }
       density[kSpin2OcL] += weight * longitudinal;
       for (int k = 0; k < 5; ++k) {
         density[kSpin2OcT + k] += weight * edge_stf[k];
         density[kSpin2OcQ + k] += weight * qrr[k];
+        if (layout.angular_l2_moment_offset >= 0) {
+          angular_l2[k] += weight * dot * qrr[k];
+        }
         for (int d = 0; d < 3; ++d) {
           density[kSpin2OcQP + 3 * k + d] += weight * qrr[k] * sj[d];
         }
@@ -333,6 +343,16 @@ __global__ void build_spin2_oc_density_bank(
   float* center = moments + atom * layout.moment_count;
   const int base = spin2_oc_channel_offset(channel);
   for (int k = 0; k < kSpin2OcDensityStride; ++k) center[base + k] = density[k];
+  if (layout.angular_l1_moment_offset >= 0) {
+    for (int d = 0; d < 3; ++d) {
+      center[layout.angular_l1_moment_offset + 3 * channel + d] = angular_l1[d];
+    }
+  }
+  if (layout.angular_l2_moment_offset >= 0) {
+    for (int k = 0; k < 5; ++k) {
+      center[layout.angular_l2_moment_offset + 5 * channel + k] = angular_l2[k];
+    }
+  }
   if (channel == 0) {
     const int same_offset = spin2_oc_same_offset(C);
     for (int pair = 0; pair < layout.pair_count; ++pair) {
@@ -435,6 +455,20 @@ __global__ void contract_spin2_oc_descriptors(
         NEP_SPIN2_OC_STORE_AT(
             layout.correlation_distinct_neighbor + pair,
             first_dot[left] * first_dot[right] - same);
+        if (layout.correlation_distinct_l1 >= 0) {
+          NEP_SPIN2_OC_STORE_AT(
+              layout.correlation_distinct_l1 + pair,
+              spin2_oc_dotn<3>(
+                  center + layout.angular_l1_moment_offset + 3 * left,
+                  center + layout.angular_l1_moment_offset + 3 * right) - same);
+        }
+        if (layout.correlation_distinct_l2 >= 0) {
+          NEP_SPIN2_OC_STORE_AT(
+              layout.correlation_distinct_l2 + pair,
+              1.5f * spin2_oc_dotn<5>(
+                  center + layout.angular_l2_moment_offset + 5 * left,
+                  center + layout.angular_l2_moment_offset + 5 * right) - same);
+        }
       }
     }
   }

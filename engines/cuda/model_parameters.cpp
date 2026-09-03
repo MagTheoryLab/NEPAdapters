@@ -80,6 +80,9 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
 
   packed.cutoff_radial_pair.resize(num_types * num_types);
   packed.cutoff_angular_pair.resize(num_types * num_types);
+  if (protocol.spin_mode != 0) {
+    packed.spin_cutoff_pair.resize(num_types * num_types);
+  }
   if (protocol.has_zbl) {
     packed.zbl_parameters_pair.resize(num_types * num_types * 10);
   }
@@ -92,6 +95,11 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
       packed.cutoff_angular_pair[pair] = static_cast<float>(
           0.5 * (protocol.cutoff_angular_by_type[type1] +
                  protocol.cutoff_angular_by_type[type2]));
+      if (protocol.spin_mode != 0) {
+        packed.spin_cutoff_pair[pair] = static_cast<float>(
+            0.5 * (protocol.spin_cutoff_by_type[type1] +
+                   protocol.spin_cutoff_by_type[type2]));
+      }
       if (!protocol.has_zbl) {
         continue;
       }

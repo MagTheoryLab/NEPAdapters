@@ -38,6 +38,7 @@ public:
     int spin_soc = 0;
     int spin_projection_size = 0;
     double spin_cutoff_radial = 0.0;
+    std::vector<double> spin_cutoff_by_type;
     std::vector<int> spin_dof_type_active;
     std::vector<int> spin_env_type_active;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability

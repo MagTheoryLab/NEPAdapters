@@ -341,9 +341,44 @@ __device__ __noinline__ void build_spin2_oc_center_pull_row(
               layout.correlation_same_edge + pair);
           const float a_distinct = NEP_SPIN2_OC_FP_DYNAMIC(
               layout.correlation_distinct_neighbor + pair);
-          spin2_oc_accumulate_pull<AtomicPull>(pull + same_offset + pair, a_same - a_distinct);
+          const float a_l1 = layout.correlation_distinct_l1 >= 0
+              ? NEP_SPIN2_OC_FP_DYNAMIC(layout.correlation_distinct_l1 + pair)
+              : 0.0f;
+          const float a_l2 = layout.correlation_distinct_l2 >= 0
+              ? NEP_SPIN2_OC_FP_DYNAMIC(layout.correlation_distinct_l2 + pair)
+              : 0.0f;
+          spin2_oc_accumulate_pull<AtomicPull>(
+              pull + same_offset + pair, a_same - a_distinct - a_l1 - a_l2);
           first_dot_pull[left] += a_distinct * first_dot[right];
           first_dot_pull[right] += a_distinct * first_dot[left];
+          if (layout.correlation_distinct_l1 >= 0) {
+            for (int d = 0; d < 3; ++d) {
+              const float left_value = center[
+                  layout.angular_l1_moment_offset + 3 * left + d];
+              const float right_value = center[
+                  layout.angular_l1_moment_offset + 3 * right + d];
+              spin2_oc_accumulate_pull<AtomicPull>(
+                  pull + layout.angular_l1_moment_offset + 3 * left + d,
+                  a_l1 * right_value);
+              spin2_oc_accumulate_pull<AtomicPull>(
+                  pull + layout.angular_l1_moment_offset + 3 * right + d,
+                  a_l1 * left_value);
+            }
+          }
+          if (layout.correlation_distinct_l2 >= 0) {
+            for (int k = 0; k < 5; ++k) {
+              const float left_value = center[
+                  layout.angular_l2_moment_offset + 5 * left + k];
+              const float right_value = center[
+                  layout.angular_l2_moment_offset + 5 * right + k];
+              spin2_oc_accumulate_pull<AtomicPull>(
+                  pull + layout.angular_l2_moment_offset + 5 * left + k,
+                  1.5f * a_l2 * right_value);
+              spin2_oc_accumulate_pull<AtomicPull>(
+                  pull + layout.angular_l2_moment_offset + 5 * right + k,
+                  1.5f * a_l2 * left_value);
+            }
+          }
         }
       }
     }
@@ -583,6 +618,7 @@ __global__ void accumulate_spin2_oc_native_forces(
     int num_types,
     int spin_basis_size,
     float spin_cutoff,
+    const float* __restrict__ spin_cutoff_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const int* __restrict__ spin_dof_type_active,
@@ -618,7 +654,8 @@ __global__ void accumulate_spin2_oc_native_forces(
     float r[3], dist, si[3], sj[3], weights[C], derivatives[C];
     if (!load_spin_edge_f32<C>(
             atom, neighbor, atom_stride, num_types, spin_basis_size,
-            spin_cutoff, box, types, positions_soa3, spins_soa3,
+            spin_cutoff, spin_cutoff_pair, box, types,
+            positions_soa3, spins_soa3,
             descriptor_coefficients, spin_coefficient_offset, r, dist, si,
             sj, weights, derivatives)) continue;
     const float si2 = spin2_dot3(si, si);
@@ -664,6 +701,12 @@ __global__ void accumulate_spin2_oc_native_forces(
       const float* gq = pull + base + kSpin2OcQ;
       const float* gqp = pull + base + kSpin2OcQP;
       const float* gdm = pull + base + kSpin2OcDM;
+      const float* ga1 = layout.angular_l1_moment_offset >= 0
+          ? pull + layout.angular_l1_moment_offset + 3 * c
+          : nullptr;
+      const float* ga2 = layout.angular_l2_moment_offset >= 0
+          ? pull + layout.angular_l2_moment_offset + 5 * c
+          : nullptr;
       grad_weight[c] += spin2_dot3(gm, sj) + spin2_dot3(gp, r) +
           gl * longitudinal + spin2_dot3(gx, axial) +
           spin2_oc_dotn<5>(gt, edge_stf) + spin2_oc_dotn<5>(gq, qrr) +
@@ -676,6 +719,11 @@ __global__ void accumulate_spin2_oc_native_forces(
       for (int d = 0; d < 3; ++d) {
         grad_sj[d] += w * gm[d];
         grad_r[d] += w * gp[d];
+        if (ga1 != nullptr) {
+          grad_weight[c] += ga1[d] * dot * r[d];
+          grad_dot += w * ga1[d] * r[d];
+          grad_r[d] += w * dot * ga1[d];
+        }
       }
       grad_longitudinal += w * gl;
       float gx_r[3] = {}, gx_s[3] = {};
@@ -692,6 +740,11 @@ __global__ void accumulate_spin2_oc_native_forces(
       }
       for (int k = 0; k < 5; ++k) {
         grad_q[k] += w * gq[k];
+        if (ga2 != nullptr) {
+          grad_weight[c] += ga2[k] * dot * qrr[k];
+          grad_dot += w * ga2[k] * qrr[k];
+          grad_q[k] += w * dot * ga2[k];
+        }
         for (int d = 0; d < 3; ++d) {
           grad_q[k] += w * gqp[3 * k + d] * sj[d];
           grad_sj[d] += w * gqp[3 * k + d] * qrr[k];
