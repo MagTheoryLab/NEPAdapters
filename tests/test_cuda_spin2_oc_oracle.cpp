@@ -51,13 +51,15 @@ std::vector<Case> read_oracle(const std::string& path) {
        hash != "49b0e1dc04d743bec8d1eeb1342048ed86474e4043d36164dbf974a2babb842c" &&
        hash != "4fe437867031a28e0cfba62d701a7b60c85fe7d6f728653be6552ab3ee57430d" &&
        hash != "5ad1b0e0ecb4f9174615b69de8e89c3d8e949f85dd35be8564adf77cde88384b" &&
-       hash != "e5df123b708ee57af52d0a442c433dbc2418ff37f552a9e1b987f869d077c974"))
+       hash != "e5df123b708ee57af52d0a442c433dbc2418ff37f552a9e1b987f869d077c974" &&
+       hash != "6d9c5c66916f0b0ce2825795e9c0af2908021317628db083e0669431867fd501"))
     throw std::runtime_error("versioned O/C spin oracle model hash mismatch");
   input >> token >> descriptor_dim;
   if (token != "descriptor_dim" ||
       (descriptor_dim != 33 && descriptor_dim != 49 && descriptor_dim != 53 &&
        descriptor_dim != 67 && descriptor_dim != 79 &&
        descriptor_dim != 85 && descriptor_dim != 109 && descriptor_dim != 121 &&
+       descriptor_dim != 159 &&
        descriptor_dim != 211))
     throw std::runtime_error("bad full descriptor dimension");
   g_descriptor_dim = descriptor_dim;

@@ -442,14 +442,14 @@ void launch_spin2_oc_native_force_shape(
     bool fuse_structural_radial) {
   constexpr int Threads = 128;
   if constexpr (
-      (C == 2 || C == 3) && !AccumulateSpinTransfer &&
+      (C == 2 || C == 3 || C == 4) && !AccumulateSpinTransfer &&
       (VirialMode == SpinVirialMode::disabled ||
        VirialMode == SpinVirialMode::center_owned)) {
     if ((protocol.spin_mode == 2 || protocol.spin_mode == 3) &&
         protocol.spin_order == 3 &&
         protocol.spin_l_max == 2 &&
         protocol.spin_soc == 1) {
-      constexpr int AtomsPerWarp = C == 3 ? 4 : 8;
+      constexpr int AtomsPerWarp = C >= 3 ? 4 : 8;
       constexpr bool InlinePull = C == 2;
       constexpr int AtomsPerBlock = (Threads / 32) * AtomsPerWarp;
       const int cooperative_blocks =
