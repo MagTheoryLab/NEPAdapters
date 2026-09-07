@@ -1,6 +1,19 @@
 name: Windows Unicode model paths
 
 on:
+  push:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/windows-unicode-model-path.yml"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "engines/**"
+      - "frontends/python/**"
+      - "include/**"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/fixtures/cpu_baseline/**"
   pull_request:
     paths:
       - ".github/workflows/windows-unicode-model-path.yml"
