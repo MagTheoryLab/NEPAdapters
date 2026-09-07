@@ -20,6 +20,8 @@ Combining high accuracy and low cost in atomistic simulations and application to
 heat transport, Phys. Rev. B. 104, 104309 (2021).
 ------------------------------------------------------------------------------*/
 
+#include "nep_adapters/detail/model_file.hpp"
+
 #include "nep.h"
 #include "dftd3para.h"
 #include "nep_utilities.h"
@@ -8743,7 +8745,7 @@ NEP::NEP(const std::string& potential_filename) { init_from_file(potential_filen
 
 void NEP::init_from_file(const std::string& potential_filename, const bool is_rank_0)
 {
-  std::ifstream input(potential_filename);
+  std::ifstream input = nep_adapters::detail::open_model_input(potential_filename);
   if (!input.is_open()) {
     throw std::runtime_error("failed to open NEP model: " + potential_filename);
   }

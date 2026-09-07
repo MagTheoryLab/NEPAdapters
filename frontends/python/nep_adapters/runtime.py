@@ -260,6 +260,7 @@ def backend_info(index: int):
 
 
 def load_model(backend_name: str, model_path: str):
+    """Load a model; native code interprets the Python path string as UTF-8."""
     try:
         if backend_name == "cpu":
             native = _cpu.load_model(backend_name, model_path)

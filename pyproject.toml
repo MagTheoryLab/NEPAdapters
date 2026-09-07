@@ -58,7 +58,7 @@ NEP_ADAPTERS_INSTALL_DEVELOPMENT_FILES = "OFF"
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_* *-manylinux_i686 *-win32"
 build-verbosity = 1
-test-command = "python {project}/frontends/python/tests/test_wheel_install.py"
+test-command = "python {project}/frontends/python/tests/test_wheel_install.py && python {project}/frontends/python/tests/test_unicode_model_paths.py"
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"

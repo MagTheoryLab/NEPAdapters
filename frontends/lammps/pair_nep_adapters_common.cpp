@@ -1,6 +1,7 @@
 #include "pair_nep_adapters_common.h"
 
 #include "nep_adapters/api.h"
+#include "nep_adapters/detail/model_file.hpp"
 #include "nep_adapters/virial_order.hpp"
 
 #include "atom.h"
@@ -25,7 +26,7 @@ using namespace LAMMPS_NS;
 namespace {
 
 std::vector<std::string> read_nep_elements(const std::string& model_path) {
-  std::ifstream input(model_path.c_str());
+  std::ifstream input = nep_adapters::detail::open_model_input(model_path);
   if (!input.is_open()) {
     return {};
   }
@@ -146,7 +147,7 @@ void PairNEPAdaptersCommon::read_type_map(
   const std::vector<std::string> elements = read_nep_elements(model_path);
   if (elements.empty()) {
     const std::string message =
-        label_ + ": failed to read element symbols from NEP file";
+        label_ + ": failed to read element symbols from NEP file: " + model_path;
     error->all(FLERR, message.c_str());
   }
   model_elements_ = elements;

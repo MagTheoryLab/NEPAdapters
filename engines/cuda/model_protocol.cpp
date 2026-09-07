@@ -1,4 +1,5 @@
 #include "model_protocol.hpp"
+#include "nep_adapters/detail/model_file.hpp"
 
 #include <algorithm>
 #include <array>
@@ -833,17 +834,17 @@ int BodyChannelConfig::abc_count() const {
 }
 
 ModelProtocol parse_model_protocol(const std::string& model_path) {
-  std::ifstream input(model_path);
+  std::ifstream input = nep_adapters::detail::open_model_input(model_path);
   if (!input.is_open()) {
-    throw std::runtime_error("failed to open model file");
+    throw std::runtime_error("failed to open NEP model: " + model_path);
   }
   return parse_model_header(input);
 }
 
 ParsedModelFile parse_model_file(const std::string& model_path) {
-  std::ifstream input(model_path);
+  std::ifstream input = nep_adapters::detail::open_model_input(model_path);
   if (!input.is_open()) {
-    throw std::runtime_error("failed to open model file");
+    throw std::runtime_error("failed to open NEP model: " + model_path);
   }
   ParsedModelFile parsed;
   parsed.protocol = parse_model_header(input);

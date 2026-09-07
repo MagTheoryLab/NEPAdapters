@@ -115,6 +115,19 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
   )
 
   add_test(
+    NAME nep_adapters_python_unicode_model_path_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/test_unicode_model_paths.py"
+  )
+  set_tests_properties(
+    nep_adapters_python_unicode_model_path_test
+    PROPERTIES
+      LABELS "regression;contract;frontend;python;cpu;unicode_path"
+      ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
+  )
+
+  add_test(
     NAME nep_adapters_python_spin2_batch_test
     COMMAND
       "${Python3_EXECUTABLE}"

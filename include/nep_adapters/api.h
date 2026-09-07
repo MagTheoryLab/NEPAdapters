@@ -233,6 +233,8 @@ typedef struct NepaLammpsDeviceNeighborResult {
 NEP_ADAPTERS_API int nepa_api_version(void);
 NEP_ADAPTERS_API int nepa_backend_count(void);
 NEP_ADAPTERS_API NepaStatus nepa_backend_info(int index, NepaBackendInfo* out);
+/* model_path is a null-terminated UTF-8 filesystem path on every platform.
+   Windows backends convert it to the native Unicode path representation. */
 NEP_ADAPTERS_API NepaStatus nepa_load_model(
     const char* backend_name,
     const char* model_path,
