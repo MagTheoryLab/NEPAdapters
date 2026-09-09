@@ -450,24 +450,29 @@ void launch_spin2_oc_native_force_shape(
         protocol.spin_l_max == 2 &&
         protocol.spin_soc == 1) {
       constexpr int AtomsPerWarp = C >= 3 ? 4 : 8;
-      constexpr bool InlinePull = C == 2;
       constexpr int AtomsPerBlock = (Threads / 32) * AtomsPerWarp;
       const int cooperative_blocks =
           (atom_count + AtomsPerBlock - 1) / AtomsPerBlock;
       const auto launch_cooperative = [&](auto moment_count_tag, auto fuse_tag) {
+        // Keep every non-type template argument local to the generic lambda.
+        // MSVC otherwise treats references to the enclosing constexpr locals as
+        // closure-member accesses and rejects them as constant expressions.
+        constexpr int kThreads = 128;
+        constexpr int kAtomsPerWarp = C >= 3 ? 4 : 8;
+        constexpr bool kInlinePull = C == 2;
         constexpr int kMomentCount = decltype(moment_count_tag)::value;
         constexpr bool kFuseStructuralRadial =
             decltype(fuse_tag)::value;
         constexpr std::size_t kStructuralRadialSharedBytes =
             kFuseStructuralRadial
                 ? static_cast<std::size_t>(
-                      (Threads / 32) * AtomsPerWarp *
+                      (kThreads / 32) * kAtomsPerWarp *
                       2 * 9 * sizeof(float))
                 : 0;
         accumulate_spin2_oc_native_forces_cooperative_o3<
-            C, kMomentCount, AtomsPerWarp, InlinePull,
+            C, kMomentCount, kAtomsPerWarp, kInlinePull,
             VirialMode, kFuseStructuralRadial>
-          <<<cooperative_blocks, Threads, kStructuralRadialSharedBytes>>>(
+          <<<cooperative_blocks, kThreads, kStructuralRadialSharedBytes>>>(
               make_spin_polynomial_layout(protocol),
               atom_count,
               static_cast<int>(view.atom_capacity),
