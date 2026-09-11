@@ -125,6 +125,13 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.angular_coefficients_center_type_major_count =
         host.angular_coefficients_center_type_major.size();
     upload_float_array(
+        host.spin_projection_parameters,
+        spin_projection_parameters_device_,
+        summary_.spin_projection_parameters_bytes,
+        "upload spin projection parameters");
+    view_.spin_projection_parameters_count =
+        host.spin_projection_parameters.size();
+    upload_float_array(
         host.q_scaler,
         q_scaler_device_,
         summary_.q_scaler_bytes,
@@ -142,6 +149,12 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.cutoff_angular_pair_bytes,
         "upload angular pair cutoffs");
     view_.cutoff_angular_pair_count = host.cutoff_angular_pair.size();
+    upload_float_array(
+        host.spin_cutoff_pair,
+        spin_cutoff_pair_device_,
+        summary_.spin_cutoff_pair_bytes,
+        "upload spin pair cutoffs");
+    view_.spin_cutoff_pair_count = host.spin_cutoff_pair.size();
     upload_float_array(
         host.zbl_parameters_pair,
         zbl_parameters_pair_device_,
@@ -181,9 +194,11 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         descriptor_coefficients_type_pair_major_device_;
     view_.angular_coefficients_center_type_major =
         angular_coefficients_center_type_major_device_;
+    view_.spin_projection_parameters = spin_projection_parameters_device_;
     view_.q_scaler = q_scaler_device_;
     view_.cutoff_radial_pair = cutoff_radial_pair_device_;
     view_.cutoff_angular_pair = cutoff_angular_pair_device_;
+    view_.spin_cutoff_pair = spin_cutoff_pair_device_;
     view_.zbl_parameters_pair = zbl_parameters_pair_device_;
     view_.spin_baseline = spin_baseline_device_;
     view_.spin_dof_type_active = spin_dof_type_active_device_;
@@ -195,9 +210,11 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.descriptor_coefficients_bytes +
         summary_.descriptor_coefficients_type_pair_major_bytes +
         summary_.angular_coefficients_center_type_major_bytes +
+        summary_.spin_projection_parameters_bytes +
         summary_.q_scaler_bytes +
         summary_.cutoff_radial_pair_bytes +
         summary_.cutoff_angular_pair_bytes +
+        summary_.spin_cutoff_pair_bytes +
         summary_.zbl_parameters_pair_bytes +
         summary_.spin_baseline_bytes +
         summary_.spin_dof_type_active_bytes +
@@ -230,9 +247,12 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
       other.descriptor_coefficients_type_pair_major_device_;
   angular_coefficients_center_type_major_device_ =
       other.angular_coefficients_center_type_major_device_;
+  spin_projection_parameters_device_ =
+      other.spin_projection_parameters_device_;
   q_scaler_device_ = other.q_scaler_device_;
   cutoff_radial_pair_device_ = other.cutoff_radial_pair_device_;
   cutoff_angular_pair_device_ = other.cutoff_angular_pair_device_;
+  spin_cutoff_pair_device_ = other.spin_cutoff_pair_device_;
   zbl_parameters_pair_device_ = other.zbl_parameters_pair_device_;
   spin_baseline_device_ = other.spin_baseline_device_;
   spin_dof_type_active_device_ = other.spin_dof_type_active_device_;
@@ -246,9 +266,11 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   other.descriptor_coefficients_device_ = nullptr;
   other.descriptor_coefficients_type_pair_major_device_ = nullptr;
   other.angular_coefficients_center_type_major_device_ = nullptr;
+  other.spin_projection_parameters_device_ = nullptr;
   other.q_scaler_device_ = nullptr;
   other.cutoff_radial_pair_device_ = nullptr;
   other.cutoff_angular_pair_device_ = nullptr;
+  other.spin_cutoff_pair_device_ = nullptr;
   other.zbl_parameters_pair_device_ = nullptr;
   other.spin_baseline_device_ = nullptr;
   other.spin_dof_type_active_device_ = nullptr;
@@ -273,9 +295,11 @@ void DeviceModel::release() {
   free_device(descriptor_coefficients_device_);
   free_device(descriptor_coefficients_type_pair_major_device_);
   free_device(angular_coefficients_center_type_major_device_);
+  free_device(spin_projection_parameters_device_);
   free_device(q_scaler_device_);
   free_device(cutoff_radial_pair_device_);
   free_device(cutoff_angular_pair_device_);
+  free_device(spin_cutoff_pair_device_);
   free_device(zbl_parameters_pair_device_);
   free_device(spin_baseline_device_);
   free_device(spin_dof_type_active_device_);

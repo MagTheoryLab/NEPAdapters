@@ -45,6 +45,22 @@ class LammpsBaselineSmokeTest(unittest.TestCase):
     self.assertNotIn("pair_style nep/cpu", contents)
     self.assertNotIn("plugin load", contents)
 
+  def test_input_writes_requested_newton_mode(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "in.baseline"
+      smoke.write_input(
+          path,
+          "plugin.so",
+          "nep.txt",
+          ["Fe"],
+          newton="off",
+      )
+
+      contents = path.read_text(encoding="utf-8")
+
+    self.assertIn("newton off\n", contents)
+    self.assertNotIn("newton on\n", contents)
+
   def test_command_load_mode_writes_explicit_plugin_command(self):
     with tempfile.TemporaryDirectory() as directory:
       path = Path(directory) / "in.baseline"

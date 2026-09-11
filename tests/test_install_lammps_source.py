@@ -49,6 +49,16 @@ class InstallLammpsSourceTest(unittest.TestCase):
 
       self.assertTrue((lammps / "src/pair_nep_adapters_cpu.cpp").is_file())
       self.assertFalse((lammps / "src/pair_nep_adapters_cuda.cpp").exists())
+      self.assertFalse((lammps / "src/kokkos_view_strides.hpp").exists())
+
+  def test_cuda_install_copies_kokkos_stride_helper(self):
+    with tempfile.TemporaryDirectory() as directory:
+      lammps = self.make_lammps_tree(Path(directory))
+      installed = installer.install(lammps, "cuda")
+
+      helper = lammps.resolve() / "src/kokkos_view_strides.hpp"
+      self.assertIn(helper, installed)
+      self.assertTrue(helper.is_file())
 
   def test_reinstall_refuses_modified_managed_file(self):
     with tempfile.TemporaryDirectory() as directory:

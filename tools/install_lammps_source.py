@@ -28,6 +28,7 @@ CPU_FILES = (
     "pair_nep_adapters_cpu.h",
 )
 CUDA_FILES = (
+    "kokkos_view_strides.hpp",
     "pair_nep_adapters_cuda.cpp",
     "pair_nep_adapters_cuda.h",
 )

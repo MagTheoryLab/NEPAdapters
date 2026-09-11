@@ -80,6 +80,9 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
 
   packed.cutoff_radial_pair.resize(num_types * num_types);
   packed.cutoff_angular_pair.resize(num_types * num_types);
+  if (protocol.spin_mode != 0) {
+    packed.spin_cutoff_pair.resize(num_types * num_types);
+  }
   if (protocol.has_zbl) {
     packed.zbl_parameters_pair.resize(num_types * num_types * 10);
   }
@@ -92,6 +95,11 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
       packed.cutoff_angular_pair[pair] = static_cast<float>(
           0.5 * (protocol.cutoff_angular_by_type[type1] +
                  protocol.cutoff_angular_by_type[type2]));
+      if (protocol.spin_mode != 0) {
+        packed.spin_cutoff_pair[pair] = static_cast<float>(
+            0.5 * (protocol.spin_cutoff_by_type[type1] +
+                   protocol.spin_cutoff_by_type[type2]));
+      }
       if (!protocol.has_zbl) {
         continue;
       }
@@ -238,6 +246,12 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
     }
   }
   raw_offset += protocol.descriptor_parameter_count;
+  append_range(
+      packed.spin_projection_parameters,
+      raw,
+      raw_offset,
+      protocol.spin_projection_parameter_count);
+  raw_offset += protocol.spin_projection_parameter_count;
 
   if (raw_offset != protocol.model_parameter_count) {
     throw std::runtime_error("model parameter layout did not consume all model parameters");

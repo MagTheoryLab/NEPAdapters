@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <cstdio>
@@ -225,6 +226,8 @@ class LammpsDevicePairProfiler {
       float zbl_force_ms,
       float spin_onsite_ms,
       float spin_density_ms,
+      float spin_density_pull_ms,
+      float spin_density_edge_ms,
       float spin_chiral_ms,
       float output_ms) const {
     if (!enabled_) {
@@ -239,7 +242,9 @@ class LammpsDevicePairProfiler {
         "NEPA_PAIR_PROFILE sample=%d nlocal=%d rebuild=%d "
         "stage_ms=%.3f clear_ms=%.3f descriptor_ann_ms=%.3f "
         "radial_force_ms=%.3f angular_force_ms=%.3f zbl_force_ms=%.3f "
-        "spin_onsite_ms=%.3f spin_density_ms=%.3f spin_chiral_ms=%.3f "
+        "spin_onsite_ms=%.3f spin_density_ms=%.3f "
+        "spin_density_pull_ms=%.3f spin_density_edge_ms=%.3f "
+        "spin_chiral_ms=%.3f "
         "output_ms=%.3f total_ms=%.3f\n",
         sample_,
         nlocal_,
@@ -252,6 +257,8 @@ class LammpsDevicePairProfiler {
         zbl_force_ms,
         spin_onsite_ms,
         spin_density_ms,
+        spin_density_pull_ms,
+        spin_density_edge_ms,
         spin_chiral_ms,
         output_ms,
         total_ms);
@@ -264,6 +271,93 @@ class LammpsDevicePairProfiler {
   bool rebuild_workspace_ = false;
   cudaEvent_t mark_ = nullptr;
   cudaEvent_t now_ = nullptr;
+};
+
+class LammpsHostPairProfiler {
+ public:
+  explicit LammpsHostPairProfiler(int nlocal) : nlocal_(nlocal) {
+    const char* raw = std::getenv("NEP_ADAPTERS_PROFILE_PAIR");
+    if (raw == nullptr || raw[0] == '\0') {
+      return;
+    }
+    if (mpi_rank_from_env() != env_int("NEP_ADAPTERS_PROFILE_PAIR_RANK", 0)) {
+      return;
+    }
+    static int samples = 0;
+    const int max_samples = env_int("NEP_ADAPTERS_PROFILE_PAIR", 5);
+    if (max_samples > 0 && samples >= max_samples) {
+      return;
+    }
+    sample_ = ++samples;
+    enabled_ = true;
+    mark_ = std::chrono::steady_clock::now();
+  }
+
+  bool enabled() const { return enabled_; }
+
+  void split(float& target_ms) {
+    if (!enabled_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    target_ms = static_cast<float>(
+        std::chrono::duration<double, std::milli>(now - mark_).count());
+    mark_ = now;
+  }
+
+  void print(
+      float workspace_wall_ms,
+      float neighbor_stage_wall_ms,
+      float clear_wall_ms,
+      float pipeline_wall_ms,
+      const nep_adapters::cuda_backend::ForcePipelineTimings& pipeline,
+      float output_wall_ms) const {
+    if (!enabled_) {
+      return;
+    }
+    const float nested_pipeline_ms =
+        pipeline.descriptor_ann_ms + pipeline.radial_force_ms +
+        pipeline.angular_force_ms + pipeline.zbl_force_ms +
+        pipeline.spin_onsite_ms + pipeline.spin_density_ms +
+        pipeline.spin_chiral_ms;
+    const float total_wall_ms =
+        workspace_wall_ms + neighbor_stage_wall_ms + clear_wall_ms +
+        pipeline_wall_ms + output_wall_ms;
+    std::fprintf(
+        stderr,
+        "NEPA_HOST_PAIR_PROFILE sample=%d nlocal=%d "
+        "workspace_wall_ms=%.3f neighbor_stage_wall_ms=%.3f "
+        "clear_wall_ms=%.3f pipeline_wall_ms=%.3f "
+        "descriptor_ann_ms=%.3f radial_force_ms=%.3f angular_force_ms=%.3f "
+        "zbl_force_ms=%.3f spin_onsite_ms=%.3f spin_density_ms=%.3f "
+        "spin_density_pull_ms=%.3f spin_density_edge_ms=%.3f "
+        "spin_chiral_ms=%.3f pipeline_unaccounted_ms=%.3f "
+        "output_wall_ms=%.3f total_wall_ms=%.3f\n",
+        sample_,
+        nlocal_,
+        workspace_wall_ms,
+        neighbor_stage_wall_ms,
+        clear_wall_ms,
+        pipeline_wall_ms,
+        pipeline.descriptor_ann_ms,
+        pipeline.radial_force_ms,
+        pipeline.angular_force_ms,
+        pipeline.zbl_force_ms,
+        pipeline.spin_onsite_ms,
+        pipeline.spin_density_ms,
+        pipeline.spin_density_pull_ms,
+        pipeline.spin_density_edge_ms,
+        pipeline.spin_chiral_ms,
+        pipeline_wall_ms - nested_pipeline_ms,
+        output_wall_ms,
+        total_wall_ms);
+  }
+
+ private:
+  bool enabled_ = false;
+  int sample_ = 0;
+  int nlocal_ = 0;
+  std::chrono::steady_clock::time_point mark_{};
 };
 
 int lammps_atom_capacity(const NepaLammpsNeighborInput& input) {
@@ -1281,6 +1375,12 @@ class CudaModel : public nep_adapters::Model {
           protocol_.spin_mode == 0) {
         return NEPA_STATUS_UNSUPPORTED;
       }
+      LammpsHostPairProfiler profiler(input.nlocal);
+      float workspace_wall_ms = 0.0f;
+      float neighbor_stage_wall_ms = 0.0f;
+      float clear_wall_ms = 0.0f;
+      float pipeline_wall_ms = 0.0f;
+      float output_wall_ms = 0.0f;
       const int atom_capacity = lammps_atom_capacity(input);
       if (atom_capacity <= 0) {
         return NEPA_STATUS_INVALID_ARGUMENT;
@@ -1292,10 +1392,12 @@ class CudaModel : public nep_adapters::Model {
               static_cast<std::size_t>(input.inum),
               false,
               result.spin_transfer_per_atom_row_major9 != nullptr));
+      profiler.split(workspace_wall_ms);
       nep_adapters::cuda_backend::stage_lammps_external_neighbors_on_device(
           input,
           protocol_,
           workspace);
+      profiler.split(neighbor_stage_wall_ms);
 
       const nep_adapters::cuda_backend::SimulationBox box =
           make_nonperiodic_lammps_box();
@@ -1310,6 +1412,15 @@ class CudaModel : public nep_adapters::Model {
       if (view.virial_soa9 != nullptr) {
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
       }
+      if (profiler.enabled()) {
+        const cudaError_t status = cudaDeviceSynchronize();
+        if (status != cudaSuccess) {
+          throw std::runtime_error(
+              std::string("synchronize host LAMMPS clear: ") +
+              cudaGetErrorString(status));
+        }
+      }
+      profiler.split(clear_wall_ms);
       const auto force_request = make_force_evaluation_request(
           nep_adapters::cuda_backend::
               ForceNeighborTopology::single_box_symmetric,
@@ -1317,13 +1428,16 @@ class CudaModel : public nep_adapters::Model {
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr,
           result.spin_transfer_per_atom_row_major9 != nullptr);
+      nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
       nep_adapters::cuda_backend::run_force_pipeline(
           protocol_,
           force_request,
           atom_capacity,
           box,
           device_,
-          workspace);
+          workspace,
+          profiler.enabled() ? &pipeline_timings : nullptr);
+      profiler.split(pipeline_wall_ms);
 
       const std::vector<double> potential =
           copy_device_doubles(view.potential, view.atom_capacity);
@@ -1405,6 +1519,14 @@ class CudaModel : public nep_adapters::Model {
                 total_raw9,
                 component);
       }
+      profiler.split(output_wall_ms);
+      profiler.print(
+          workspace_wall_ms,
+          neighbor_stage_wall_ms,
+          clear_wall_ms,
+          pipeline_wall_ms,
+          pipeline_timings,
+          output_wall_ms);
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
     } catch (const std::invalid_argument& error) {
       nep_adapters::set_last_error(error.what());
@@ -1535,6 +1657,8 @@ class CudaModel : public nep_adapters::Model {
       float zbl_force_ms = 0.0f;
       float spin_onsite_ms = 0.0f;
       float spin_density_ms = 0.0f;
+      float spin_density_pull_ms = 0.0f;
+      float spin_density_edge_ms = 0.0f;
       float spin_chiral_ms = 0.0f;
       float output_ms = 0.0f;
       nep_adapters::cuda_backend::DeviceWorkspace& workspace =
@@ -1590,6 +1714,8 @@ class CudaModel : public nep_adapters::Model {
       zbl_force_ms = pipeline_timings.zbl_force_ms;
       spin_onsite_ms = pipeline_timings.spin_onsite_ms;
       spin_density_ms = pipeline_timings.spin_density_ms;
+      spin_density_pull_ms = pipeline_timings.spin_density_pull_ms;
+      spin_density_edge_ms = pipeline_timings.spin_density_edge_ms;
       spin_chiral_ms = pipeline_timings.spin_chiral_ms;
       profiler.reset();
       nep_adapters::cuda_backend::write_lammps_device_outputs(
@@ -1606,6 +1732,8 @@ class CudaModel : public nep_adapters::Model {
           zbl_force_ms,
           spin_onsite_ms,
           spin_density_ms,
+          spin_density_pull_ms,
+          spin_density_edge_ms,
           spin_chiral_ms,
           output_ms);
       return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;

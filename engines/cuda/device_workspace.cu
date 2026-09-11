@@ -140,6 +140,10 @@ void set_view_pointer(
     view.spin_chiral_hexadecapoles_raw = static_cast<float*>(device);
   } else if (name == "spin_chiral_chirals") {
     view.spin_chiral_chirals = static_cast<float*>(device);
+  } else if (name == "spin2_moments") {
+    view.spin2_moments = static_cast<float*>(device);
+  } else if (name == "spin2_pulls") {
+    view.spin2_pulls = static_cast<float*>(device);
   }
 }
 

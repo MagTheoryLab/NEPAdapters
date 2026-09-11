@@ -20,6 +20,7 @@ struct Options {
   std::string engine = "cuda";
   std::string mode = "batch";
   std::string model = "spin";
+  std::string model_file;
   int replicate = 6;
   int warmup = 2;
   int iterations = 10;
@@ -44,6 +45,8 @@ Options parse_options(int argc, char** argv) {
       options.mode = argv[++i];
     } else if (arg == "--model" && i + 1 < argc) {
       options.model = argv[++i];
+    } else if (arg == "--model-file" && i + 1 < argc) {
+      options.model_file = argv[++i];
     } else if (arg == "--replicate" && i + 1 < argc) {
       options.replicate = parse_positive(argv[++i], "--replicate");
     } else if (arg == "--warmup" && i + 1 < argc) {
@@ -53,7 +56,7 @@ Options parse_options(int argc, char** argv) {
     } else {
       std::cerr << "Usage: " << argv[0]
                 << " [--engine cpu|cuda] [--mode batch|lammps]"
-                << " [--model spin|struct]"
+                << " [--model spin|struct] [--model-file PATH]"
                 << " [--replicate N] [--warmup N] [--iterations N]\n";
       std::exit(EXIT_FAILURE);
     }
@@ -433,9 +436,11 @@ int main(int argc, char** argv) {
   const Options options = parse_options(argc, argv);
   nep_adapters::register_cpu_engine();
   nep_adapters::register_cuda_engine();
-  const std::string model_path =
-      options.model == "spin" ? NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
-                              : write_struct_model_from_spin();
+  const std::string model_path = options.model_file.empty()
+                                     ? (options.model == "spin"
+                                            ? NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
+                                            : write_struct_model_from_spin())
+                                     : options.model_file;
   NepaModel* model = nullptr;
   if (nepa_load_model(options.engine.c_str(), model_path.c_str(), &model) !=
       NEPA_STATUS_OK) {

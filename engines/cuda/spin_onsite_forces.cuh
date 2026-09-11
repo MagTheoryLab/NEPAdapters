@@ -77,7 +77,10 @@ __device__ __forceinline__ void stf_outer3f(
   }
 }
 
-template <int C>
+template <
+    int C,
+    bool NeedDerivatives = true,
+    bool FuseStructuralRadial = false>
 __device__ __forceinline__ bool load_spin_edge_f32(
     int atom,
     int neighbor,
@@ -85,6 +88,7 @@ __device__ __forceinline__ bool load_spin_edge_f32(
     int num_types,
     int spin_basis_size,
     float spin_cutoff,
+    const float* __restrict__ spin_cutoff_pair,
     SimulationBox box,
     const int* __restrict__ types,
     const double* __restrict__ positions_soa3,
@@ -96,7 +100,9 @@ __device__ __forceinline__ bool load_spin_edge_f32(
     float* si,
     float* sj,
     float* weights,
-    float* weight_derivatives) {
+    float* weight_derivatives,
+    const float* structural_radial_pulls = nullptr,
+    float* structural_radial_scale = nullptr) {
   compute_spin_edge_geometry_f32(
       atom,
       neighbor,
@@ -110,20 +116,28 @@ __device__ __forceinline__ bool load_spin_edge_f32(
     si[d] = static_cast<float>(spins_soa3[d * atom_stride + atom]);
     sj[d] = static_cast<float>(spins_soa3[d * atom_stride + neighbor]);
   }
-  if (!(dist > 1.0e-12f && dist < spin_cutoff)) {
+  const int type_pair = types[atom] * num_types + types[neighbor];
+  const float resolved_spin_cutoff = spin_cutoff_pair == nullptr
+      ? spin_cutoff : spin_cutoff_pair[type_pair];
+  if (!(dist > 1.0e-12f && dist < resolved_spin_cutoff)) {
     return false;
   }
-  const int type_pair = types[atom] * num_types + types[neighbor];
-  evaluate_spin_edge_weights_f32<C, true>(
+  const int neighbor_type = types[neighbor];
+  evaluate_spin_edge_weights_f32<
+      C, NeedDerivatives, FuseStructuralRadial>(
       spin_basis_size,
-      spin_cutoff,
+      resolved_spin_cutoff,
       dist,
       num_types,
       type_pair,
       descriptor_coefficients,
       spin_coefficient_offset,
       weights,
-      weight_derivatives);
+      weight_derivatives,
+      FuseStructuralRadial
+          ? structural_radial_pulls + neighbor_type * 9
+          : nullptr,
+      structural_radial_scale);
   return true;
 }
 
@@ -1070,6 +1084,7 @@ accumulate_spin_density_forces_tile_f32(
         num_types,
         spin_basis_size,
         spin_cutoff,
+        nullptr,
         box,
         types,
         positions_soa3,
@@ -1808,6 +1823,7 @@ accumulate_spin_chiral_forces_tile_f32(
         num_types,
         spin_basis_size,
         spin_cutoff,
+        nullptr,
         box,
         types,
         positions_soa3,

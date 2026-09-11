@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nep_adapters/detail/model_file.hpp"
 #include "nep_adapters/engine.hpp"
 
 #include <algorithm>
@@ -1003,7 +1004,7 @@ class CpuEngine final : public Engine {
     if (model_path.empty()) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
-    std::ifstream header(model_path);
+    std::ifstream header = detail::open_model_input(model_path);
     std::string version_tag;
     if (header >> version_tag && version_tag.rfind("nep3", 0) == 0) {
       return NEPA_STATUS_UNSUPPORTED;

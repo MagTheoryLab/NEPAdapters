@@ -34,7 +34,11 @@ public:
     int spin_basis_size = 0;
     int spin_l_max = 0;
     int spin_chiral = 0;
+    int spin_order = 0;
+    int spin_soc = 0;
+    int spin_projection_size = 0;
     double spin_cutoff_radial = 0.0;
+    std::vector<double> spin_cutoff_by_type;
     std::vector<int> spin_dof_type_active;
     std::vector<int> spin_env_type_active;
     int model_type = 0; // 0=potential, 1=dipole, 2=polarizability
@@ -61,7 +65,7 @@ public:
     std::size_t num_types_sq = 0;
     std::size_t num_c_radial = 0;
     std::size_t num_types = 0;
-    double q_scaler[140];
+    double q_scaler[320];
     int atomic_numbers[94];
     std::vector<double> rc_radial_pair;
     std::vector<double> rcinv_radial_pair;
@@ -91,6 +95,7 @@ public:
     const double* b1;
     const double* c;
     const double* c_spin = nullptr;
+    const double* c_spin_projection = nullptr;
     const double* sqrt_epsilon_inf;
     // for the scalar part of polarizability
     const double* w0_pol[94];

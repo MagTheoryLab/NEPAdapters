@@ -7,6 +7,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace nep_adapters::cuda_backend {
@@ -14,7 +15,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kMaxSpinCompress = 4;
-constexpr int kMaxSpinBasis = 8;
+constexpr int kMaxSpinBasis = 9;
 constexpr int kSpinDeg2Count = 6;
 constexpr int kSpinDeg3Count = 10;
 constexpr int kSpinDeg4Count = 15;
@@ -119,10 +120,14 @@ class PhaseTimer {
   cudaEvent_t now_ = nullptr;
 };
 
-// Keep both implementation fragments in this CUDA translation unit to preserve
-// shared device constants, inlining, and kernel code generation.
+// Keep the legacy spin1 core and the unified O/C spin2 implementation in this
+// CUDA translation unit to preserve shared device helpers and inlining.
 #include "spin_onsite_descriptors.cuh"
 #include "spin_onsite_forces.cuh"
+#include "spin2_layout.cuh"
+#include "spin2_descriptor.cuh"
+#include "spin2_pull.cuh"
+#include "spin2_cooperative.cuh"
 
 template <int C, int LMax, bool Chiral>
 void launch_spin_descriptor_core(
@@ -131,9 +136,9 @@ void launch_spin_descriptor_core(
     const SimulationBox& box,
     const DeviceModelView& model_view,
     const DeviceWorkspaceView& view) {
-  build_spin_descriptor_core_streaming<
-      C,
-      LMax,
+  build_spin_descriptor_core_streaming<                                \
+      C,                                                               \
+      LMax,                                                            \
       Chiral><<<atom_count, 128>>>(
           atom_count,
           static_cast<int>(view.atom_capacity),
@@ -341,7 +346,8 @@ void launch_spin_density_force_virial(
     SpinVirialMode virial_mode,
     bool accumulate_spin_transfer) {
 #define NEP_LAUNCH_DENSITY_FORCE_VIRIAL(mode)                              \
-  launch_spin_density_force_transfer<C, LMax, SpinVirialMode::mode>(       \
+  launch_spin_density_force_transfer<                                      \
+      C, LMax, SpinVirialMode::mode>(                                      \
       protocol, atom_count, box, model_view, view, accumulate_spin_transfer)
   switch (virial_mode) {
     case SpinVirialMode::disabled:
@@ -424,6 +430,185 @@ void launch_spin_density_forces(
       throw std::runtime_error("CUDA spin core supports 1 to 4 channels");
   }
 #undef NEP_LAUNCH_DENSITY_FORCE_CHANNELS
+}
+
+template <int C, SpinVirialMode VirialMode, bool AccumulateSpinTransfer>
+void launch_spin2_oc_native_force_shape(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    bool fuse_structural_radial) {
+  constexpr int Threads = 128;
+  if constexpr (
+      (C == 2 || C == 3 || C == 4) && !AccumulateSpinTransfer &&
+      (VirialMode == SpinVirialMode::disabled ||
+       VirialMode == SpinVirialMode::center_owned)) {
+    if ((protocol.spin_mode == 2 || protocol.spin_mode == 3) &&
+        protocol.spin_order == 3 &&
+        protocol.spin_l_max == 2 &&
+        protocol.spin_soc == 1) {
+      constexpr int AtomsPerWarp = C >= 3 ? 4 : 8;
+      constexpr int AtomsPerBlock = (Threads / 32) * AtomsPerWarp;
+      const int cooperative_blocks =
+          (atom_count + AtomsPerBlock - 1) / AtomsPerBlock;
+      const auto launch_cooperative = [&](auto moment_count_tag, auto fuse_tag) {
+        // Keep every non-type template argument local to the generic lambda.
+        // MSVC otherwise treats references to the enclosing constexpr locals as
+        // closure-member accesses and rejects them as constant expressions.
+        constexpr int kThreads = 128;
+        constexpr int kAtomsPerWarp = C >= 3 ? 4 : 8;
+        constexpr bool kInlinePull = C == 2;
+        constexpr int kMomentCount = decltype(moment_count_tag)::value;
+        constexpr bool kFuseStructuralRadial =
+            decltype(fuse_tag)::value;
+        constexpr std::size_t kStructuralRadialSharedBytes =
+            kFuseStructuralRadial
+                ? static_cast<std::size_t>(
+                      (kThreads / 32) * kAtomsPerWarp *
+                      2 * 9 * sizeof(float))
+                : 0;
+        accumulate_spin2_oc_native_forces_cooperative_o3<
+            C, kMomentCount, kAtomsPerWarp, kInlinePull,
+            VirialMode, kFuseStructuralRadial>
+          <<<cooperative_blocks, kThreads, kStructuralRadialSharedBytes>>>(
+              make_spin_polynomial_layout(protocol),
+              atom_count,
+              static_cast<int>(view.atom_capacity),
+              protocol.struct_descriptor_dim,
+              protocol.num_types,
+              protocol.spin_basis_size,
+              static_cast<float>(protocol.spin_cutoff_radial),
+              model_view.spin_cutoff_pair,
+              box,
+              view.types,
+              model_view.spin_dof_type_active,
+              model_view.spin_env_type_active,
+              view.positions_soa3,
+              view.spins_soa3,
+              view.nn_radial,
+              view.nl_radial_slot_major,
+              view.fp,
+              model_view.descriptor_coefficients,
+              model_view.descriptor_coefficients_type_pair_major,
+              model_view.spin_projection_parameters,
+              view.spin2_moments,
+              view.spin2_pulls,
+              static_cast<int>(
+                  protocol.ordinary_descriptor_parameter_count),
+              view.force_soa3,
+              view.mforce_soa3,
+              view.virial_soa9);
+      };
+      if (protocol.spin_mode == 3) {
+        using MomentCount = std::integral_constant<
+            int, 38 * C + C * (C + 1) / 2 + 8 * C>;
+        if (fuse_structural_radial) {
+          launch_cooperative(MomentCount{}, std::true_type{});
+        } else {
+          launch_cooperative(MomentCount{}, std::false_type{});
+        }
+      } else {
+        using MomentCount = std::integral_constant<
+            int, 38 * C + C * (C + 1) / 2>;
+        if (fuse_structural_radial) {
+          launch_cooperative(MomentCount{}, std::true_type{});
+        } else {
+          launch_cooperative(MomentCount{}, std::false_type{});
+        }
+      }
+      return;
+    }
+  }
+  const int blocks = (atom_count + Threads - 1) / Threads;
+  accumulate_spin2_oc_native_forces<
+      C, VirialMode, AccumulateSpinTransfer>
+      <<<blocks, Threads>>>(
+          make_spin_polynomial_layout(protocol),
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          protocol.num_types,
+          protocol.spin_basis_size,
+          static_cast<float>(protocol.spin_cutoff_radial),
+          model_view.spin_cutoff_pair,
+          box,
+          view.types,
+          model_view.spin_dof_type_active,
+          model_view.spin_env_type_active,
+          view.positions_soa3,
+          view.spins_soa3,
+          view.nn_radial,
+          view.nl_radial_slot_major,
+          view.fp,
+          model_view.descriptor_coefficients,
+          view.spin2_pulls,
+          static_cast<int>(protocol.ordinary_descriptor_parameter_count),
+          view.force_soa3,
+          view.mforce_soa3,
+          view.virial_soa9,
+          view.per_atom_virial_float_soa9,
+          view.spin_transfer_soa9);
+}
+
+template <int C, SpinVirialMode VirialMode>
+void launch_spin2_oc_native_force_transfer(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    bool accumulate_spin_transfer,
+    bool fuse_structural_radial) {
+  if (accumulate_spin_transfer) {
+    launch_spin2_oc_native_force_shape<C, VirialMode, true>(
+        protocol, atom_count, box, model_view, view, false);
+  } else {
+    launch_spin2_oc_native_force_shape<C, VirialMode, false>(
+        protocol, atom_count, box, model_view, view,
+        fuse_structural_radial);
+  }
+}
+
+void launch_spin2_oc_native_forces(
+    const ModelProtocol& protocol,
+    int atom_count,
+    const SimulationBox& box,
+    const DeviceModelView& model_view,
+    const DeviceWorkspaceView& view,
+    SpinVirialMode virial_mode,
+    bool accumulate_spin_transfer,
+    bool fuse_structural_radial) {
+#define NEP_SPIN2_OC_NATIVE_VIRIAL_CASE(C, mode)                        \
+  case SpinVirialMode::mode:                                           \
+    launch_spin2_oc_native_force_transfer<C, SpinVirialMode::mode>(    \
+        protocol, atom_count, box, model_view, view,                    \
+        accumulate_spin_transfer, fuse_structural_radial);             \
+    break
+#define NEP_SPIN2_OC_NATIVE_CHANNEL(C)                                  \
+  case C:                                                               \
+    switch (virial_mode) {                                              \
+      NEP_SPIN2_OC_NATIVE_VIRIAL_CASE(C, disabled);                     \
+      NEP_SPIN2_OC_NATIVE_VIRIAL_CASE(C, center_owned);                 \
+      NEP_SPIN2_OC_NATIVE_VIRIAL_CASE(C, neighbor_owned);               \
+      NEP_SPIN2_OC_NATIVE_VIRIAL_CASE(C, center_and_neighbor_float_sink); \
+    }                                                                   \
+    break
+  switch (protocol.spin_compress) {
+    NEP_SPIN2_OC_NATIVE_CHANNEL(1);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(2);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(3);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(4);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(5);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(6);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(7);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(8);
+    NEP_SPIN2_OC_NATIVE_CHANNEL(9);
+    default: throw std::runtime_error("spin2 force requires C=1..9");
+  }
+#undef NEP_SPIN2_OC_NATIVE_CHANNEL
+#undef NEP_SPIN2_OC_NATIVE_VIRIAL_CASE
 }
 
 template <int C, SpinVirialMode VirialMode, bool AccumulateSpinTransfer>
@@ -566,26 +751,94 @@ void build_spin_descriptors_on_device(
   require(protocol.spin_mode != 0, "spin descriptor requires spin model");
   require(
       supports_cuda_spin_shape(protocol),
-      "CUDA spin core requires 1 <= spin_compress <= 4, "
-      "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
+      "CUDA spin shape is outside the supported protocol range");
   require(protocol.spin_descriptor_dim > 0, "spin descriptor dimension must be positive");
+  const DeviceModelView model_view = model.view();
+  const DeviceWorkspaceView view = workspace.view();
+  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
+          "atom_count exceeds workspace atom capacity");
+  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
+    const SpinPolynomialLayout layout = make_spin_polynomial_layout(protocol);
+    require(protocol.spin_descriptor_dim == layout.descriptor_dim,
+            "spin2 descriptor dimension does not match O/C grammar");
+    require(view.types != nullptr, "workspace missing types");
+    require(view.positions_soa3 != nullptr, "workspace missing positions");
+    require(view.spins_soa3 != nullptr, "workspace missing spins");
+    require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
+    require(view.nl_radial_slot_major != nullptr,
+            "workspace missing radial neighbors");
+    require(view.descriptors != nullptr, "workspace missing descriptors");
+    require(view.spin2_moments != nullptr,
+            "workspace missing spin2 center moments");
+    require(model_view.spin_dof_type_active != nullptr &&
+                model_view.spin_env_type_active != nullptr,
+            "model missing spin type masks");
+    require(model_view.descriptor_coefficients != nullptr,
+            "model missing descriptor coefficients");
+    require(model_view.descriptor_coefficients_count >=
+                protocol.descriptor_parameter_count,
+            "model descriptor coefficient buffer is too small");
+    require(model_view.spin_projection_parameters != nullptr &&
+                model_view.spin_projection_parameters_count ==
+                    static_cast<std::size_t>(protocol.spin_projection_size),
+            "model missing spin2 radial-leg projection parameters");
+    if (atom_count > 0) {
+      constexpr int Threads = 128;
+      const int atom_blocks = (atom_count + Threads - 1) / Threads;
+#define NEP_LAUNCH_SPIN2_OC_FORWARD(C)                                  \
+      do {                                                              \
+        const int density_blocks =                                      \
+            ((C) * atom_count + Threads - 1) / Threads;                 \
+        build_spin2_oc_density_bank<C><<<density_blocks, Threads>>>(    \
+            layout, atom_count, static_cast<int>(view.atom_capacity),   \
+            protocol.struct_descriptor_dim, protocol.num_types,         \
+            protocol.spin_basis_size,                                   \
+            static_cast<float>(protocol.spin_cutoff_radial),             \
+            model_view.spin_cutoff_pair,                                 \
+            static_cast<int>(protocol.ordinary_descriptor_parameter_count), \
+            box, view.types, model_view.spin_dof_type_active,            \
+            model_view.spin_env_type_active, view.positions_soa3,        \
+            view.spins_soa3, view.nn_radial, view.nl_radial_slot_major,   \
+            model_view.descriptor_coefficients, view.descriptors,        \
+            view.spin2_moments);                                         \
+        contract_spin2_oc_descriptors<C><<<atom_blocks, Threads>>>(      \
+            layout, atom_count, static_cast<int>(view.atom_capacity),    \
+            protocol.struct_descriptor_dim, view.types,                  \
+            model_view.spin_dof_type_active, view.spins_soa3,            \
+            model_view.spin_projection_parameters, view.spin2_moments,   \
+            view.descriptors);                                           \
+      } while (false)
+      switch (protocol.spin_compress) {
+        case 1: NEP_LAUNCH_SPIN2_OC_FORWARD(1); break;
+        case 2: NEP_LAUNCH_SPIN2_OC_FORWARD(2); break;
+        case 3: NEP_LAUNCH_SPIN2_OC_FORWARD(3); break;
+        case 4: NEP_LAUNCH_SPIN2_OC_FORWARD(4); break;
+        case 5: NEP_LAUNCH_SPIN2_OC_FORWARD(5); break;
+        case 6: NEP_LAUNCH_SPIN2_OC_FORWARD(6); break;
+        case 7: NEP_LAUNCH_SPIN2_OC_FORWARD(7); break;
+        case 8: NEP_LAUNCH_SPIN2_OC_FORWARD(8); break;
+        case 9: NEP_LAUNCH_SPIN2_OC_FORWARD(9); break;
+        default: throw std::runtime_error("spin2 requires C=1..9");
+      }
+#undef NEP_LAUNCH_SPIN2_OC_FORWARD
+    }
+    check_cuda(cudaGetLastError(), "build spin2 descriptors kernel launch failed");
+    return;
+  }
   require(protocol.spin_descriptor_dim <= 96,
-          "spin descriptor kernel supports spin descriptor dim <= 96");
+          "legacy spin descriptor kernel supports spin descriptor dim <= 96");
   require(protocol.spin_compress > 0 &&
               protocol.spin_compress <= kMaxSpinCompress,
           "spin descriptor kernel supports spin_compress <= 4");
   require(protocol.spin_basis_size >= 0 &&
               protocol.spin_basis_size + 1 <= kMaxSpinBasis,
-          "spin descriptor kernel supports spin_basis_size + 1 <= 8");
+          "spin descriptor kernel supports spin_basis_size + 1 <= 9");
   require(protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4,
           "spin descriptor kernel supports spin_l_max <= 4");
-  const DeviceModelView model_view = model.view();
-  const DeviceWorkspaceView view = workspace.view();
   const SpinCoreLayout layout = make_spin_core_layout(protocol);
-  require(layout.descriptor_dim == protocol.spin_descriptor_dim,
+  require(
+      layout.descriptor_dim == protocol.spin_descriptor_dim,
           "spin descriptor layout does not match model protocol");
-  require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
-          "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
   require(model_view.spin_dof_type_active != nullptr &&
               model_view.spin_env_type_active != nullptr,
@@ -595,15 +848,21 @@ void build_spin_descriptors_on_device(
   require(view.nn_radial != nullptr, "workspace missing radial neighbor counts");
   require(view.nl_radial_slot_major != nullptr, "workspace missing radial neighbors");
   require(view.descriptors != nullptr, "workspace missing descriptors");
-  require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
-  require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
-  require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
+  require(view.spin_density_rho0 != nullptr,
+          "workspace missing spin density rho0");
+  require(view.spin_density_raw1 != nullptr,
+          "workspace missing spin density raw1");
+  require(protocol.spin_l_max < 2 ||
+              view.spin_density_angular2 != nullptr,
           "workspace missing spin density angular2");
-  require(protocol.spin_l_max < 3 || view.spin_density_angular3 != nullptr,
+  require(protocol.spin_l_max < 3 ||
+              view.spin_density_angular3 != nullptr,
           "workspace missing spin density angular3");
-  require(protocol.spin_l_max < 4 || view.spin_density_angular4 != nullptr,
+  require(protocol.spin_l_max < 4 ||
+              view.spin_density_angular4 != nullptr,
           "workspace missing spin density angular4");
-  require(view.spin_density_geom != nullptr, "workspace missing spin density geom");
+  require(view.spin_density_geom != nullptr,
+          "workspace missing spin density geom");
   require(view.spin_density_rho0_dot != nullptr,
           "workspace missing spin density rho0 dot");
   require(view.spin_density_raw1_dot != nullptr,
@@ -646,15 +905,28 @@ static void accumulate_spin_onsite_mforces_impl(
   const int threads = 128;
   const int blocks = (atom_count + threads - 1) / threads;
   if (blocks > 0) {
-    accumulate_spin_onsite_mforces<<<blocks, threads>>>(
-        atom_count,
-        static_cast<int>(view.atom_capacity),
-        protocol.struct_descriptor_dim,
-        view.types,
-        model_view.spin_dof_type_active,
-        view.spins_soa3,
-        view.fp,
-        view.mforce_soa3);
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
+      accumulate_spin2_oc_onsite_mforces<<<blocks, threads>>>(
+          make_spin_polynomial_layout(protocol),
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          view.types,
+          model_view.spin_dof_type_active,
+          view.spins_soa3,
+          view.fp,
+          view.mforce_soa3);
+    } else {
+      accumulate_spin_onsite_mforces<<<blocks, threads>>>(
+          atom_count,
+          static_cast<int>(view.atom_capacity),
+          protocol.struct_descriptor_dim,
+          view.types,
+          model_view.spin_dof_type_active,
+          view.spins_soa3,
+          view.fp,
+          view.mforce_soa3);
+    }
   }
   check_cuda(cudaGetLastError(), "accumulate spin onsite mforces");
 }
@@ -666,18 +938,22 @@ static void accumulate_spin_density_forces_impl(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     SpinVirialMode virial_mode,
-    bool accumulate_spin_transfer) {
+    bool accumulate_spin_transfer,
+    bool fuse_structural_radial,
+    SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin density force requires spin model");
   require(protocol.spin_compress > 0 &&
-              protocol.spin_compress <= kMaxSpinCompress,
-          "spin density force kernel supports spin_compress <= 4");
+              (protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+               protocol.spin_compress <= kMaxSpinCompress),
+          "legacy spin1 density force kernel supports spin_compress <= 4");
   require(protocol.spin_basis_size >= 0 &&
               protocol.spin_basis_size + 1 <= kMaxSpinBasis,
-          "spin density force kernel supports spin_basis_size + 1 <= 8");
+          "spin density force kernel supports spin_basis_size + 1 <= 9");
   require(protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4,
           "spin density force kernel supports spin_l_max <= 4");
   const DeviceModelView model_view = model.view();
   const DeviceWorkspaceView view = workspace.view();
+  PhaseTimer timer(timings != nullptr);
   require(static_cast<std::size_t>(atom_count) <= view.atom_capacity,
           "atom_count exceeds workspace atom capacity");
   require(view.types != nullptr, "workspace missing types");
@@ -699,32 +975,115 @@ static void accumulate_spin_density_forces_impl(
   require(
       !accumulate_spin_transfer || view.spin_transfer_soa9 != nullptr,
       "workspace missing spin-transfer output");
-  require(view.spin_density_rho0 != nullptr, "workspace missing spin density rho0");
-  require(view.spin_density_raw1 != nullptr, "workspace missing spin density raw1");
-  require(protocol.spin_l_max < 2 || view.spin_density_angular2 != nullptr,
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              view.spin_density_rho0 != nullptr,
+          "workspace missing spin density rho0");
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              view.spin_density_raw1 != nullptr,
+          "workspace missing spin density raw1");
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              protocol.spin_l_max < 2 ||
+              view.spin_density_angular2 != nullptr,
           "workspace missing spin density angular2");
-  require(protocol.spin_l_max < 3 || view.spin_density_angular3 != nullptr,
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              protocol.spin_l_max < 3 ||
+              view.spin_density_angular3 != nullptr,
           "workspace missing spin density angular3");
-  require(protocol.spin_l_max < 4 || view.spin_density_angular4 != nullptr,
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              protocol.spin_l_max < 4 ||
+              view.spin_density_angular4 != nullptr,
           "workspace missing spin density angular4");
-  require(view.spin_density_geom != nullptr, "workspace missing spin density geom");
-  require(view.spin_density_rho0_dot != nullptr,
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              view.spin_density_geom != nullptr,
+          "workspace missing spin density geom");
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              view.spin_density_rho0_dot != nullptr,
           "workspace missing spin density rho0 dot");
-  require(view.spin_density_raw1_dot != nullptr,
+  require(protocol.spin_mode == 2 || protocol.spin_mode == 3 ||
+              view.spin_density_raw1_dot != nullptr,
           "workspace missing spin density raw1 dot");
   require(model_view.descriptor_coefficients != nullptr,
           "model missing descriptor coefficients");
   require(model_view.descriptor_coefficients_count >= protocol.descriptor_parameter_count,
           "model descriptor coefficient buffer is too small");
   if (atom_count > 0) {
-    launch_spin_density_forces(
-        protocol,
-        atom_count,
-        box,
-        model_view,
-        view,
-        virial_mode,
-        accumulate_spin_transfer);
+    if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
+      require(view.spin2_moments != nullptr && view.spin2_pulls != nullptr,
+              "workspace missing spin2 moments or pulls");
+      require(model_view.spin_projection_parameters != nullptr &&
+                  model_view.spin_projection_parameters_count ==
+                      static_cast<std::size_t>(protocol.spin_projection_size),
+              "model missing spin2 projection parameters");
+      constexpr int Threads = 128;
+      const SpinPolynomialLayout layout = make_spin_polynomial_layout(protocol);
+      const bool cooperative_force =
+          (protocol.spin_mode == 2 || protocol.spin_mode == 3) &&
+          protocol.spin_compress == 2 &&
+          protocol.spin_order == 3 &&
+          protocol.spin_l_max == 2 && protocol.spin_soc == 1 &&
+          !accumulate_spin_transfer &&
+          (virial_mode == SpinVirialMode::disabled ||
+           virial_mode == SpinVirialMode::center_owned);
+      const bool materialize_pulls =
+          !cooperative_force || protocol.spin_compress == 3;
+      if (materialize_pulls) {
+        const int pull_value_count = atom_count * layout.moment_count;
+        const int pull_blocks =
+            (pull_value_count + Threads - 1) / Threads;
+        clear_spin2_oc_pulls<<<pull_blocks, Threads>>>(
+            pull_value_count, view.spin2_pulls);
+        const int pull_work_items = atom_count * protocol.spin_compress;
+        const int blocks =
+            (pull_work_items + Threads - 1) / Threads;
+#define NEP_LAUNCH_SPIN2_OC_PULLS(C)                                    \
+        build_spin2_oc_center_pulls<C><<<blocks, Threads>>>(            \
+            layout, atom_count, static_cast<int>(view.atom_capacity),   \
+            protocol.struct_descriptor_dim, view.types,                 \
+            model_view.spin_dof_type_active, view.spins_soa3, view.fp,  \
+            model_view.spin_projection_parameters, view.spin2_moments,  \
+            view.spin2_pulls, view.mforce_soa3)
+        switch (protocol.spin_compress) {
+          case 1: NEP_LAUNCH_SPIN2_OC_PULLS(1); break;
+          case 2: NEP_LAUNCH_SPIN2_OC_PULLS(2); break;
+          case 3: NEP_LAUNCH_SPIN2_OC_PULLS(3); break;
+          case 4: NEP_LAUNCH_SPIN2_OC_PULLS(4); break;
+          case 5: NEP_LAUNCH_SPIN2_OC_PULLS(5); break;
+          case 6: NEP_LAUNCH_SPIN2_OC_PULLS(6); break;
+          case 7: NEP_LAUNCH_SPIN2_OC_PULLS(7); break;
+          case 8: NEP_LAUNCH_SPIN2_OC_PULLS(8); break;
+          case 9: NEP_LAUNCH_SPIN2_OC_PULLS(9); break;
+          default: throw std::runtime_error("spin2 pulls require C=1..9");
+        }
+#undef NEP_LAUNCH_SPIN2_OC_PULLS
+      }
+      if (timings != nullptr) {
+        timer.split(timings->density_pull_ms);
+      }
+      launch_spin2_oc_native_forces(
+          protocol,
+          atom_count,
+          box,
+          model_view,
+          view,
+          virial_mode,
+          accumulate_spin_transfer,
+          fuse_structural_radial);
+    } else {
+      if (timings != nullptr) {
+        timer.split(timings->density_pull_ms);
+      }
+      launch_spin_density_forces(
+          protocol,
+          atom_count,
+          box,
+          model_view,
+          view,
+          virial_mode,
+          accumulate_spin_transfer);
+    }
+  }
+  if (timings != nullptr) {
+    timer.split(timings->density_edge_ms);
   }
   check_cuda(cudaGetLastError(), "accumulate spin density forces");
 }
@@ -799,12 +1158,13 @@ void accumulate_spin_forces_on_device(
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
     bool accumulate_spin_transfer,
+    bool fuse_structural_radial,
     SpinForceTimings* timings) {
   require(protocol.spin_mode != 0, "spin force pipeline requires spin model");
   require(
       supports_cuda_spin_shape(protocol),
       "CUDA spin core requires 1 <= spin_compress <= 4, "
-      "spin_compress <= spin_basis_size + 1 <= 8, and spin_l_max <= 4");
+      "spin_compress <= spin_basis_size + 1 <= 9, and spin_l_max <= 4");
   SpinForceTimings ignored_timings;
   SpinForceTimings& measured = timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
@@ -845,7 +1205,9 @@ void accumulate_spin_forces_on_device(
       model,
       workspace,
       virial_mode,
-      accumulate_spin_transfer);
+      accumulate_spin_transfer,
+      fuse_structural_radial,
+      timings);
   timer.split(measured.density_ms);
 
   if (protocol.spin_chiral != 0) {

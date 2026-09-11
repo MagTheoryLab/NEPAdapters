@@ -28,6 +28,8 @@ class PairNEPAdaptersCommon : public Pair {
   void coeff(int, char**) override;
   void init_style() override;
   double init_one(int, int) override;
+  int pack_reverse_comm(int, int, double*) override;
+  void unpack_reverse_comm(int, int*, double*) override;
 
  protected:
   void allocate();
@@ -53,6 +55,7 @@ class PairNEPAdaptersCommon : public Pair {
   std::vector<double> potential_;
   std::vector<double> virials_per_atom_;
   std::vector<double*> virial_rows_;
+  bool classic_reverse_per_atom_virial_ = false;
 };
 
 }  // namespace LAMMPS_NS

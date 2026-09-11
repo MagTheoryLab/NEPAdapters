@@ -5,6 +5,89 @@ add_test(NAME nep_adapters_registry_test COMMAND nep_adapters_registry_test)
 set_tests_properties(nep_adapters_registry_test PROPERTIES
   LABELS "contract;core")
 
+if(TARGET NEPAdapters::cpu)
+  add_executable(
+    nep_adapters_cpu_spin2_shape_matrix_test
+    test_cpu_spin2_shape_matrix.cpp)
+  target_include_directories(
+    nep_adapters_cpu_spin2_shape_matrix_test
+    PRIVATE "${PROJECT_SOURCE_DIR}/engines/cpu/native")
+  target_compile_features(
+    nep_adapters_cpu_spin2_shape_matrix_test
+    PRIVATE cxx_std_17)
+  add_test(
+    NAME nep_adapters_cpu_spin2_shape_matrix_test
+    COMMAND nep_adapters_cpu_spin2_shape_matrix_test)
+  set_tests_properties(
+    nep_adapters_cpu_spin2_shape_matrix_test
+    PROPERTIES LABELS "oracle;finite_difference;engine;cpu;spin2;shape_matrix")
+
+  add_executable(
+    nep_adapters_cpu_spin2_oc_oracle_test
+    test_cuda_spin2_oc_oracle.cpp)
+  target_compile_definitions(
+    nep_adapters_cpu_spin2_oc_oracle_test
+    PRIVATE NEP_ADAPTERS_TEST_CPU_ENGINE=1)
+  target_link_libraries(
+    nep_adapters_cpu_spin2_oc_oracle_test
+    PRIVATE NEPAdapters::cpu)
+  foreach(_case IN ITEMS
+      o1c1_l0_soc0
+      o3c1_l2_soc1
+      o2c2
+      o3c2
+      o3c2_soc0
+      o3c3
+      o2c9_l1_soc1
+      zbl_o3c2)
+    add_test(
+      NAME nep_adapters_cpu_spin2_${_case}_oracle_test
+      COMMAND
+        nep_adapters_cpu_spin2_oc_oracle_test
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_case}.nep"
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_${_case}_oracle.txt")
+    set_tests_properties(
+      nep_adapters_cpu_spin2_${_case}_oracle_test
+      PROPERTIES LABELS "oracle;parity;engine;cpu;spin2")
+  endforeach()
+  add_test(
+    NAME nep_adapters_cpu_spin3_o3c2_typewise_oracle_test
+    COMMAND
+      nep_adapters_cpu_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c2_typewise.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c2_typewise_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cpu_spin3_o3c2_typewise_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cpu;spin3;typewise_cutoff")
+  add_test(
+    NAME nep_adapters_cpu_spin3_o3c2_uniform_oracle_test
+    COMMAND
+      nep_adapters_cpu_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c2_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c2_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cpu_spin3_o3c2_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cpu;spin3;cooperative")
+  add_test(
+    NAME nep_adapters_cpu_spin3_o3c3_uniform_oracle_test
+    COMMAND
+      nep_adapters_cpu_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c3_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c3_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cpu_spin3_o3c3_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cpu;spin3;cooperative")
+  add_test(
+    NAME nep_adapters_cpu_spin3_o3c4_uniform_oracle_test
+    COMMAND
+      nep_adapters_cpu_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c4_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c4_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cpu_spin3_o3c4_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cpu;spin3;cooperative")
+endif()
+
 add_executable(nep_adapters_domain_decomp_contract_test test_domain_decomp_contract.cpp)
 target_link_libraries(
   nep_adapters_domain_decomp_contract_test
@@ -369,6 +452,151 @@ if(TARGET NEPAdapters::cuda AND
     COMMAND nep_adapters_cuda_spin_protocol_test)
   set_tests_properties(nep_adapters_cuda_spin_protocol_test PROPERTIES
     LABELS "contract;engine;cuda;spin")
+
+  add_executable(
+    nep_adapters_cuda_spin2_protocol_test
+    test_cuda_spin2_protocol.cpp)
+  target_include_directories(
+    nep_adapters_cuda_spin2_protocol_test
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/engines/cuda")
+  target_link_libraries(
+    nep_adapters_cuda_spin2_protocol_test
+    PRIVATE
+      NEPAdapters::cuda
+      NEPAdapters::cpu)
+  add_test(
+    NAME nep_adapters_cuda_spin2_protocol_test
+    COMMAND nep_adapters_cuda_spin2_protocol_test)
+  set_tests_properties(
+    nep_adapters_cuda_spin2_protocol_test
+    PROPERTIES LABELS "contract;protocol;engine;cpu;cuda;spin2")
+
+  if(EXISTS "${NEP_ADAPTERS_SPIN2_MODEL_PATH}")
+    add_test(
+      NAME nep_adapters_cuda_spin2_external_model_test
+      COMMAND
+        nep_adapters_cuda_spin2_protocol_test
+        "${NEP_ADAPTERS_SPIN2_MODEL_PATH}")
+    set_tests_properties(
+      nep_adapters_cuda_spin2_external_model_test
+      PROPERTIES LABELS "contract;protocol;engine;cuda;spin2")
+  endif()
+
+  add_executable(
+    nep_adapters_cuda_spin2_oc_oracle_test
+    test_cuda_spin2_oc_oracle.cpp)
+  target_link_libraries(
+    nep_adapters_cuda_spin2_oc_oracle_test
+    PRIVATE NEPAdapters::cuda)
+  add_test(
+    NAME nep_adapters_cuda_spin2_o3c2_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c2.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c2_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o3c2_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3c2")
+  add_test(
+    NAME nep_adapters_cuda_spin2_zbl_o3c2_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_zbl_o3c2.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_zbl_o3c2_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_zbl_o3c2_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;zbl;o3c2")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o2c2_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o2c2.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o2c2_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o2c2_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o2c2")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o1c1_l0_soc0_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o1c1_l0_soc0.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o1c1_l0_soc0_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o1c1_l0_soc0_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o1;c1;l0;soc0")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o3c1_l2_soc1_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c1_l2_soc1.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c1_l2_soc1_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o3c1_l2_soc1_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3;c1;l2;soc1")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o3c3_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c3.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c3_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o3c3_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3;c3;bulk;soc1")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o3c2_soc0_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c2_soc0.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c2_soc0_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o3c2_soc0_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o3;c2;l2;soc0")
+  add_test(
+    NAME nep_adapters_cuda_spin2_o2c9_l1_soc1_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o2c9_l1_soc1.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o2c9_l1_soc1_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin2_o2c9_l1_soc1_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin2;o2;c9;l1;soc1")
+  add_test(
+    NAME nep_adapters_cuda_spin3_o3c2_typewise_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c2_typewise.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c2_typewise_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin3_o3c2_typewise_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin3;o3;c2;typewise_cutoff;cooperative")
+  add_test(
+    NAME nep_adapters_cuda_spin3_o3c2_uniform_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c2_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c2_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin3_o3c2_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin3;o3;c2;cooperative")
+  add_test(
+    NAME nep_adapters_cuda_spin3_o3c3_uniform_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c3_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c3_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin3_o3c3_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin3;o3;c3;cooperative")
+  add_test(
+    NAME nep_adapters_cuda_spin3_o3c4_uniform_oracle_test
+    COMMAND
+      nep_adapters_cuda_spin2_oc_oracle_test
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin3_o3c4_uniform.nep"
+      "${PROJECT_SOURCE_DIR}/tests/fixtures/spin3_o3c4_uniform_oracle.txt")
+  set_tests_properties(
+    nep_adapters_cuda_spin3_o3c4_uniform_oracle_test
+    PROPERTIES LABELS "oracle;parity;engine;cuda;spin3;o3;c4;cooperative")
 
   if(EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt" AND
      EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in" AND

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "../common/spin_polynomial_layout.hpp"
 
 namespace nep_adapters::cuda_backend {
 
@@ -44,6 +45,10 @@ struct ModelProtocol {
   int spin_n_max_angular = 0;
   int spin_l_max = 0;
   int spin_chiral = 0;
+  int spin_order = 0;
+  int spin_soc = 0;
+  int spin_scaler = 0;
+  int spin_projection_size = 0;
   int hidden_neurons = 0;
   int hidden_neurons2 = 0;
   int max_neighbors_radial = 0;
@@ -66,12 +71,14 @@ struct ModelProtocol {
   std::size_t descriptor_parameter_count = 0;
   std::size_t ordinary_descriptor_parameter_count = 0;
   std::size_t spin_descriptor_parameter_count = 0;
+  std::size_t spin_projection_parameter_count = 0;
   std::size_t model_parameter_count = 0;
   std::size_t q_scaler_count = 0;
   std::vector<std::string> elements;
   std::vector<int> atomic_numbers;
   std::vector<double> cutoff_radial_by_type;
   std::vector<double> cutoff_angular_by_type;
+  std::vector<double> spin_cutoff_by_type;
   std::vector<double> spin_baseline;
   std::vector<int> spin_dof_type_active;
   std::vector<int> spin_env_type_active;
@@ -96,6 +103,18 @@ struct SpinCoreLayout {
   int chiral_offset = -1;
   int descriptor_dim = 0;
 };
+
+// Canonical layout for TorchNEP's unified nep4_spin2 O/C descriptor.  Keeping
+// the grammar here gives the parser, workspace planner and CUDA kernels one
+// source of truth instead of separate hard-coded 37/46/51 channel tables.
+using SpinPolynomialLayout = nep_adapters::common::SpinPolynomialLayout;
+
+inline SpinPolynomialLayout make_spin_polynomial_layout(
+    const ModelProtocol& protocol) noexcept {
+  return nep_adapters::common::make_spin_polynomial_layout(
+      protocol.spin_compress, protocol.spin_l_max,
+      protocol.spin_order, protocol.spin_soc, protocol.spin_mode == 3);
+}
 
 inline SpinCoreLayout make_spin_core_layout(
     const ModelProtocol& protocol) noexcept {
@@ -148,9 +167,18 @@ inline bool supports_cuda_spin_shape(const ModelProtocol& protocol) noexcept {
   if (protocol.spin_mode == 0) {
     return true;
   }
+  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
+    return protocol.spin_compress >= 1 && protocol.spin_compress <= 9 &&
+           protocol.spin_basis_size == 8 && protocol.spin_l_max >= 0 &&
+           protocol.spin_l_max <= 2 && protocol.spin_order >= 1 &&
+           protocol.spin_order <= 3 &&
+           (protocol.spin_soc == 0 || protocol.spin_soc == 1) &&
+           protocol.spin_projection_size ==
+               4 * protocol.spin_compress * protocol.spin_compress;
+  }
   const int basis_count = protocol.spin_basis_size + 1;
   return protocol.spin_compress >= 1 && protocol.spin_compress <= 4 &&
-         basis_count >= protocol.spin_compress && basis_count <= 8 &&
+         basis_count >= protocol.spin_compress && basis_count <= 9 &&
          protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4;
 }
 

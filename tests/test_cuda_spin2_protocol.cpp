@@ -1,0 +1,241 @@
+#include "device_model.hpp"
+#include "model_protocol.hpp"
+#include "nep_adapters/api.h"
+#include "nep_adapters/engines/cpu.hpp"
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+using nep_adapters::cuda_backend::HostModelParameters;
+using nep_adapters::cuda_backend::ModelProtocol;
+using nep_adapters::cuda_backend::load_host_model_parameters;
+using nep_adapters::cuda_backend::parse_model_file;
+using nep_adapters::cuda_backend::parse_model_protocol;
+
+int expected_dim(int c, int lmax, int order, int soc) {
+  const int pairs = c * (c + 1) / 2;
+  int dim = 1 + 2 * c;
+  if (soc && lmax >= 2) dim += 2 * c;
+  if (order >= 2) {
+    dim += 2 * c;
+    if (lmax >= 1) dim += (soc ? 3 : 1) * c;
+    if (lmax >= 2) dim += c;
+    dim += c + 2 * pairs;
+    if (soc && lmax >= 1) dim += (c >= 2 ? 2 : 1) * c;
+    if (soc && lmax >= 2) dim += (c >= 2 ? 2 : 1) * c;
+  }
+  if (order >= 3) {
+    dim += c;
+    if (soc && lmax >= 1) dim += (c >= 2 ? 2 : 1) * c;
+    if (soc && lmax >= 2) dim += (c >= 2 ? 3 : 1) * c;
+    if (soc && lmax >= 1 && c >= 3) dim += c;
+  }
+  return dim;
+}
+
+std::vector<std::string> header(
+    int c, int lmax, int order, int soc, bool masks = false,
+    bool zbl = false) {
+  std::vector<std::string> lines = {
+      std::string(zbl ? "nep4_spin2_zbl" : "nep4_spin2") + " 3 Fe Ge C",
+      "spin_mode 2 " + std::to_string(masks ? 11 : 9),
+      "spin_baseline -1 -2 -3", "spin_basis_size 8",
+      "spin_l_max " + std::to_string(lmax),
+      "spin_compress " + std::to_string(c), "spin_cutoff 6",
+      "spin_order " + std::to_string(order),
+      "spin_soc " + std::to_string(soc),
+      "spin_projection_size " + std::to_string(4 * c * c), "spin_scaler 1"};
+  if (masks) {
+    lines.push_back("spin_dof_type Fe C");
+    lines.push_back("spin_env_type Fe Ge C");
+  }
+  if (zbl) lines.push_back("zbl 1.25 2.5");
+  lines.insert(lines.end(), {"cutoff 6 5 64 64", "n_max 0 0",
+      "basis_size 0 0", "l_max 0 0 0", "ANN 1 0"});
+  return lines;
+}
+
+std::string write_lines(const std::string& name,
+                        const std::vector<std::string>& lines) {
+  const std::string path =
+      (std::filesystem::temp_directory_path() / name).string();
+  std::ofstream out(path);
+  for (const auto& line : lines) out << line << '\n';
+  return path;
+}
+
+std::string complete(const std::string& name,
+                     const std::vector<std::string>& lines,
+                     int extra = 0, int truncate = 0) {
+  const ModelProtocol p = parse_model_protocol(write_lines(name + ".h", lines));
+  const std::size_t count = p.model_parameter_count + p.q_scaler_count;
+  const std::string path =
+      (std::filesystem::temp_directory_path() / name).string();
+  std::ofstream out(path);
+  for (const auto& line : lines) out << line << '\n';
+  for (std::size_t i = 0; i < count - static_cast<std::size_t>(truncate); ++i)
+    out << 0.001 * static_cast<double>(i + 1) << '\n';
+  for (int i = 0; i < extra; ++i) out << "9.25\n";
+  return path;
+}
+
+bool header_fails(const std::vector<std::string>& lines,
+                  const std::string& needle) {
+  try { (void)parse_model_protocol(write_lines("spin2_bad.nep", lines)); }
+  catch (const std::exception& e) {
+    return std::string(e.what()).find(needle) != std::string::npos;
+  }
+  return false;
+}
+
+bool file_fails(const std::string& path, const std::string& needle) {
+  try { (void)parse_model_file(path); }
+  catch (const std::exception& e) {
+    return std::string(e.what()).find(needle) != std::string::npos;
+  }
+  return false;
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc == 2) {
+    try {
+      const HostModelParameters p = load_host_model_parameters(argv[1]);
+      std::cout << "spin_mode=" << p.protocol.spin_mode << '\n'
+                << "spin_descriptor_dim=" << p.protocol.spin_descriptor_dim << '\n'
+                << "descriptor_dim=" << p.protocol.descriptor_dim << '\n'
+                << "projection_count=" << p.spin_projection_parameters.size() << '\n';
+      return p.protocol.spin_mode == 2 &&
+             p.spin_projection_parameters.size() ==
+                 static_cast<std::size_t>(p.protocol.spin_projection_size)
+          ? EXIT_SUCCESS : EXIT_FAILURE;
+    } catch (const std::exception& e) {
+      std::cerr << e.what() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
+  for (int c = 1; c <= 9; ++c) for (int l = 0; l <= 2; ++l)
+    for (int o = 1; o <= 3; ++o) for (int s = 0; s <= 1; ++s)
+      for (bool zbl : {false, true}) {
+      const ModelProtocol p = parse_model_protocol(write_lines(
+          "spin2_matrix.nep", header(c, l, o, s, false, zbl)));
+      if (p.spin_descriptor_dim != expected_dim(c, l, o, s) ||
+          p.spin_projection_size != 4 * c * c ||
+          p.spin_projection_parameter_count !=
+              static_cast<std::size_t>(4 * c * c) ||
+          p.has_zbl != zbl) {
+        std::cerr << "dimension mismatch C=" << c << " l=" << l
+                  << " O=" << o << " SOC=" << s
+                  << " ZBL=" << zbl << '\n';
+        return EXIT_FAILURE;
+      }
+    }
+
+  const auto rep = header(3, 2, 3, 1, true);
+  const std::string valid = complete("spin2_valid.nep", rep);
+  const HostModelParameters loaded = load_host_model_parameters(valid);
+  if (loaded.protocol.spin_descriptor_dim != 79 ||
+      loaded.spin_projection_parameters.size() != 36 ||
+      loaded.protocol.spin_dof_type_active != std::vector<int>({1, 0, 1}) ||
+      loaded.protocol.spin_env_type_active != std::vector<int>({1, 1, 1})) {
+    std::cerr << "representative O3-C3 semantics mismatch\n";
+    return EXIT_FAILURE;
+  }
+
+  const auto zbl_rep = header(3, 2, 3, 1, true, true);
+  const std::string zbl_valid = complete("spin2_zbl_valid.nep", zbl_rep);
+  const HostModelParameters zbl_loaded = load_host_model_parameters(zbl_valid);
+  if (zbl_loaded.protocol.spin_mode != 2 ||
+      !zbl_loaded.protocol.has_zbl ||
+      zbl_loaded.protocol.zbl_inner != 1.25 ||
+      zbl_loaded.protocol.zbl_outer != 2.5 ||
+      zbl_loaded.protocol.cutoff_neighbor != 6.0) {
+    std::cerr << "spin2 ZBL protocol semantics mismatch\n";
+    return EXIT_FAILURE;
+  }
+  auto bad_zbl = header(2, 2, 3, 1, false, true);
+  bad_zbl.erase(bad_zbl.begin() + 11);
+  if (!header_fails(bad_zbl, "expected zbl line")) return EXIT_FAILURE;
+
+  auto spin3 = header(2, 2, 3, 1);
+  spin3[0] = "nep4_spin3 3 Fe Ge C";
+  spin3[1] = "spin_mode 3 9";
+  spin3[6] = "spin_cutoff 4 6 5";
+  const ModelProtocol spin3_protocol = parse_model_protocol(
+      write_lines("spin3_typewise.nep", spin3));
+  if (spin3_protocol.spin_mode != 3 ||
+      spin3_protocol.spin_descriptor_dim != 55 ||
+      spin3_protocol.spin_cutoff_radial != 6.0 ||
+      spin3_protocol.spin_cutoff_by_type !=
+          std::vector<double>({4.0, 6.0, 5.0})) {
+    std::cerr << "spin3 typewise-cutoff protocol mismatch\n";
+    return EXIT_FAILURE;
+  }
+  auto spin3_zbl = header(2, 2, 3, 1, false, true);
+  spin3_zbl[0] = "nep4_spin3_zbl 3 Fe Ge C";
+  spin3_zbl[1] = "spin_mode 3 9";
+  spin3_zbl[6] = "spin_cutoff 4 6 5";
+  const std::string spin3_zbl_valid = complete(
+      "spin3_zbl_valid.nep", spin3_zbl);
+  const HostModelParameters spin3_zbl_loaded =
+      load_host_model_parameters(spin3_zbl_valid);
+  if (spin3_zbl_loaded.protocol.spin_mode != 3 ||
+      !spin3_zbl_loaded.protocol.has_zbl ||
+      spin3_zbl_loaded.protocol.spin_descriptor_dim != 55 ||
+      spin3_zbl_loaded.spin_cutoff_pair !=
+          std::vector<float>({4.0f, 5.0f, 4.5f, 5.0f, 6.0f,
+                              5.5f, 4.5f, 5.5f, 5.0f})) {
+    std::cerr << "spin3 ZBL protocol semantics mismatch\n";
+    return EXIT_FAILURE;
+  }
+  auto bad = header(2, 2, 3, 1);
+  bad = header(2, 2, 3, 1); bad[9] = "spin_projection_size 17";
+  if (!header_fails(bad, "4 * spin_compress^2")) return EXIT_FAILURE;
+  bad = header(2, 2, 3, 1); bad[1] = "spin_mode 2";
+  if (!header_fails(bad, "requires counted")) return EXIT_FAILURE;
+  bad = header(2, 2, 3, 1); bad[10] = "spin_type Fe";
+  if (!header_fails(bad, "unknown spin header line")) return EXIT_FAILURE;
+  bad = header(2, 2, 3, 1); bad.erase(bad.begin() + 8); bad[1] = "spin_mode 2 8";
+  if (!header_fails(bad, "missing required metadata: spin_soc")) return EXIT_FAILURE;
+  if (!file_fails(complete("spin2_short.nep", rep, 0, 1), "unexpected end") ||
+      !file_fails(complete("spin2_long.nep", rep, 1, 0), "unexpected trailing"))
+    return EXIT_FAILURE;
+
+  if (!nep_adapters::register_cpu_engine()) return EXIT_FAILURE;
+  NepaModel* cpu_model = nullptr;
+  NepaModelInfo cpu_info{};
+  if (nepa_load_model("cpu", valid.c_str(), &cpu_model) != NEPA_STATUS_OK ||
+      nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
+      cpu_info.descriptor_dim != loaded.protocol.descriptor_dim ||
+      (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
+    nepa_free_model(cpu_model);
+    return EXIT_FAILURE;
+  }
+  nepa_free_model(cpu_model);
+
+  cpu_model = nullptr;
+  if (nepa_load_model("cpu", zbl_valid.c_str(), &cpu_model) != NEPA_STATUS_OK ||
+      nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
+      (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
+    nepa_free_model(cpu_model);
+    return EXIT_FAILURE;
+  }
+  nepa_free_model(cpu_model);
+
+  cpu_model = nullptr;
+  if (nepa_load_model("cpu", spin3_zbl_valid.c_str(), &cpu_model) !=
+          NEPA_STATUS_OK ||
+      nepa_model_info(cpu_model, &cpu_info) != NEPA_STATUS_OK ||
+      cpu_info.descriptor_dim != spin3_zbl_loaded.protocol.descriptor_dim ||
+      (cpu_info.capabilities & NEPA_CAPABILITY_SPIN) == 0) {
+    nepa_free_model(cpu_model);
+    return EXIT_FAILURE;
+  }
+  nepa_free_model(cpu_model);
+  return EXIT_SUCCESS;
+}

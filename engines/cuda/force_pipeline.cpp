@@ -2,6 +2,7 @@
 
 #include "device_operations.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -119,6 +120,28 @@ void execute_force_pipeline(
       virial_target == VirialTarget::center_and_neighbor_float_sink;
   const bool zbl_outputs =
       request.store_potential || accumulates_virial(virial_target);
+  const bool uniform_spin_cutoff =
+      protocol.spin_cutoff_by_type.empty() ||
+      std::all_of(
+          protocol.spin_cutoff_by_type.begin(),
+          protocol.spin_cutoff_by_type.end(),
+          [&](double value) {
+            return value == protocol.spin_cutoff_by_type.front();
+          });
+  const bool fuse_structural_radial_into_spin =
+      request.topology == ForceNeighborTopology::external_full &&
+      spin_model && (protocol.spin_mode == 2 || protocol.spin_mode == 3) &&
+      (protocol.spin_compress == 2 || protocol.spin_compress == 3) &&
+      protocol.spin_order == 3 &&
+      protocol.spin_l_max == 2 && protocol.spin_soc == 1 &&
+      protocol.n_max_radial == 4 && protocol.basis_size_radial == 8 &&
+      protocol.spin_basis_size == 8 && protocol.num_types <= 2 &&
+      !protocol.use_typewise_cutoff && uniform_spin_cutoff &&
+      !protocol.has_zbl &&
+      protocol.cutoff_radial == protocol.spin_cutoff_radial &&
+      !request.spin_transfer_per_atom &&
+      (virial_target == VirialTarget::none ||
+       virial_target == VirialTarget::center_atom);
   const bool can_fuse_zbl =
       protocol.has_zbl &&
       !protocol.flexible_zbl &&
@@ -166,7 +189,8 @@ void execute_force_pipeline(
             model,
             workspace,
             virial_target,
-            request.store_potential);
+            request.store_potential,
+            fuse_structural_radial_into_spin);
         break;
       }
     }
@@ -223,9 +247,12 @@ void execute_force_pipeline(
         workspace,
         virial_target,
         request.spin_transfer_per_atom,
+        fuse_structural_radial_into_spin,
         timings == nullptr ? nullptr : &spin_timings);
     measured.spin_onsite_ms = spin_timings.onsite_ms;
     measured.spin_density_ms = spin_timings.density_ms;
+    measured.spin_density_pull_ms = spin_timings.density_pull_ms;
+    measured.spin_density_edge_ms = spin_timings.density_edge_ms;
     measured.spin_chiral_ms = spin_timings.chiral_ms;
   }
 }

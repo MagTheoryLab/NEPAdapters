@@ -333,7 +333,8 @@ void accumulate_lammps_radial_forces_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
-    bool accumulate_zbl_energy);
+    bool accumulate_zbl_energy,
+    bool defer_to_spin = false);
 
 void accumulate_radial_and_zbl_forces_on_device(
     const ModelProtocol& protocol,
@@ -401,6 +402,8 @@ void build_spin_descriptors_on_device(
 struct SpinForceTimings {
   float onsite_ms = 0.0f;
   float density_ms = 0.0f;
+  float density_pull_ms = 0.0f;
+  float density_edge_ms = 0.0f;
   float chiral_ms = 0.0f;
 };
 
@@ -412,6 +415,7 @@ void accumulate_spin_forces_on_device(
     DeviceWorkspace& workspace,
     VirialTarget virial_target,
     bool accumulate_spin_transfer,
+    bool fuse_structural_radial = false,
     SpinForceTimings* timings = nullptr);
 
 }  // namespace nep_adapters::cuda_backend
