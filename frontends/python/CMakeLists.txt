@@ -79,6 +79,21 @@ if(TARGET nep_adapters_python_gpu)
   add_dependencies(nep_adapters_python_package nep_adapters_python_gpu)
 endif()
 
+if(NEP_ADAPTERS_BUILD_TESTS)
+  add_test(NAME nep_adapters_python_block_format_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/tests/test_block_format.py")
+  set_tests_properties(nep_adapters_python_block_format_test PROPERTIES
+    LABELS "contract;parity;frontend;python;cpu;model_format"
+    ENVIRONMENT "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}")
+  if(TARGET NEPAdapters::cuda)
+    add_test(NAME nep_adapters_python_cuda_block_format_test
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/tests/test_block_format.py")
+    set_tests_properties(nep_adapters_python_cuda_block_format_test PROPERTIES
+      LABELS "contract;parity;frontend;python;cuda;model_format"
+      ENVIRONMENT "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_BLOCK_TEST_BACKEND=cuda")
+  endif()
+endif()
+
 install(
   TARGETS nep_adapters_python_cpu
   LIBRARY DESTINATION nep_adapters

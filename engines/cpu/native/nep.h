@@ -366,6 +366,7 @@ public:
   std::vector<double> charge_derivative;
   std::vector<double> parameters;
   std::vector<double> spin_baseline;
+  std::vector<double> energy_reference;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
   std::vector<double> lammps_mforce_private;

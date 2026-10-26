@@ -74,7 +74,7 @@ int atomic_number_from_symbol(const std::string& symbol) {
   throw std::runtime_error("unknown element symbol for ZBL atomic number");
 }
 
-std::vector<std::string> next_tokens(std::ifstream& input) {
+std::vector<std::string> next_tokens(std::istream& input) {
   std::string line;
   while (std::getline(input, line)) {
     std::vector<std::string> tokens = split_line(line);
@@ -567,7 +567,7 @@ void parse_spin_header_line(
 }
 
 std::vector<std::string> parse_spin_block(
-    std::ifstream& input,
+    std::istream& input,
     ModelProtocol& protocol,
     std::vector<std::string> tokens) {
   if (!protocol.spin_mode) {
@@ -761,7 +761,7 @@ void finalize_counts(ModelProtocol& protocol) {
 }
 
 std::vector<float> read_scalar_lines(
-    std::ifstream& input,
+    std::istream& input,
     std::size_t count,
     const char* section_name) {
   std::vector<float> values;
@@ -780,7 +780,7 @@ std::vector<float> read_scalar_lines(
   return values;
 }
 
-ModelProtocol parse_model_header(std::ifstream& input) {
+ModelProtocol parse_model_header(std::istream& input) {
   ModelProtocol protocol;
   std::vector<std::string> tokens = next_tokens(input);
   if (tokens.size() < 3) {
@@ -834,20 +834,19 @@ int BodyChannelConfig::abc_count() const {
 }
 
 ModelProtocol parse_model_protocol(const std::string& model_path) {
-  std::ifstream input = nep_adapters::detail::open_model_input(model_path);
-  if (!input.is_open()) {
-    throw std::runtime_error("failed to open NEP model: " + model_path);
-  }
-  return parse_model_header(input);
+  nep_adapters::detail::ModelInput model_input(model_path);
+  std::istream& input = model_input.stream();
+  ModelProtocol protocol = parse_model_header(input);
+  protocol.energy_reference = model_input.energy_reference();
+  return protocol;
 }
 
 ParsedModelFile parse_model_file(const std::string& model_path) {
-  std::ifstream input = nep_adapters::detail::open_model_input(model_path);
-  if (!input.is_open()) {
-    throw std::runtime_error("failed to open NEP model: " + model_path);
-  }
+  nep_adapters::detail::ModelInput model_input(model_path);
+  std::istream& input = model_input.stream();
   ParsedModelFile parsed;
   parsed.protocol = parse_model_header(input);
+  parsed.protocol.energy_reference = model_input.energy_reference();
   parsed.parameters_and_q_scaler = read_scalar_lines(
       input,
       parsed.protocol.model_parameter_count + parsed.protocol.q_scaler_count,

@@ -4046,7 +4046,7 @@ void find_force_ZBL_for_lammps(
   }
 }
 
-std::vector<std::string> get_tokens(std::ifstream& input)
+std::vector<std::string> get_tokens(std::istream& input)
 {
   std::string line;
   std::getline(input, line);
@@ -8745,10 +8745,9 @@ NEP::NEP(const std::string& potential_filename) { init_from_file(potential_filen
 
 void NEP::init_from_file(const std::string& potential_filename, const bool is_rank_0)
 {
-  std::ifstream input = nep_adapters::detail::open_model_input(potential_filename);
-  if (!input.is_open()) {
-    throw std::runtime_error("failed to open NEP model: " + potential_filename);
-  }
+  nep_adapters::detail::ModelInput model_input(potential_filename);
+  std::istream& input = model_input.stream();
+  energy_reference = model_input.energy_reference();
 
   std::vector<std::string> tokens = get_tokens(input);
   if (tokens.size() < 3) {
@@ -9402,8 +9401,6 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         paramb.zbl_rc_outer_pair.begin(),
         paramb.zbl_rc_outer_pair.end()));
   }
-  input.close();
-
 
   // charge related parameters and data
   if (paramb.charge_mode > 0) {
@@ -9811,7 +9808,7 @@ void NEP::compute(
   allocate_memory(N);
 
   for (std::size_t n = 0; n < potential.size(); ++n) {
-    potential[n] = 0.0;
+    potential[n] = energy_reference.empty() ? 0.0 : energy_reference[type[n]];
   }
   for (std::size_t n = 0; n < force.size(); ++n) {
     force[n] = 0.0;
@@ -10206,7 +10203,7 @@ void NEP::compute(
   allocate_memory(N);
 
   for (std::size_t n = 0; n < potential.size(); ++n) {
-    potential[n] = 0.0;
+    potential[n] = energy_reference.empty() ? 0.0 : energy_reference[type[n]];
   }
   for (std::size_t n = 0; n < force.size(); ++n) {
     force[n] = 0.0;
@@ -10827,6 +10824,16 @@ void NEP::compute_for_lammps(
 #endif
     Fp.data(), sum_fxyz.data(), total_potential, potential, &lammps_radial_cache,
     &lammps_angular_cache, ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+  if (!energy_reference.empty()) {
+    for (int index = 0; index < N; ++index) {
+      const int atom = ilist[index];
+      const int mapped_type = type_map[type[atom]];
+      if (mapped_type < 0) continue;
+      const double reference = energy_reference[mapped_type];
+      total_potential += reference;
+      if (potential) potential[atom] += reference;
+    }
+  }
   if (phase_timing) {
     phase_descriptor = nep_phase_elapsed(phase_mark);
   }

@@ -6,6 +6,19 @@ set_tests_properties(nep_adapters_registry_test PROPERTIES
   LABELS "contract;core")
 
 if(TARGET NEPAdapters::cpu)
+  # CUDA's file parser/host packing is plain C++ and can be checked without a GPU.
+  add_executable(nep_adapters_block_format_test
+    test_block_format.cpp
+    "${PROJECT_SOURCE_DIR}/engines/cuda/model_protocol.cpp"
+    "${PROJECT_SOURCE_DIR}/engines/cuda/model_parameters.cpp")
+  target_include_directories(nep_adapters_block_format_test PRIVATE
+    "${PROJECT_SOURCE_DIR}/engines/cuda")
+  target_link_libraries(nep_adapters_block_format_test PRIVATE NEPAdapters::cpu)
+  add_test(NAME nep_adapters_block_format_test COMMAND nep_adapters_block_format_test)
+  set_tests_properties(nep_adapters_block_format_test PROPERTIES
+    LABELS "contract;parity;cpu;cuda_host;model_format;lammps"
+    ENVIRONMENT "OMP_NUM_THREADS=4")
+
   add_executable(
     nep_adapters_cpu_spin2_shape_matrix_test
     test_cpu_spin2_shape_matrix.cpp)

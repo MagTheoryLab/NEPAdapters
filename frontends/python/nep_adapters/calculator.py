@@ -118,7 +118,7 @@ def _read_model_header(model_path: str | Path) -> tuple[tuple[str, ...], str]:
             operation="inspect_model",
         ) from error
     fields = first_line.split()
-    if len(fields) < 3 or not fields[0].startswith("nep"):
+    if len(fields) < 3 or not fields[0].lower().startswith("nep"):
         raise InvalidInputError(
             "failed to read NEP element list from model header",
             operation="inspect_model",
@@ -135,7 +135,10 @@ def _read_model_header(model_path: str | Path) -> tuple[tuple[str, ...], str]:
             "failed to read NEP element list from model header",
             operation="inspect_model",
         )
-    return tuple(fields[2 : 2 + num_types]), hashlib.sha256(content).hexdigest()
+    elements = tuple(fields[2 : 2 + num_types])
+    if fields[0].lower() == "nep":
+        elements = tuple(element.capitalize() for element in elements)
+    return elements, hashlib.sha256(content).hexdigest()
 
 
 def _model_info_from_native(

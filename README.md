@@ -200,6 +200,15 @@ LAMMPS 有两种支持的安装方式：
 
 ## 当前支持范围
 
+模型读取自动兼容旧的 `nep4`、`nep5`、`nep4_spin*`、charge 和响应模型格式，
+以及 GPUMD `spin3-refactor` 的 `nep ...` / `format_version 1` 块格式，无需手动转换。
+新格式支持 `model nep`、`qnep1`、`qnep2`、`nep_spin`（`spin_version 1`）、
+`nep_dipole` 和 `nep_polarizability`；也接受过渡格式 `nep_spin3` / `spin_mode 3`。
+`energy_reference` 按元素以双精度加回能量一次，不改变力、virial、磁力或 charge/BEC。
+结构系数的新旧排列在读取时转换，ANN、磁性径向系数和投影系数保持各自顺序。
+未知版本、重复字段、未知字段/块和参数计数不匹配会报错。支持的模型尺寸和后端能力仍受下表限制；
+这不新增温度模型、vdW 模型或 CUDA 响应模型的计算能力，也不恢复 NEP3 支持。
+
 | 前端 / 后端 | 普通 NEP | qNEP | spin NEP | 其他响应模型 |
 |---|---|---|---|---|
 | Python / CPU | 支持 | charge/BEC 支持 | 支持 | dipole、polarizability、DFT-D3 支持；DFT-D3 仅普通非 spin、非 charge 模型 |
