@@ -501,7 +501,7 @@ if(TARGET NEPAdapters::cuda AND
     test_cuda_spin2_oc_oracle.cpp)
   target_link_libraries(
     nep_adapters_cuda_spin2_oc_oracle_test
-    PRIVATE NEPAdapters::cuda)
+    PRIVATE NEPAdapters::cuda CUDA::cudart)
   add_test(
     NAME nep_adapters_cuda_spin2_o3c2_oracle_test
     COMMAND
@@ -1063,3 +1063,18 @@ if(TARGET NEPAdapters::cpu AND
   set_tests_properties(nep_adapters_cpu_nep89_smoke_test PROPERTIES
     LABELS "smoke;engine;cpu;large_model;nep89")
 endif()
+
+# New spin_type semantics alongside the immutable legacy spin oracles above.
+foreach(backend cpu cuda)
+  if(TARGET nep_adapters_${backend}_spin2_oc_oracle_test)
+    foreach(channels 2 3)
+      add_test(NAME nep_adapters_${backend}_spin_type_c${channels}_oracle_test
+        COMMAND nep_adapters_${backend}_spin2_oc_oracle_test
+          "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/nep_spin_o3c${channels}_uniform.nep"
+          "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/spin3_o3c${channels}_uniform_oracle.txt")
+      set_tests_properties(nep_adapters_${backend}_spin_type_c${channels}_oracle_test
+        PROPERTIES LABELS "oracle;parity;engine;${backend};spin3;model_format"
+        ENVIRONMENT "OMP_NUM_THREADS=4")
+    endforeach()
+  endif()
+endforeach()

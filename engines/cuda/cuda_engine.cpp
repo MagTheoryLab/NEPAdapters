@@ -1095,7 +1095,8 @@ class CudaModel : public nep_adapters::Model {
           return NEPA_STATUS_UNSUPPORTED;
         }
         nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, protocol_.num_types, workspace);
+            single.batch, protocol_.num_types, workspace,
+            protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
@@ -1292,7 +1293,8 @@ class CudaModel : public nep_adapters::Model {
           return NEPA_STATUS_UNSUPPORTED;
         }
         nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, protocol_.num_types, workspace);
+            single.batch, protocol_.num_types, workspace,
+            protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
         nep_adapters::cuda_backend::build_internal_neighbors_on_device(
             protocol_,
             single.atom_count,
@@ -1672,7 +1674,8 @@ class CudaModel : public nep_adapters::Model {
           input,
           external_protocol,
           workspace,
-          rebuild_workspace || neighbor_capacity_needs_runtime_check);
+          rebuild_workspace || neighbor_capacity_needs_runtime_check,
+          protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
       profiler.split(stage_ms);
 
       const nep_adapters::cuda_backend::SimulationBox box =

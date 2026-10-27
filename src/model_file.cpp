@@ -188,8 +188,13 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
     const auto key = model == "nep_spin" ? "spin_version" : "spin_mode";
     if (doc.field(key, 1, 1)[0] != (model == "nep_spin" ? "1" : "3"))
       fail(std::string("unsupported ") + key);
+    const bool selected = doc.fields.count("spin_type");
     const bool dof = doc.fields.count("spin_dof_type"), env = doc.fields.count("spin_env_type");
-    out << "spin_mode 3 " << 9 + dof + env << '\n';
+    if (selected && (dof || env))
+      fail("spin_type cannot be combined with legacy spin_dof_type/spin_env_type");
+    // New selectors restrict spin centers, never the geometric environment.
+    // Historical files retain their explicit env mask and env=dof default.
+    out << "spin_mode 3 " << 9 + (selected ? 2 : dof + env) << '\n';
     emit("spin_baseline", doc.fields.at("energy_reference"));
     for (const auto* name : {"spin_basis_size", "spin_l_max", "spin_compress", "spin_order",
                              "spin_soc", "spin_projection_size", "spin_scaler"})
@@ -208,7 +213,7 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
     if (cutoff.size() != 1 && cutoff.size() != types) fail("invalid spin_cutoff count");
     for (const auto& value : cutoff) if (number(value, "spin_cutoff") <= 0) fail("invalid spin_cutoff");
     emit("spin_cutoff", cutoff);
-    for (const auto* name : {"spin_dof_type", "spin_env_type"}) {
+    for (const auto* name : {"spin_type", "spin_dof_type", "spin_env_type"}) {
       if (!doc.fields.count(name)) continue;
       auto values = doc.field(name, 1, types);
       std::set<std::string> seen;
@@ -218,8 +223,9 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
         if (found == doc.elements.end() || !seen.insert(*found).second) fail(std::string("invalid ") + name);
         value = *found;
       }
-      emit(name, values);
+      emit(std::string(name) == "spin_type" ? "spin_dof_type" : name, values);
     }
+    if (selected) emit("spin_env_type", doc.elements);
   }
   bool flexible_zbl = false;
   if (zbl) {
@@ -300,6 +306,7 @@ ModelInput::ModelInput(const std::string& path) : file_(open_model_input(path)) 
   if (block_format_) {
     auto doc = read_document(file_);
     converted_.str(normalize(doc, reference_));
+    spin_type_semantics_ = doc.fields.count("spin_type") != 0;
   }
 }
 }  // namespace nep_adapters::detail

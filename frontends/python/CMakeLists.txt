@@ -293,3 +293,15 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
     )
   endif()
 endif()
+
+if(NEP_ADAPTERS_BUILD_TESTS)
+  foreach(backend cpu cuda)
+    if(TARGET NEPAdapters::${backend})
+      add_test(NAME nep_adapters_python_${backend}_spin_type_test
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/tests/test_spin_type.py")
+      set_tests_properties(nep_adapters_python_${backend}_spin_type_test PROPERTIES
+        LABELS "oracle;parity;frontend;python;${backend};spin3;model_format"
+        ENVIRONMENT "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_BLOCK_TEST_BACKEND=${backend}")
+    endif()
+  endforeach()
+endif()

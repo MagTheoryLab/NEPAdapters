@@ -838,6 +838,7 @@ ModelProtocol parse_model_protocol(const std::string& model_path) {
   std::istream& input = model_input.stream();
   ModelProtocol protocol = parse_model_header(input);
   protocol.energy_reference = model_input.energy_reference();
+  protocol.spin_type_semantics = model_input.spin_type_semantics();
   return protocol;
 }
 
@@ -847,6 +848,7 @@ ParsedModelFile parse_model_file(const std::string& model_path) {
   ParsedModelFile parsed;
   parsed.protocol = parse_model_header(input);
   parsed.protocol.energy_reference = model_input.energy_reference();
+  parsed.protocol.spin_type_semantics = model_input.spin_type_semantics();
   parsed.parameters_and_q_scaler = read_scalar_lines(
       input,
       parsed.protocol.model_parameter_count + parsed.protocol.q_scaler_count,

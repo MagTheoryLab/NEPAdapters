@@ -37,7 +37,10 @@ class NEP_ADAPTERS_API ModelInput {
   }
   const std::vector<double>& energy_reference() const { return reference_; }
 
+  bool spin_type_semantics() const { return spin_type_semantics_; }
+
  private:
+  bool spin_type_semantics_ = false;
   bool block_format_ = false;
   std::ifstream file_;
   std::istringstream converted_;

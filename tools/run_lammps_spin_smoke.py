@@ -43,8 +43,8 @@ def read_structure(path):
 
 def spin_magnitude_and_direction(spin):
     magnitude = math.sqrt(sum(component * component for component in spin))
-    if magnitude <= 0.0:
-        raise ValueError("LAMMPS spin fixture does not accept zero-length spins")
+    if magnitude == 0.0:
+        return 0.0, [1.0, 0.0, 0.0]
     return magnitude, [component / magnitude for component in spin]
 
 
@@ -82,11 +82,16 @@ def write_input(
         )
     for atom_type in range(1, len(structure["elements"]) + 1):
         lines.append(f"mass {atom_type} 1.0")
+    if any(not any(atom["spin"]) for atom in structure["atoms"]):
+        # LAMMPS accepts zero magnitude via an atom variable; literal zero in
+        # `set spin` is rejected. The direction remains normalized and finite.
+        lines.append("variable nep_zero_spin atom 0.0")
     for atom_id, atom in enumerate(structure["atoms"], start=1):
         magnitude, direction = spin_magnitude_and_direction(atom["spin"])
+        magnitude_value = "v_nep_zero_spin" if magnitude == 0.0 else f"{magnitude:.17g}"
         lines.append(
             "set atom "
-            f"{atom_id} spin {magnitude:.17g} "
+            f"{atom_id} spin {magnitude_value} "
             + " ".join(f"{component:.17g}" for component in direction)
         )
     stress_columns = " ".join(f"c_satom[{index}]" for index in range(1, 7))

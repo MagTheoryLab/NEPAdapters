@@ -28,6 +28,7 @@ public:
 
     int charge_mode = 0;
     int spin_mode = 0;
+    bool spin_type_semantics = false;
     int spin_dim = 0;
     int struct_dim = 0;
     int spin_compress = 0;

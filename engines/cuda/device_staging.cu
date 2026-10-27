@@ -22,7 +22,6 @@ constexpr int kLammpsOverflowInputRowCount = 1 << 3;
 constexpr int kLammpsOverflowNeighborIndex = 1 << 4;
 constexpr int kLammpsOverflowRadialCapacity = 1 << 5;
 constexpr int kLammpsOverflowAngularCapacity = 1 << 6;
-
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
     throw std::runtime_error(
@@ -90,13 +89,21 @@ void free_temp(T*& device) noexcept {
   }
 }
 
+// The optional mask is used for spin staging only; caller buffers stay intact.
 __global__ void stage_positions_aos_to_soa(
     int atom_count,
     int atom_stride,
     const double* positions_aos3,
-    double* positions_soa3) {
+    double* positions_soa3,
+    const int* types = nullptr,
+    const int* spin_type_active = nullptr) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
+    return;
+  }
+  if (spin_type_active && !spin_type_active[types[atom]]) {
+    positions_soa3[atom] = positions_soa3[atom_stride + atom] =
+        positions_soa3[2 * atom_stride + atom] = 0.0;
     return;
   }
   positions_soa3[atom] = positions_aos3[3 * atom];
@@ -179,9 +186,16 @@ __global__ void stage_lammps_device_spins(
     const double* device_spins,
     int spin_atom_stride,
     int spin_component_stride,
-    double* spins_soa3) {
+    double* spins_soa3,
+    const int* types,
+    const int* spin_type_active) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
   if (atom >= atom_count) {
+    return;
+  }
+  if (spin_type_active && !spin_type_active[types[atom]]) {
+    spins_soa3[atom] = spins_soa3[atom_stride + atom] =
+        spins_soa3[2 * atom_stride + atom] = 0.0;
     return;
   }
   const double scale =
@@ -491,7 +505,8 @@ std::vector<int> flatten_lammps_neighbors(
 void stage_batch_on_device(
     const NepaStructureBatch& batch,
     int num_types,
-    DeviceWorkspace& workspace) {
+    DeviceWorkspace& workspace,
+    const int* spin_type_active) {
   const DeviceWorkspaceView view = workspace.view();
   validate_batch_for_device_staging(batch, num_types, view);
   require(view.output_forces_aos3 != nullptr,
@@ -594,7 +609,7 @@ void stage_batch_on_device(
         batch.total_atoms,
         static_cast<int>(view.atom_capacity),
         spins_aos3_staging,
-        view.spins_soa3);
+        view.spins_soa3, view.types, spin_type_active);
     check_cuda(cudaGetLastError(), "stage spins AoS to SoA");
   }
 
@@ -661,6 +676,15 @@ void stage_lammps_external_neighbors_on_device(
   for (int lammps_type : lammps_types) {
     require(type_map[static_cast<std::size_t>(lammps_type)] >= 0,
             "unmapped LAMMPS atom type");
+  }
+
+  if (protocol.spin_type_semantics) {
+    for (int atom = 0; atom < atom_capacity; ++atom) {
+      const int type = type_map[lammps_types[atom]];
+      if (protocol.spin_dof_type_active.at(type)) continue;
+      for (int d = 0; d < 3; ++d)
+        spins_aos3[3 * atom + d] = 0.0;
+    }
   }
 
   std::vector<int> active_atom_indices(input.ilist, input.ilist + input.inum);
@@ -794,7 +818,8 @@ void stage_lammps_device_neighbors_on_device(
     const NepaLammpsDeviceNeighborInput& input,
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace,
-    bool check_overflow) {
+    bool check_overflow,
+    const int* spin_type_active) {
   require_argument(input.nlocal >= 0, "negative nlocal");
   require_argument(input.nall >= input.nlocal, "nall must be at least nlocal");
   require_argument(input.inum > 0, "device LAMMPS input must have active atoms");
@@ -813,6 +838,9 @@ void stage_lammps_device_neighbors_on_device(
       input.position_component_stride > 0,
       "invalid position component stride");
 
+  if (protocol.spin_type_semantics) {
+    require(spin_type_active != nullptr, "missing spin_type device mask");
+  }
   workspace.reset_runtime_overrides();
   const DeviceWorkspaceView view = workspace.view();
   require(view.neighbor_source == 1, "device LAMMPS staging requires external workspace");
@@ -890,7 +918,7 @@ void stage_lammps_device_neighbors_on_device(
         input.spins,
         input.spin_atom_stride,
         input.spin_component_stride,
-        view.spins_soa3);
+        view.spins_soa3, workspace.view().types, spin_type_active);
     check_cuda(cudaGetLastError(), "stage device LAMMPS spins");
   }
 

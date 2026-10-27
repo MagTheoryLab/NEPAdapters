@@ -30,6 +30,7 @@ struct ModelProtocol {
   int version = 0;
   int charge_mode = 0;
   int spin_mode = 0;
+  bool spin_type_semantics = false;
   int num_types = 0;
   int n_max_radial = 0;
   int n_max_angular = 0;
