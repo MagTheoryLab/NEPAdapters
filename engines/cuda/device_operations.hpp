@@ -261,7 +261,8 @@ void prepare_batched_outputs(
 void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborInput& input,
     const NepaLammpsDeviceNeighborResult& result,
-    DeviceWorkspace& workspace);
+    DeviceWorkspace& workspace,
+    const int* spin_dof_type_active);
 
 enum class DescriptorCoreTopology {
   single_box,

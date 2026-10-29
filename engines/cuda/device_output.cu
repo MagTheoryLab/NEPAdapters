@@ -96,17 +96,25 @@ __global__ void write_lammps_atom_outputs(
 }
 
 __global__ void write_lammps_forces(
-    int nlocal,
+    int atom_count,
     int atom_stride,
     const double* force_soa3,
     double* forces,
     int force_atom_stride,
-    int force_component_stride) {
+    int force_component_stride,
+    const int* types,
+    const int* spin_dof_type_active) {
   const int atom = blockIdx.x * blockDim.x + threadIdx.x;
-  if (atom >= nlocal) {
+  if (atom >= atom_count) {
     return;
   }
 
+  if (spin_dof_type_active && !spin_dof_type_active[types[atom]]) {
+    for (int k = 0; k < 3; ++k) {
+      forces[atom * force_atom_stride + k * force_component_stride] = 0.0;
+    }
+    return;
+  }
   forces[atom * force_atom_stride] = force_soa3[atom];
   forces[atom * force_atom_stride + force_component_stride] =
       force_soa3[atom_stride + atom];
@@ -350,7 +358,8 @@ void prepare_lammps_per_atom_virial_sink(
 void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborInput& input,
     const NepaLammpsDeviceNeighborResult& result,
-    DeviceWorkspace& workspace) {
+    DeviceWorkspace& workspace,
+    const int* spin_dof_type_active) {
   require(input.nlocal >= 0, "negative nlocal");
   require(input.nall >= input.nlocal, "nall must be at least nlocal");
   const bool write_totals =
@@ -407,16 +416,22 @@ void write_lammps_device_outputs(
         view.force_soa3,
         result.forces,
         result.force_atom_stride,
-        result.force_component_stride);
+        result.force_component_stride,
+        nullptr,
+        nullptr);
     check_cuda(cudaGetLastError(), "write device LAMMPS forces");
     if (result.mforces != nullptr) {
+      // Ghost contributions are returned for LAMMPS reverse communication too.
+      // Mask every output atom, not only the local descriptor centers.
       write_lammps_forces<<<force_blocks, kThreads>>>(
           input.nall,
           static_cast<int>(view.atom_capacity),
           view.mforce_soa3,
           result.mforces,
           result.mforce_atom_stride,
-          result.mforce_component_stride);
+          result.mforce_component_stride,
+          view.types,
+          spin_dof_type_active);
       check_cuda(cudaGetLastError(), "write device LAMMPS mforces");
     }
   }

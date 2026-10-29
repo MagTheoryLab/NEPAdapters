@@ -197,7 +197,8 @@ template<class T> struct DeviceBuffer {
 };
 #endif
 
-Evaluation evaluate_lammps(NepaModel* model, const Case& item, bool device = false) {
+Evaluation evaluate_lammps(
+    NepaModel* model, const Case& item, bool device = false, int device_nlocal = -1) {
   const int n = item.atoms;
   std::vector<int> ilist(static_cast<std::size_t>(n));
   std::vector<int> numneigh(static_cast<std::size_t>(n), n - 1);
@@ -257,7 +258,8 @@ Evaluation evaluate_lammps(NepaModel* model, const Case& item, bool device = fal
     DeviceBuffer<double> dx(item.positions), ds(lammps_spins), de(std::vector<double>(1)),
         dv(out.virial), df(out.forces), dh(out.mforces), da(out.potential), dav(out.atom_virial);
     NepaLammpsDeviceNeighborInput din{};
-    din.nlocal = n; din.nall = n; din.inum = n; din.max_neighbors = n - 1;
+    din.nlocal = device_nlocal < 0 ? n : device_nlocal;
+    din.nall = n; din.inum = din.nlocal; din.max_neighbors = n - 1;
     din.neighbor_rows = n; din.numneigh_length = n;
     din.ilist = di.data; din.numneigh = dn.data; din.neighbors = dl.data;
     din.neighbor_atom_stride = n - 1; din.neighbor_slot_stride = 1;
@@ -458,6 +460,28 @@ bool check_spin_type_lammps(NepaModel* model, const Case& item) {
         max_abs(masked.forces, out.forces) > 5e-5 ||
         max_abs(masked.mforces, out.mforces) > 5e-5 ||
         max_abs(masked.atom_virial, out.atom_virial) > 5e-5) return false;
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+    if (device) {
+      // Keep one local center and return the remaining atoms as ghosts. Both
+      // zero and nonzero caller spins on excluded species must be masked before
+      // LAMMPS can reverse-communicate their magnetic-force contributions.
+      for (const Case* ghost_case : {&item, static_cast<const Case*>(&raw)}) {
+        const auto ghosts = evaluate_lammps(model, *ghost_case, true, 1);
+        bool saw_excluded_ghost = false;
+        for (int atom = 1; atom < item.atoms; ++atom) {
+          if (item.types[atom] == 0) continue;
+          saw_excluded_ghost = true;
+          for (int k = 0; k < 3; ++k) {
+            if (ghosts.mforces[3 * atom + k] != 0.0) {
+              std::cerr << "nonzero excluded ghost magnetic force\n";
+              return false;
+            }
+          }
+        }
+        if (!saw_excluded_ghost) return false;
+      }
+    }
+#endif
     std::cout << "spin_type LAMMPS " << (device ? "device" : "host")
               << " values and effective-spin masking passed\n";
   }

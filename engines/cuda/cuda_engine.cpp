@@ -1724,7 +1724,8 @@ class CudaModel : public nep_adapters::Model {
       nep_adapters::cuda_backend::write_lammps_device_outputs(
           input,
           result,
-          workspace);
+          workspace,
+          protocol_.spin_mode != 0 ? device_.view().spin_dof_type_active : nullptr);
       profiler.split(output_ms);
       profiler.print(
           stage_ms,
