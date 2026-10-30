@@ -200,6 +200,25 @@ LAMMPS 有两种支持的安装方式：
 
 ## 当前支持范围
 
+模型读取自动兼容旧的 `nep4`、`nep5`、`nep4_spin*`、charge 和响应模型格式，
+以及 GPUMD `spin3-refactor` 的 `nep ...` / `format_version 1` 块格式，无需手动转换。
+新格式支持 `model nep`、`qnep1`、`qnep2`、`nep_spin`（`spin_version 1`）、
+`nep_dipole` 和 `nep_polarizability`；也接受过渡格式 `nep_spin3` / `spin_mode 3`。
+`energy_reference` 按元素以双精度加回能量一次，不改变力、virial、磁力或 charge/BEC。
+结构系数的新旧排列在读取时转换，ANN、磁性径向系数和投影系数保持各自顺序。
+
+Spin 块模型的 `spin_type Fe` 只选择自旋自由度和磁性描述符中心；截断范围内的
+**所有元素**仍贡献几何环境。Fe 以外元素的有效自旋在计算前自动清零，返回的磁力为零，
+但保留磁性几何环境产生的原子力。调用方的原始自旋、能量和原子力标签不被改写，
+无需手动清理输入文件；磁力标签不参与推理。省略选择字段时默认全部元素。
+历史模型的 `spin_dof_type` / `spin_env_type` 继续保持原有数值语义：显式环境掩码生效，
+省略 `spin_env_type` 时仍默认与 `spin_dof_type` 相同，也仍允许环境元素的历史非零自旋输入。
+`spin_type` 与任一旧选择字段混用会报错；这里不采用 GPUMD c516 过渡输入中“忽略旧 env”的行为。
+以上规则共用于 CPU/CUDA、Python/ASE 和 LAMMPS 推理路径；自旋积分和热浴选择由 MD 程序负责。
+
+未知版本、重复字段、未知字段/块和参数计数不匹配会报错。支持的模型尺寸和后端能力仍受下表限制；
+这不新增温度模型、vdW 模型或 CUDA 响应模型的计算能力，也不恢复 NEP3 支持。
+
 | 前端 / 后端 | 普通 NEP | qNEP | spin NEP | 其他响应模型 |
 |---|---|---|---|---|
 | Python / CPU | 支持 | charge/BEC 支持 | 支持 | dipole、polarizability、DFT-D3 支持；DFT-D3 仅普通非 spin、非 charge 模型 |

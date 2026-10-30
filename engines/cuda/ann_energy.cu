@@ -283,6 +283,7 @@ __global__ void evaluate_qnep_ann(
     const int* __restrict__ types,
     const float* __restrict__ descriptors,
     const float* __restrict__ ann_type_major,
+    const double* __restrict__ energy_reference,
     double* __restrict__ potential,
     double* __restrict__ charge,
     float* __restrict__ fp,
@@ -328,7 +329,8 @@ __global__ void evaluate_qnep_ann(
       charge_derivative[atom + atom_stride * d] += charge_w1[neuron] * y1;
     }
   }
-  potential[atom] = static_cast<double>(energy - b1[0]);
+  potential[atom] = static_cast<double>(energy - b1[0]) +
+      (energy_reference != nullptr ? energy_reference[type] : 0.0);
   charge[atom] = static_cast<double>(q_charge);
 }
 
@@ -561,6 +563,7 @@ void evaluate_qnep_ann_on_device(
         workspace_view.types,
         workspace_view.descriptors,
         model_view.ann_type_major_qscaled,
+        model_view.spin_baseline,
         workspace_view.potential,
         workspace_view.charge,
         workspace_view.fp,

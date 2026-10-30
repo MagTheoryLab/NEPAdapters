@@ -16,6 +16,7 @@
 #include "utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -42,9 +43,17 @@ std::vector<std::string> read_nep_elements(const std::string& model_path) {
   }
 
   std::vector<std::string> elements(static_cast<std::size_t>(num_types));
+  std::transform(tag.begin(), tag.end(), tag.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
   for (int i = 0; i < num_types; ++i) {
     if (!(stream >> elements[static_cast<std::size_t>(i)])) {
       return {};
+    }
+    if (tag == "nep") {
+      auto& element = elements[static_cast<std::size_t>(i)];
+      std::transform(element.begin(), element.end(), element.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      element[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(element[0])));
     }
   }
   return elements;

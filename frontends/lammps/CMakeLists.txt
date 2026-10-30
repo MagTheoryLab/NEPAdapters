@@ -557,3 +557,37 @@ if(NEP_ADAPTERS_BUILD_TESTS)
     endif()
   endif()
 endif()
+
+if(NEP_ADAPTERS_BUILD_TESTS AND NEP_ADAPTERS_LAMMPS_EXECUTABLE AND Python3_EXECUTABLE)
+  foreach(backend cpu gpu)
+    if(TARGET nepadapters${backend}plugin)
+      set(_spin_type_pair nep/cpu)
+      set(_spin_type_newton_modes on off)
+      if(backend STREQUAL "gpu")
+        set(_spin_type_pair nep/gpu/kk)
+        set(_spin_type_newton_modes off)
+      endif()
+      foreach(input_case noncollinear noncollinear_raw_spins)
+        foreach(channels 2 3)
+          foreach(newton ${_spin_type_newton_modes})
+            set(_spin_type_test nep_adapters_lammps_spin_type_c${channels}_${backend}_${newton}_${input_case}_test)
+            add_test(NAME ${_spin_type_test}
+              COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
+                --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
+                --plugin "$<TARGET_FILE:nepadapters${backend}plugin>"
+                --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/nep_spin_o3c${channels}_uniform.nep"
+                --structure "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/${input_case}.json"
+                --reference "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/c${channels}_lammps_reference.txt"
+                --pair-style "${_spin_type_pair}" --newton "${newton}"
+                --energy-tolerance 1e-6 --force-tolerance 2e-4
+                --mforce-tolerance 2e-4 --virial-tolerance 2e-4
+                --work-dir "${CMAKE_BINARY_DIR}/${_spin_type_test}")
+            set_tests_properties(${_spin_type_test} PROPERTIES
+              LABELS "oracle;frontend;lammps;plugin;spin3;spin_type;${backend};real_lammps"
+              ENVIRONMENT "OMP_NUM_THREADS=4")
+          endforeach()
+        endforeach()
+      endforeach()
+    endif()
+  endforeach()
+endif()

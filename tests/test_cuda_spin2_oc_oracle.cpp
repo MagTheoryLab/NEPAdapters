@@ -3,6 +3,7 @@
 #include "nep_adapters/engines/cpu.hpp"
 #else
 #include "nep_adapters/engines/cuda.hpp"
+#include <cuda_runtime.h>
 #endif
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 
 namespace {
 int g_descriptor_dim = 0;
+bool g_spin_type_semantics = false;
 
 struct Case {
   std::string name;
@@ -41,7 +43,9 @@ std::vector<Case> read_oracle(const std::string& path) {
     throw std::runtime_error("bad versioned O/C spin oracle");
   input >> token >> hash;
   if (token != "model_sha256" ||
-      (hash != "2be994d33e029928f98cfb56b8b1b1ce74e323f324919c34dc21291cf50364b8" &&
+      (hash != "fe74b8ea755e7c77de1ee490b5b978f214f149aecbae89a88624ce67c339bf08" &&
+       hash != "57e66e9491b41e8bcce3712046c83408db4f19fd65dd6d8c510aa5a156107e57" &&
+       hash != "2be994d33e029928f98cfb56b8b1b1ce74e323f324919c34dc21291cf50364b8" &&
        hash != "8132407fecffb8a4ae6434748a556f8436d22bcd5b7e2c9ee5f71ffb108f3344" &&
        hash != "1744fddc200b83a842cdf46bf57a5207bd074c7801e24d69863c66b4a961abbd" &&
        hash != "961f2e47a6ac13f516eba20390150eeb1d83d38c21debb43683a2c56a170a271" &&
@@ -54,6 +58,8 @@ std::vector<Case> read_oracle(const std::string& path) {
        hash != "e5df123b708ee57af52d0a442c433dbc2418ff37f552a9e1b987f869d077c974" &&
        hash != "6d9c5c66916f0b0ce2825795e9c0af2908021317628db083e0669431867fd501"))
     throw std::runtime_error("versioned O/C spin oracle model hash mismatch");
+  g_spin_type_semantics = hash == "fe74b8ea755e7c77de1ee490b5b978f214f149aecbae89a88624ce67c339bf08" ||
+      hash == "57e66e9491b41e8bcce3712046c83408db4f19fd65dd6d8c510aa5a156107e57";
   input >> token >> descriptor_dim;
   if (token != "descriptor_dim" ||
       (descriptor_dim != 33 && descriptor_dim != 49 && descriptor_dim != 53 &&
@@ -171,8 +177,28 @@ Evaluation evaluate(
   return out;
 }
 
-#if defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
-Evaluation evaluate_lammps(NepaModel* model, const Case& item) {
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+template<class T> struct DeviceBuffer {
+  T* data = nullptr;
+  explicit DeviceBuffer(const std::vector<T>& host) {
+    if (cudaMalloc(reinterpret_cast<void**>(&data), host.size() * sizeof(T)) != cudaSuccess)
+      throw std::runtime_error("allocate test device buffer");
+    if (cudaMemcpy(data, host.data(), host.size() * sizeof(T), cudaMemcpyHostToDevice) != cudaSuccess) {
+      cudaFree(data);
+      throw std::runtime_error("upload test device buffer");
+    }
+  }
+  ~DeviceBuffer() { cudaFree(data); }
+  DeviceBuffer(const DeviceBuffer&) = delete;
+  void copy(std::vector<T>& host) {
+    if (cudaMemcpy(host.data(), data, host.size() * sizeof(T), cudaMemcpyDeviceToHost) != cudaSuccess)
+      throw std::runtime_error("download test device buffer");
+  }
+};
+#endif
+
+Evaluation evaluate_lammps(
+    NepaModel* model, const Case& item, bool device = false, int device_nlocal = -1) {
   const int n = item.atoms;
   std::vector<int> ilist(static_cast<std::size_t>(n));
   std::vector<int> numneigh(static_cast<std::size_t>(n), n - 1);
@@ -224,12 +250,43 @@ Evaluation evaluate_lammps(NepaModel* model, const Case& item) {
   result.potential_per_atom = out.potential.data(); result.forces = force_rows.data();
   result.mforces = mforce_rows.data(); result.virials_per_atom9 = virial_rows.data();
   result.spin_transfer_per_atom_row_major9 = transfer_rows.data();
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+  if (device) {
+    std::vector<int> flat;
+    for (const auto& row : neighbors) flat.insert(flat.end(), row.begin(), row.end());
+    DeviceBuffer<int> di(ilist), dn(numneigh), dl(flat), dt(types), dm(type_map);
+    DeviceBuffer<double> dx(item.positions), ds(lammps_spins), de(std::vector<double>(1)),
+        dv(out.virial), df(out.forces), dh(out.mforces), da(out.potential), dav(out.atom_virial);
+    NepaLammpsDeviceNeighborInput din{};
+    din.nlocal = device_nlocal < 0 ? n : device_nlocal;
+    din.nall = n; din.inum = din.nlocal; din.max_neighbors = n - 1;
+    din.neighbor_rows = n; din.numneigh_length = n;
+    din.ilist = di.data; din.numneigh = dn.data; din.neighbors = dl.data;
+    din.neighbor_atom_stride = n - 1; din.neighbor_slot_stride = 1;
+    din.types = dt.data; din.type_map = dm.data; din.type_map_length = 3;
+    din.positions = dx.data; din.position_atom_stride = 3; din.position_component_stride = 1;
+    din.spins = ds.data; din.spin_atom_stride = 4; din.spin_component_stride = 1;
+    NepaLammpsDeviceNeighborResult dout{};
+    dout.total_potential = de.data; dout.total_virial6 = dv.data;
+    dout.potential_per_atom = da.data; dout.forces = df.data;
+    dout.force_atom_stride = 3; dout.force_component_stride = 1;
+    dout.mforces = dh.data; dout.mforce_atom_stride = 3; dout.mforce_component_stride = 1;
+    dout.virials_per_atom9 = dav.data; dout.virial_atom_stride = 9; dout.virial_component_stride = 1;
+    if (nepa_find_force_lammps_device_neighbors(model, &din, &dout) != NEPA_STATUS_OK)
+      throw std::runtime_error(nepa_last_error_message());
+    std::vector<double> energy(1); de.copy(energy); out.energy = energy[0];
+    da.copy(out.potential); df.copy(out.forces); dh.copy(out.mforces);
+    dv.copy(out.virial); dav.copy(out.atom_virial);
+    std::vector<double> original_spins(lammps_spins.size()); ds.copy(original_spins);
+    if (original_spins != lammps_spins) throw std::runtime_error("caller device spins mutated");
+    return out;
+  }
+#endif
   if (nepa_find_force_lammps_neighbors(model, &input, &result) != NEPA_STATUS_OK) {
     throw std::runtime_error(nepa_last_error_message());
   }
   return out;
 }
-#endif
 
 bool check_case(NepaModel* model, const Case& item, bool forward_only) {
   const Evaluation out = evaluate(model, item);
@@ -369,6 +426,68 @@ bool check_case(NepaModel* model, const Case& item, bool forward_only) {
   return forward && steady_state && (forward_only || derivative) && lammps_ok;
 }
 
+bool check_spin_type_lammps(NepaModel* model, const Case& item) {
+  const auto batch = evaluate(model, item);
+  const int order[9] = {0, 4, 8, 1, 2, 5, 3, 6, 7};
+#if defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+  const std::vector<bool> paths{false};
+#else
+  const std::vector<bool> paths{false, true};
+#endif
+  for (bool device : paths) {
+    const auto out = evaluate_lammps(model, item, device);
+    if (std::abs(out.energy - batch.energy) > 5e-5 ||
+        max_abs(out.forces, batch.forces) > 5e-5 ||
+        max_abs(out.mforces, batch.mforces) > 5e-5) return false;
+    for (int atom = 0; atom < item.atoms; ++atom)
+      for (int k = 0; k < 9; ++k)
+        if (std::abs(out.atom_virial[9 * atom + k] - batch.atom_virial[9 * atom + order[k]]) > 5e-5)
+          return false;
+    for (int k = 0; k < 6; ++k) {
+      const double expected = k < 3 ? batch.virial[order[k]] :
+          0.5 * (batch.virial[order[k]] + batch.virial[order[k + 3]]);
+      if (std::abs(out.virial[k] - expected) > 5e-5) return false;
+    }
+    Case raw = item;
+    for (int atom = 0; atom < raw.atoms; ++atom) {
+      if (raw.types[atom] == 0) continue;
+      raw.spins[3 * atom] = 0.125;
+      raw.spins[3 * atom + 1] = -0.75;
+      raw.spins[3 * atom + 2] = 1.5;
+    }
+    const auto masked = evaluate_lammps(model, raw, device); // Reused device workspace.
+    if (std::abs(masked.energy - out.energy) > 5e-5 ||
+        max_abs(masked.forces, out.forces) > 5e-5 ||
+        max_abs(masked.mforces, out.mforces) > 5e-5 ||
+        max_abs(masked.atom_virial, out.atom_virial) > 5e-5) return false;
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+    if (device) {
+      // Keep one local center and return the remaining atoms as ghosts. Both
+      // zero and nonzero caller spins on excluded species must be masked before
+      // LAMMPS can reverse-communicate their magnetic-force contributions.
+      for (const Case* ghost_case : {&item, static_cast<const Case*>(&raw)}) {
+        const auto ghosts = evaluate_lammps(model, *ghost_case, true, 1);
+        bool saw_excluded_ghost = false;
+        for (int atom = 1; atom < item.atoms; ++atom) {
+          if (item.types[atom] == 0) continue;
+          saw_excluded_ghost = true;
+          for (int k = 0; k < 3; ++k) {
+            if (ghosts.mforces[3 * atom + k] != 0.0) {
+              std::cerr << "nonzero excluded ghost magnetic force\n";
+              return false;
+            }
+          }
+        }
+        if (!saw_excluded_ghost) return false;
+      }
+    }
+#endif
+    std::cout << "spin_type LAMMPS " << (device ? "device" : "host")
+              << " values and effective-spin masking passed\n";
+  }
+  return true;
+}
+
 bool finite_difference(NepaModel* model, const Case& reference) {
   constexpr double step = 2e-3;
   const Evaluation base = evaluate(model, reference, false);
@@ -451,8 +570,10 @@ int main(int argc, char** argv) {
     const auto cases = read_oracle(argv[2]);
     for (const Case& item : cases) {
       ok = check_case(model, item, forward_only) && ok;
-      if (!forward_only && item.name == "noncollinear")
+      if (!forward_only && item.name == "noncollinear") {
         ok = finite_difference(model, item) && ok;
+        if (g_spin_type_semantics) ok = check_spin_type_lammps(model, item) && ok;
+      }
     }
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n'; ok = false;

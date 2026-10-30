@@ -68,7 +68,8 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
   packed.protocol = protocol;
   packed.has_charge = protocol.charge_mode > 0;
   packed.atomic_numbers = protocol.atomic_numbers;
-  packed.spin_baseline = protocol.spin_baseline;
+  // The existing double-precision device baseline also holds non-spin references.
+  packed.spin_baseline = protocol.spin_mode ? protocol.spin_baseline : protocol.energy_reference;
   packed.flexible_zbl_parameters = std::move(parsed.flexible_zbl_parameters);
 
   const std::size_t dim = checked_count(protocol.descriptor_dim, "descriptor_dim");

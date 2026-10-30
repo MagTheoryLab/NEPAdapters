@@ -6,7 +6,8 @@ import nep_adapters
 
 
 def read_noncollinear(path):
-    tokens = open(path, encoding="utf-8").read().split()
+    with open(path, encoding="utf-8") as source:
+        tokens = source.read().split()
     descriptor_dim = int(tokens[tokens.index("descriptor_dim") + 1])
     cursor = tokens.index("noncollinear") - 1
     if tokens[cursor] != "case":

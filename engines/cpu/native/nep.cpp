@@ -4046,7 +4046,7 @@ void find_force_ZBL_for_lammps(
   }
 }
 
-std::vector<std::string> get_tokens(std::ifstream& input)
+std::vector<std::string> get_tokens(std::istream& input)
 {
   std::string line;
   std::getline(input, line);
@@ -8745,10 +8745,10 @@ NEP::NEP(const std::string& potential_filename) { init_from_file(potential_filen
 
 void NEP::init_from_file(const std::string& potential_filename, const bool is_rank_0)
 {
-  std::ifstream input = nep_adapters::detail::open_model_input(potential_filename);
-  if (!input.is_open()) {
-    throw std::runtime_error("failed to open NEP model: " + potential_filename);
-  }
+  nep_adapters::detail::ModelInput model_input(potential_filename);
+  std::istream& input = model_input.stream();
+  energy_reference = model_input.energy_reference();
+  paramb.spin_type_semantics = model_input.spin_type_semantics();
 
   std::vector<std::string> tokens = get_tokens(input);
   if (tokens.size() < 3) {
@@ -9402,8 +9402,6 @@ void NEP::init_from_file(const std::string& potential_filename, const bool is_ra
         paramb.zbl_rc_outer_pair.begin(),
         paramb.zbl_rc_outer_pair.end()));
   }
-  input.close();
-
 
   // charge related parameters and data
   if (paramb.charge_mode > 0) {
@@ -9811,7 +9809,7 @@ void NEP::compute(
   allocate_memory(N);
 
   for (std::size_t n = 0; n < potential.size(); ++n) {
-    potential[n] = 0.0;
+    potential[n] = energy_reference.empty() ? 0.0 : energy_reference[type[n]];
   }
   for (std::size_t n = 0; n < force.size(); ++n) {
     force[n] = 0.0;
@@ -9934,13 +9932,38 @@ void NEP::compute(
   }
 }
 
+namespace {
+void mask_spin_type_input(const NEP::ParaMB& param, const std::vector<int>& types,
+                          std::vector<double>& spins, bool soa = true) {
+  if (!param.spin_type_semantics) return;
+  const auto count = types.size();
+  if (spins.size() != 3 * count) throw std::invalid_argument("spin input size mismatch");
+  for (std::size_t atom = 0; atom < count; ++atom) {
+    if (param.spin_dof_type_active.at(types[atom])) continue;
+    for (std::size_t d = 0; d < 3; ++d)
+      spins[soa ? d * count + atom : 3 * atom + d] = 0.0;
+  }
+}
+
+const std::vector<double>& effective_spin_input(
+    const NEP::ParaMB& param, const std::vector<int>& types,
+    const std::vector<double>& input, std::vector<double>& masked) {
+  if (!param.spin_type_semantics) return input;
+  masked = input;
+  mask_spin_type_input(param, types, masked);
+  return masked;
+}
+}  // namespace
+
 void NEP::find_descriptor(
   const std::vector<int>& type,
   const std::vector<double>& box,
   const std::vector<double>& position,
-  const std::vector<double>& spins,
+  const std::vector<double>& input_spins,
   std::vector<double>& descriptor)
 {
+  std::vector<double> masked_spins;
+  const auto& spins = effective_spin_input(paramb, type, input_spins, masked_spins);
   const std::size_t N = type.size();
   if (!paramb.spin_mode) {
     throw std::runtime_error("spin descriptor requested for a non-spin model");
@@ -9984,7 +10007,7 @@ void NEP::compute(
   const std::vector<int>& type,
   const std::vector<double>& box,
   const std::vector<double>& position,
-  const std::vector<double>& spins,
+  const std::vector<double>& input_spins,
   std::vector<double>& potential,
   std::vector<double>& force,
   std::vector<double>& virial,
@@ -9992,6 +10015,8 @@ void NEP::compute(
   std::vector<double>& mforce,
   std::vector<double>* spin_transfer)
 {
+  std::vector<double> masked_spins;
+  const auto& spins = effective_spin_input(paramb, type, input_spins, masked_spins);
   const std::size_t N = type.size();
   if (N != potential.size() || N * 3 != force.size() || N * 9 != virial.size() ||
       N * annmb.dim != descriptor.size() || N * 3 != mforce.size()) {
@@ -10206,7 +10231,7 @@ void NEP::compute(
   allocate_memory(N);
 
   for (std::size_t n = 0; n < potential.size(); ++n) {
-    potential[n] = 0.0;
+    potential[n] = energy_reference.empty() ? 0.0 : energy_reference[type[n]];
   }
   for (std::size_t n = 0; n < force.size(); ++n) {
     force[n] = 0.0;
@@ -10827,6 +10852,16 @@ void NEP::compute_for_lammps(
 #endif
     Fp.data(), sum_fxyz.data(), total_potential, potential, &lammps_radial_cache,
     &lammps_angular_cache, ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+  if (!energy_reference.empty()) {
+    for (int index = 0; index < N; ++index) {
+      const int atom = ilist[index];
+      const int mapped_type = type_map[type[atom]];
+      if (mapped_type < 0) continue;
+      const double reference = energy_reference[mapped_type];
+      total_potential += reference;
+      if (potential) potential[atom] += reference;
+    }
+  }
   if (phase_timing) {
     phase_descriptor = nep_phase_elapsed(phase_mark);
   }
@@ -10988,6 +11023,8 @@ void NEP::compute_for_lammps(
         mu * spins[atom][d];
     }
   }
+
+  mask_spin_type_input(paramb, lammps_spin_types, lammps_spin_spins_aos, false);
 
   std::fill(Fp.begin(), Fp.end(), 0.0);
   std::fill(sum_fxyz.begin(), sum_fxyz.end(), 0.0);

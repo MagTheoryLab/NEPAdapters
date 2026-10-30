@@ -225,7 +225,8 @@ atomic_add_force_and_per_atom_virial_float_warp_aggregated(
 void stage_batch_on_device(
     const NepaStructureBatch& batch,
     int num_types,
-    DeviceWorkspace& workspace);
+    DeviceWorkspace& workspace,
+    const int* spin_type_active = nullptr);
 
 void stage_lammps_external_neighbors_on_device(
     const NepaLammpsNeighborInput& input,
@@ -236,7 +237,8 @@ void stage_lammps_device_neighbors_on_device(
     const NepaLammpsDeviceNeighborInput& input,
     const ModelProtocol& protocol,
     DeviceWorkspace& workspace,
-    bool check_overflow = true);
+    bool check_overflow = true,
+    const int* spin_type_active = nullptr);
 
 void build_internal_neighbors_on_device(
     const ModelProtocol& protocol,
@@ -259,7 +261,8 @@ void prepare_batched_outputs(
 void write_lammps_device_outputs(
     const NepaLammpsDeviceNeighborInput& input,
     const NepaLammpsDeviceNeighborResult& result,
-    DeviceWorkspace& workspace);
+    DeviceWorkspace& workspace,
+    const int* spin_dof_type_active);
 
 enum class DescriptorCoreTopology {
   single_box,

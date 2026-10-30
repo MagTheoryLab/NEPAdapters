@@ -85,6 +85,15 @@ class LammpsSpinSmokeTest(unittest.TestCase):
     self.assertAlmostEqual(values[0], 3.0)
     self.assertAlmostEqual(math.sqrt(sum(value * value for value in values[1:])), 1.0)
 
+  def test_zero_spin_uses_zero_magnitude_and_finite_direction(self):
+    self.structure["atoms"][0]["spin"] = [0.0, 0.0, 0.0]
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "in.spin"
+      smoke.write_input(path, "cpu.so", "nep.txt", self.structure, "nep/cpu", "command")
+      contents = path.read_text()
+    self.assertIn("variable nep_zero_spin atom 0.0", contents)
+    self.assertIn("set atom 1 spin v_nep_zero_spin 1 0 0", contents)
+
   def test_multi_rank_command_requires_mpiexec(self):
     with self.assertRaisesRegex(ValueError, "--mpiexec"):
       smoke.lammps_command("lmp", "nep/cpu", "in.spin", 2, "")

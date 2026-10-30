@@ -1,4 +1,4 @@
-add_library(nep_adapters registry.cpp)
+add_library(nep_adapters registry.cpp model_file.cpp)
 add_library(NEPAdapters::nep_adapters ALIAS nep_adapters)
 
 target_include_directories(
