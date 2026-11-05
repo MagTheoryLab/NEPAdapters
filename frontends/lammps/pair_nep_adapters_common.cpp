@@ -6,7 +6,6 @@
 
 #include "atom.h"
 #include "comm.h"
-#include "domain.h"
 #include "error.h"
 #include "force.h"
 #include "lmptype.h"
@@ -239,11 +238,7 @@ void PairNEPAdaptersCommon::log_loaded_model(
 }
 
 void PairNEPAdaptersCommon::init_style() {
-  if (!domain->xperiodic || !domain->yperiodic || !domain->zperiodic) {
-    const std::string message =
-        label_ + ": NEP requires periodic boundaries in x, y, and z";
-    error->all(FLERR, message.c_str());
-  }
+  // LAMMPS applies its boundary conditions when building the ghost atoms and neighbor list.
   neighbor->add_request(this, NeighConst::REQ_FULL);
 }
 
