@@ -1041,7 +1041,18 @@ if(TARGET NEPAdapters::cpu)
     NAME nep_adapters_cpu_spin_test
     COMMAND nep_adapters_cpu_spin_test)
   set_tests_properties(nep_adapters_cpu_spin_test PROPERTIES
-    LABELS "smoke;engine;cpu;spin")
+    LABELS "smoke;engine;cpu;spin"
+    ENVIRONMENT "OMP_NUM_THREADS=1"
+    RESOURCE_LOCK cpu_spin_generated_models)
+  if(NEP_ADAPTERS_CPU_ENABLE_OPENMP)
+    add_test(
+      NAME nep_adapters_cpu_spin_openmp_test
+      COMMAND nep_adapters_cpu_spin_test)
+    set_tests_properties(nep_adapters_cpu_spin_openmp_test PROPERTIES
+      LABELS "smoke;engine;cpu;spin;openmp"
+      ENVIRONMENT "OMP_NUM_THREADS=4;OMP_DYNAMIC=FALSE"
+      RESOURCE_LOCK cpu_spin_generated_models)
+  endif()
 endif()
 
 if(TARGET NEPAdapters::cpu AND

@@ -6326,7 +6326,6 @@ void add_spin_chiral_gradient(
   double* force,
   double* virial,
   double* spin_transfer,
-  const bool lammps_neighbor_virial_ownership,
   LammpsThreadLocalScratchView* lammps_scratch = nullptr,
   NEP::SpinGradientScratch* scratch = nullptr)
 {
@@ -6836,6 +6835,7 @@ void add_spin_chiral_gradient(
 
   const bool use_private_edges = use_parallel_edges || use_lammps_scratch;
   const int force_stride = use_lammps_scratch ? lammps_scratch->force_rows : N;
+  const std::size_t tensor_size = static_cast<std::size_t>(N) * 9;
   std::vector<double> force_private(
     use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
     0.0);
@@ -6844,11 +6844,11 @@ void add_spin_chiral_gradient(
     0.0);
   std::vector<double> spin_transfer_private(
     spin_transfer && use_private_edges && !use_lammps_scratch
-      ? static_cast<std::size_t>(num_threads) * 9 * N
+      ? num_threads * tensor_size
       : 0,
     0.0);
   std::vector<double> virial_private(
-    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 9 : 0,
+    use_private_edges && !use_lammps_scratch ? num_threads * tensor_size : 0,
     0.0);
 
 #if defined(_OPENMP)
@@ -6890,8 +6890,8 @@ void add_spin_chiral_gradient(
         ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
         : grad_spin.data();
       local_virial = use_private_edges
-        ? virial_private.data() + static_cast<std::size_t>(tid) * 9
-        : nullptr;
+        ? virial_private.data() + tid * tensor_size
+        : virial;
       local_spin_transfer = spin_transfer && use_private_edges
         ? spin_transfer_private.data() + static_cast<std::size_t>(tid) * 9 * N
         : spin_transfer;
@@ -6936,13 +6936,8 @@ void add_spin_chiral_gradient(
       for (int a = 0; a < 3; ++a) {
         const double rij_a = edge.rhat[a] * edge.dist;
         for (int b = 0; b < 3; ++b) {
-          if (use_private_edges) {
-            local_virial[a * 3 + b] -= rij_a * grad_rij[b];
-          } else {
-            const int owner = lammps_neighbor_virial_ownership ? edge.j : 0;
-            virial[static_cast<std::size_t>(a * 3 + b) * N + owner] -=
-              rij_a * grad_rij[b];
-          }
+          local_virial[static_cast<std::size_t>(a * 3 + b) * N + edge.j] -=
+            rij_a * grad_rij[b];
         }
       }
     }
@@ -6966,7 +6961,7 @@ void add_spin_chiral_gradient(
       const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
       const double* local_grad_spin =
         grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N;
-      const double* local_virial = virial_private.data() + static_cast<std::size_t>(tid) * 9;
+      const double* local_virial = virial_private.data() + tid * tensor_size;
       const double* local_spin_transfer = spin_transfer
         ? spin_transfer_private.data() + static_cast<std::size_t>(tid) * 9 * N
         : nullptr;
@@ -6977,13 +6972,12 @@ void add_spin_chiral_gradient(
           grad_spin[idx] += local_grad_spin[idx];
         }
       }
-      for (int d = 0; d < 9; ++d) {
-        virial[static_cast<std::size_t>(d) * N] += local_virial[d];
-        if (spin_transfer) {
-          for (int atom = 0; atom < N; ++atom) {
-            spin_transfer[static_cast<std::size_t>(d) * N + atom] +=
-              local_spin_transfer[static_cast<std::size_t>(d) * N + atom];
-          }
+      for (std::size_t idx = 0; idx < tensor_size; ++idx) {
+        virial[idx] += local_virial[idx];
+      }
+      if (spin_transfer) {
+        for (std::size_t idx = 0; idx < tensor_size; ++idx) {
+          spin_transfer[idx] += local_spin_transfer[idx];
         }
       }
     }
@@ -7424,7 +7418,6 @@ void add_spin_gradient(
   const int offset0 = paramb.struct_dim;
   const bool lammps_output = lammps_force && lammps_mforce && lammps_total_virial;
   const bool use_lammps_scratch = lammps_output && lammps_spin_scratch_active(lammps_scratch);
-  const bool lammps_neighbor_virial_ownership = lammps_output && !use_lammps_scratch;
   std::vector<double> lammps_force_work;
   std::vector<double> lammps_virial_work;
   std::vector<double> lammps_spin_transfer_work;
@@ -7617,6 +7610,7 @@ void add_spin_gradient(
   const bool use_parallel_edges = num_threads > 1 && cache.edges.size() > 32;
   const bool use_private_edges = use_parallel_edges || use_lammps_scratch;
   const int force_stride = use_lammps_scratch ? lammps_scratch->force_rows : N;
+  const std::size_t tensor_size = static_cast<std::size_t>(N) * 9;
   std::vector<double> force_private(
     use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 3 * N : 0,
     0.0);
@@ -7625,11 +7619,11 @@ void add_spin_gradient(
     0.0);
   std::vector<double> spin_transfer_private(
     spin_transfer && use_private_edges && !use_lammps_scratch
-      ? static_cast<std::size_t>(num_threads) * 9 * N
+      ? num_threads * tensor_size
       : 0,
     0.0);
   std::vector<double> virial_private(
-    use_private_edges && !use_lammps_scratch ? static_cast<std::size_t>(num_threads) * 9 : 0,
+    use_private_edges && !use_lammps_scratch ? num_threads * tensor_size : 0,
     0.0);
 
 #if defined(_OPENMP)
@@ -7674,8 +7668,8 @@ void add_spin_gradient(
         ? grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N
         : grad_spin.data();
       local_virial = use_private_edges
-        ? virial_private.data() + static_cast<std::size_t>(tid) * 9
-        : nullptr;
+        ? virial_private.data() + tid * tensor_size
+        : virial;
       local_spin_transfer = spin_transfer && use_private_edges
         ? spin_transfer_private.data() + static_cast<std::size_t>(tid) * 9 * N
         : spin_transfer;
@@ -7924,13 +7918,8 @@ void add_spin_gradient(
       for (int a = 0; a < 3; ++a) {
         const double rij_a = edge.rhat[a] * edge.dist;
         for (int b = 0; b < 3; ++b) {
-          if (use_private_edges) {
-            local_virial[a * 3 + b] -= rij_a * grad_rij[b];
-          } else {
-            const int owner = lammps_neighbor_virial_ownership ? edge.j : 0;
-            virial[static_cast<std::size_t>(a * 3 + b) * N + owner] -=
-              rij_a * grad_rij[b];
-          }
+          local_virial[static_cast<std::size_t>(a * 3 + b) * N + edge.j] -=
+            rij_a * grad_rij[b];
         }
       }
     }
@@ -7950,7 +7939,7 @@ void add_spin_gradient(
       const double* local_force = force_private.data() + static_cast<std::size_t>(tid) * 3 * N;
       const double* local_grad_spin =
         grad_spin_private.data() + static_cast<std::size_t>(tid) * 3 * N;
-      const double* local_virial = virial_private.data() + static_cast<std::size_t>(tid) * 9;
+      const double* local_virial = virial_private.data() + tid * tensor_size;
       const double* local_spin_transfer = spin_transfer
         ? spin_transfer_private.data() + static_cast<std::size_t>(tid) * 9 * N
         : nullptr;
@@ -7961,13 +7950,12 @@ void add_spin_gradient(
           grad_spin[idx] += local_grad_spin[idx];
         }
       }
-      for (int d = 0; d < 9; ++d) {
-        virial[static_cast<std::size_t>(d) * N] += local_virial[d];
-        if (spin_transfer) {
-          for (int atom = 0; atom < N; ++atom) {
-            spin_transfer[static_cast<std::size_t>(d) * N + atom] +=
-              local_spin_transfer[static_cast<std::size_t>(d) * N + atom];
-          }
+      for (std::size_t idx = 0; idx < tensor_size; ++idx) {
+        virial[idx] += local_virial[idx];
+      }
+      if (spin_transfer) {
+        for (std::size_t idx = 0; idx < tensor_size; ++idx) {
+          spin_transfer[idx] += local_spin_transfer[idx];
         }
       }
     }
@@ -7979,7 +7967,6 @@ void add_spin_gradient(
   }
   add_spin_chiral_gradient(
     paramb, annmb, N, spins, cache, Fp, grad_spin, force, virial, spin_transfer,
-    lammps_neighbor_virial_ownership,
     use_lammps_scratch ? lammps_scratch : nullptr,
     scratch);
   if (phase) {

@@ -255,7 +255,8 @@ BatchPrediction predict_batch_n(
     int atom_count,
     const std::vector<double>& positions,
     const std::vector<double>& spins,
-    std::vector<double>* virial_out = nullptr) {
+    std::vector<double>* virial_out = nullptr,
+    std::vector<double>* atom_virial_out = nullptr) {
   std::vector<std::int32_t> atom_counts = {atom_count};
   std::vector<std::int32_t> atom_offsets = {0};
   std::vector<std::int32_t> types(static_cast<std::size_t>(atom_count), 0);
@@ -282,6 +283,10 @@ BatchPrediction predict_batch_n(
   result.forces_aos3 = prediction.forces.data();
   result.mforces_aos3 = prediction.mforces.data();
   result.virials_row_major9 = virial.data();
+  if (atom_virial_out) {
+    atom_virial_out->resize(static_cast<std::size_t>(atom_count) * 9);
+    result.virials_per_atom_row_major9 = atom_virial_out->data();
+  }
   if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
     std::exit(EXIT_FAILURE);
   }
@@ -335,8 +340,9 @@ bool run_lammps_matches_batch_n(
     bool permute_ilist = false) {
   const int atom_count = static_cast<int>(spins.size() / 3);
   std::vector<double> batch_virial;
-  const BatchPrediction batch =
-      predict_batch_n(model, atom_count, positions, spins, &batch_virial);
+  std::vector<double> batch_atom_virial;
+  const BatchPrediction batch = predict_batch_n(
+      model, atom_count, positions, spins, &batch_virial, &batch_atom_virial);
   std::vector<int> ilist(static_cast<std::size_t>(atom_count));
   std::vector<int> numneigh(static_cast<std::size_t>(atom_count), atom_count - 1);
   std::vector<std::vector<int>> neigh_storage(static_cast<std::size_t>(atom_count));
@@ -368,11 +374,14 @@ bool run_lammps_matches_batch_n(
   double total_virial[6] = {};
   std::vector<double> forces(static_cast<std::size_t>(atom_count) * 3, 0.0);
   std::vector<double> mforces(static_cast<std::size_t>(atom_count) * 3, 0.0);
+  std::vector<double> atom_virial(static_cast<std::size_t>(atom_count) * 9, 0.0);
   std::vector<double*> force_rows(static_cast<std::size_t>(atom_count));
   std::vector<double*> mforce_rows(static_cast<std::size_t>(atom_count));
+  std::vector<double*> virial_rows(static_cast<std::size_t>(atom_count));
   for (int atom = 0; atom < atom_count; ++atom) {
     force_rows[static_cast<std::size_t>(atom)] = forces.data() + 3 * atom;
     mforce_rows[static_cast<std::size_t>(atom)] = mforces.data() + 3 * atom;
+    virial_rows[static_cast<std::size_t>(atom)] = atom_virial.data() + 9 * atom;
   }
 
   NepaLammpsNeighborInput input{};
@@ -391,6 +400,7 @@ bool run_lammps_matches_batch_n(
   result.total_virial6 = total_virial;
   result.forces = force_rows.data();
   result.mforces = mforce_rows.data();
+  result.virials_per_atom9 = virial_rows.data();
 
   if (nepa_find_force_lammps_neighbors(model, &input, &result) != NEPA_STATUS_OK) {
     return false;
@@ -409,12 +419,21 @@ bool run_lammps_matches_batch_n(
   const double force_diff = max_abs_diff(forces, batch.forces);
   const double mforce_diff = max_abs_diff(mforces, batch.mforces);
   const double virial_diff = max_abs_diff(total_virial_vec, batch_total_virial_vec);
+  constexpr int lammps_index_for_batch[9] = {0, 3, 4, 6, 1, 5, 7, 8, 2};
+  double atom_virial_diff = 0.0;
+  for (int atom = 0; atom < atom_count; ++atom) {
+    for (int d = 0; d < 9; ++d) {
+      atom_virial_diff = std::max(atom_virial_diff, std::abs(
+          virial_rows[atom][lammps_index_for_batch[d]] - batch_atom_virial[9 * atom + d]));
+    }
+  }
   if (energy_diff > 1.0e-10 || force_diff > 1.0e-10 ||
-      mforce_diff > 1.0e-10 || virial_diff > 1.0e-10) {
-    std::cerr << "chiral LAMMPS mismatch: energy_diff=" << energy_diff
+      mforce_diff > 1.0e-10 || virial_diff > 1.0e-10 || atom_virial_diff > 1.0e-10) {
+    std::cerr << "Spin1 LAMMPS mismatch: energy_diff=" << energy_diff
               << " force_diff=" << force_diff
               << " mforce_diff=" << mforce_diff
-              << " virial_diff=" << virial_diff << '\n';
+              << " virial_diff=" << virial_diff
+              << " atom_virial_diff=" << atom_virial_diff << '\n';
     return false;
   }
   return true;
@@ -928,7 +947,8 @@ int main() {
   const bool edge_ok =
       nepa_load_model("cpu", edge_path.c_str(), &edge_model) == NEPA_STATUS_OK &&
       edge_model != nullptr && check_edge_derivatives(edge_model, positions, spins) &&
-      check_lammps_neighbor_virial_ownership(edge_model, positions, spins);
+      check_lammps_neighbor_virial_ownership(edge_model, positions, spins) &&
+      run_lammps_matches_batch_n(edge_model, positions, spins);
   nepa_free_model(edge_model);
 
   NepaModel* baseline_model = nullptr;
@@ -964,11 +984,32 @@ int main() {
     nepa_free_model(chiral_numeric_model);
   }
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
+  // The first atom is isolated. The remaining atoms form 42 directed spin
+  // edges, exceeding the OpenMP threshold of 32.
+  const std::vector<double> dense_positions = {
+      5.5, 5.5, 5.5,
+      0.0, 0.0, 0.0,
+      1.2, 0.1, 0.0,
+      0.2, 1.1, 0.3,
+      0.4, 0.3, 1.4,
+      1.1, 1.2, 0.2,
+      1.3, 0.2, 1.2,
+      0.1, 1.3, 1.3};
+  const std::vector<double> dense_spins = {
+      1.0, 0.2, 0.0,
+      0.4, -0.3, 0.7,
+      -0.2, 0.8, 0.5,
+      0.6, 0.1, -0.4,
+      0.3, 0.7, 0.1,
+      -0.2, -0.6, 0.4,
+      0.1, 0.3, -0.8,
+      0.7, 0.1, 0.3};
   NepaModel* fixture_numeric_model = nullptr;
   const bool fixture_numeric_ok =
       nepa_load_model("cpu", NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE, &fixture_numeric_model) ==
           NEPA_STATUS_OK &&
       fixture_numeric_model != nullptr &&
+      run_lammps_matches_batch_n(fixture_numeric_model, dense_positions, dense_spins) &&
       run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins) &&
       run_lammps_matches_batch_n(fixture_numeric_model, chiral_positions, chiral_spins, true)
 #ifdef NEP_ADAPTERS_SPIN_CHIRAL_REFERENCE
