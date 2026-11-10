@@ -415,6 +415,18 @@ if(TARGET NEPAdapters::cuda AND
   set_tests_properties(nep_adapters_cuda_contract_test PROPERTIES
     LABELS "contract;engine;cuda")
 
+  if(TARGET NEPAdapters::cpu)
+    add_executable(nep_adapters_cuda_internal_neighbor_growth_test
+      test_cuda_internal_neighbor_growth.cpp)
+    target_link_libraries(nep_adapters_cuda_internal_neighbor_growth_test
+      PRIVATE NEPAdapters::cuda NEPAdapters::cpu)
+    add_test(NAME nep_adapters_cuda_internal_neighbor_growth_test
+      COMMAND nep_adapters_cuda_internal_neighbor_growth_test)
+    set_tests_properties(nep_adapters_cuda_internal_neighbor_growth_test PROPERTIES
+      LABELS "regression;engine;cuda;batch;parity"
+      ENVIRONMENT "OMP_NUM_THREADS=1")
+  endif()
+
   add_executable(nep_adapters_cuda_batch_interface_test test_cuda_batch_interface.cpp)
   target_link_libraries(
     nep_adapters_cuda_batch_interface_test
