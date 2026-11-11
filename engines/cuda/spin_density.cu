@@ -11,7 +11,7 @@ void check_launch() {
   const auto status = cudaGetLastError();
   if (status != cudaSuccess) throw std::runtime_error(std::string("density spin kernel: ") + cudaGetErrorString(status));
 }
-template<class Layout>
+template<bool FactorCenter = false, class Layout>
 void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBox& box,
             const DeviceModelView& m, const DeviceWorkspaceView& w, bool backward,
             VirialTarget target = VirialTarget::none, bool transfer = false) {
@@ -22,7 +22,7 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
   const int blocks = (count * p.spin_compress * Layout::tile + 127) / 128;
   if (!blocks) return;
   if (!backward) {
-    spin_density::descriptors<<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
+    spin_density::descriptors<Layout, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
       p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
       w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
       w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
@@ -49,7 +49,9 @@ void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
       count < 0 || static_cast<std::size_t>(count) > w.atom_capacity)
     throw std::runtime_error("invalid density spin workspace or protocol");
   if (p.spin_compress == 3 && p.spin_l_max == 2 && p.spin_order == 2) {
-    if (p.spin_soc) launch(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
+    // SOC compresses the factored moments into registers. The larger non-SOC
+    // tensor stays faster with direct accumulation in the neighbor loop.
+    if (p.spin_soc) launch<true>(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
     else launch(spin_density::MDLayoutNoSOC<4>{}, p, count, box, m, w, backward, target, transfer);
   } else if (m.spin_layout.components <= 100) {
     launch(spin_density::RuntimeLayout<100, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);

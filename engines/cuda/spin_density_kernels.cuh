@@ -161,31 +161,57 @@ __device__ inline void radial(Layout v, int slot, int plane, int c, int channels
     derivative = v.edge_radial[(2*c+1)*plane+slot];
     return;
   }
-  float fc, fcp, fn[17], fnp[17];
-  find_fc_and_fcp(cutoff, 1/cutoff, distance, fc, fcp);
-  radial_basis(basis, 1/cutoff, distance, fc, fcp, fn, fnp);
+  const float inverse = 1/cutoff;
+  float fc, fcp;
+  find_fc_and_fcp(cutoff, inverse, distance, fc, fcp);
   weight = derivative = 0;
-  if (Layout::contracted) {
-    for (int k = 0; k <= basis; ++k) {
-      const float coefficient = angular[(pair*channels+c)*(basis+1)+k];
-      weight += fn[k]*coefficient;
-      derivative += fnp[k]*coefficient;
+  if constexpr (Layout::contracted) {
+    // Consume the basis immediately. Restarting T/U for each order performs
+    // quadratic work and forces the dynamically indexed basis arrays to spill.
+    const float* coefficients = angular + (pair*channels+c)*(basis+1);
+    weight += fc * coefficients[0];
+    derivative += fcp * coefficients[0];
+    if (basis == 0) return;
+    const float offset = distance * inverse - 1.0f;
+    const float x = 2.0f * offset * offset - 1.0f;
+    float fn = (x + 1.0f) * 0.5f;
+    float fnp = 2.0f * offset * inverse * fc + fn * fcp;
+    fn *= fc;
+    weight += fn * coefficients[1];
+    derivative += fnp * coefficients[1];
+    float t0 = 1.0f, t1 = x;
+    float u0 = 1.0f, u1 = 2.0f * x;
+    for (int k = 2; k <= basis; ++k) {
+      const float t2 = 2.0f * x * t1 - t0;
+      fn = (t2 + 1.0f) * 0.5f;
+      fnp = k * u1 * 2.0f * offset * inverse;
+      fnp = fnp * fc + fn * fcp;
+      fn *= fc;
+      weight += fn * coefficients[k];
+      derivative += fnp * coefficients[k];
+      t0 = t1;
+      t1 = t2;
+      const float u2 = 2.0f * x * u1 - u0;
+      u0 = u1;
+      u1 = u2;
     }
-    return;
-  }
-  for (int a = 0; a <= na; ++a) {
-    float value = 0, grad = 0;
-    for (int k = 0; k <= basis; ++k) {
-      float coefficient = angular[(pair*(na+1)+a)*(basis+1)+k];
-      value += fn[k]*coefficient;
-      grad += fnp[k]*coefficient;
+  } else {
+    float fn[17], fnp[17];
+    radial_basis(basis, inverse, distance, fc, fcp, fn, fnp);
+    for (int a = 0; a <= na; ++a) {
+      float value = 0, grad = 0;
+      for (int k = 0; k <= basis; ++k) {
+        const float coefficient = angular[(pair*(na+1)+a)*(basis+1)+k];
+        value += fn[k]*coefficient;
+        grad += fnp[k]*coefficient;
+      }
+      weight += value * mix[a*channels+c];
+      derivative += grad * mix[a*channels+c];
     }
-    weight += value * mix[a*channels+c];
-    derivative += grad * mix[a*channels+c];
   }
 }
 
-template<class Layout>
+template<class Layout, bool FactorCenter = false>
 static __global__ void descriptors(
   Layout v, int atom_count, int n, int structural_dim, int types, int na, int basis, Geometry box,
   const int* type, const int* active, const double* positions, const double* spins,
@@ -199,6 +225,10 @@ static __global__ void descriptors(
   const unsigned mask = Layout::tile > 1 ? __ballot_sync(0xffffffff, i < atom_count) : 0;
   if (i >= atom_count) return;
   float s[3], h[Layout::component_capacity] = {};
+  // Center-spin terms factor through just the geometric moments. Their path
+  // weights and spin primitives are independent of the neighbor.
+  constexpr int geometric_components = FactorCenter ? Layout::harmonic_capacity : 1;
+  float geometric[geometric_components] = {};
   Value phi_i[Layout::spin_capacity];
   read_spin(n, i, type, active, spins, s);
   primitives_at(v, s, phi_i);
@@ -217,9 +247,16 @@ static __global__ void descriptors(
     primitives_at(v, s, phi_j);
     float weight, derivative;
     radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance, angular, parameters, weight, derivative);
+    if constexpr (FactorCenter) {
+      #pragma unroll
+      for (int g = 0; g < Layout::harmonic_capacity; ++g)
+        geometric[g] += weight * y[g].value;
+    }
     #pragma unroll
     for (int t = 0; t < v.term_count; ++t) {
       const Term term = v.term(t);
+      if constexpr (FactorCenter)
+        if (!term.neighbor) continue;
       float spin = (term.neighbor ? phi_j : phi_i)[term.spin].value;
       h[term.output] += weight*weights[term.path*v.channels+c]*term.coefficient*y[term.geometry].value*spin;
     }
@@ -230,7 +267,24 @@ static __global__ void descriptors(
     for (int offset = Layout::tile/2; offset > 0; offset /= 2)
       h[m] += __shfl_down_sync(mask, h[m], offset, Layout::tile);
   }
+  if constexpr (FactorCenter) {
+    #pragma unroll
+    for (int g = 0; g < Layout::harmonic_capacity; ++g) {
+      #pragma unroll
+      for (int offset = Layout::tile/2; offset > 0; offset /= 2)
+        geometric[g] += __shfl_down_sync(mask, geometric[g], offset, Layout::tile);
+    }
+  }
   if (lane != 0) return;
+  if constexpr (FactorCenter) {
+    #pragma unroll
+    for (int t = 0; t < v.term_count; ++t) {
+      const Term term = v.term(t);
+      if (term.neighbor) continue;
+      h[term.output] += geometric[term.geometry] * weights[term.path*v.channels+c] *
+        term.coefficient * phi_i[term.spin].value;
+    }
+  }
   #pragma unroll
   for (int t = 0; t < v.center_count; ++t) {
     const Center term = v.center(t);
