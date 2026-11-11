@@ -303,6 +303,44 @@ static __global__ void forces(
         }
     }
   }
+  // The compiled MD tile shares a center's adjoint in harmonic/spin space.
+  // Center-spin values and derivatives do not depend on the neighbor. Fold
+  // them once; combine repeated neighbor-spin coefficients before edge work.
+  constexpr int harmonics = Layout::harmonic_capacity;
+  constexpr int spin_components = Layout::spin_capacity;
+  constexpr int groups_per_block = 128 / Layout::tile;
+  constexpr int coefficients = 4 * harmonics + harmonics * (spin_components - 1);
+  constexpr int cache_size = Layout::tile > 1 ? coefficients * groups_per_block : 1;
+  __shared__ volatile float edge_pull[cache_size];
+  const int group = threadIdx.x / Layout::tile;
+  if constexpr (Layout::tile > 1) {
+    for (int k = lane; k < coefficients; k += Layout::tile)
+      edge_pull[k * groups_per_block + group] = 0.0f;
+    __syncwarp(mask);
+    if (lane == 0) {
+      #pragma unroll
+      for (int t = 0; t < v.term_count; ++t) {
+        const Term term = v.term(t);
+        const float adjoint = pull[term.output] *
+          weights[term.path * v.channels + c] * term.coefficient;
+        if (term.neighbor) {
+          // The degree-zero primitive has only a center path.
+          const int k = 4 * harmonics +
+            term.geometry * (spin_components - 1) + term.spin - 1;
+          edge_pull[k * groups_per_block + group] += adjoint;
+        } else {
+          edge_pull[term.geometry * groups_per_block + group] +=
+            adjoint * phi_i[term.spin].value;
+          #pragma unroll
+          for (int d = 0; d < 3; ++d)
+            edge_pull[((d + 1) * harmonics + term.geometry) *
+                      groups_per_block + group] +=
+              adjoint * phi_i[term.spin].derivative[d];
+        }
+      }
+    }
+    __syncwarp(mask);
+  }
   for (int neighbor = lane; neighbor < nn[i]; neighbor += Layout::tile) {
     int slot = neighbor*n+i, j = nl[slot], pair = type[i]*types+type[j];
     float r[3], u[3];
@@ -317,16 +355,41 @@ static __global__ void forces(
     float weight, derivative;
     radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance, angular, parameters, weight, derivative);
     float radial_pull = 0, angular_pull[3] = {}, neighbor_pull[3] = {};
-    #pragma unroll
-    for (int t = 0; t < v.term_count; ++t) {
-      Term term = v.term(t);
-      const Value spin = (term.neighbor ? phi_j : phi_i)[term.spin];
-      const Value harmonic = y[term.geometry];
-      float adjoint = pull[term.output]*weights[term.path*v.channels+c]*term.coefficient;
-      radial_pull += adjoint*harmonic.value*spin.value;
-      for (int d = 0; d < 3; ++d) {
-        angular_pull[d] += adjoint*weight*harmonic.derivative[d]*spin.value;
-        (term.neighbor ? neighbor_pull : center_pull)[d] += adjoint*weight*harmonic.value*spin.derivative[d];
+    if constexpr (Layout::tile > 1) {
+      #pragma unroll
+      for (int g = 0; g < harmonics; ++g) {
+        float value = edge_pull[g * groups_per_block + group];
+        float spin_gradient[3] = {};
+        #pragma unroll
+        for (int s = 1; s < spin_components; ++s) {
+          const int k = 4 * harmonics + g * (spin_components - 1) + s - 1;
+          const float adjoint = edge_pull[k * groups_per_block + group];
+          value += adjoint * phi_j[s].value;
+          #pragma unroll
+          for (int d = 0; d < 3; ++d)
+            spin_gradient[d] += adjoint * phi_j[s].derivative[d];
+        }
+        radial_pull += value * y[g].value;
+        #pragma unroll
+        for (int d = 0; d < 3; ++d) {
+          angular_pull[d] += weight * value * y[g].derivative[d];
+          neighbor_pull[d] += weight * y[g].value * spin_gradient[d];
+          center_pull[d] += weight * y[g].value *
+            edge_pull[((d + 1) * harmonics + g) * groups_per_block + group];
+        }
+      }
+    } else {
+      #pragma unroll
+      for (int t = 0; t < v.term_count; ++t) {
+        Term term = v.term(t);
+        const Value spin = (term.neighbor ? phi_j : phi_i)[term.spin];
+        const Value harmonic = y[term.geometry];
+        float adjoint = pull[term.output]*weights[term.path*v.channels+c]*term.coefficient;
+        radial_pull += adjoint*harmonic.value*spin.value;
+        for (int d = 0; d < 3; ++d) {
+          angular_pull[d] += adjoint*weight*harmonic.derivative[d]*spin.value;
+          (term.neighbor ? neighbor_pull : center_pull)[d] += adjoint*weight*harmonic.value*spin.derivative[d];
+        }
       }
     }
     float longitudinal = 0;
