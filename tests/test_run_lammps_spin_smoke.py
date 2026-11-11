@@ -117,11 +117,11 @@ LAMMPS (22 Jul 2025)
     self.assertEqual(smoke.mpi_processor_counts(screen), [8, 8])
 
   def test_committed_structure_is_valid(self):
-    path = ROOT / "tests/fixtures/spin_chiral_protocol/lammps_structure.json"
+    path = ROOT / "tests/fixtures/spin_density/lammps/lammps_structure.json"
     structure = smoke.read_structure(path)
     self.assertEqual(len(structure["atoms"]), 4)
-    self.assertEqual(structure["elements"], ["Fe"])
-    self.assertEqual(structure["box"], [4.0, 4.0, 4.0])
+    self.assertEqual(structure["elements"], ["Fe", "Bi", "O"])
+    self.assertEqual(structure["box"], [24.0, 25.0, 26.0])
 
 
 if __name__ == "__main__":

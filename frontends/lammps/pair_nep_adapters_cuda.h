@@ -48,6 +48,7 @@ class PairNEPAdaptersCUDA : public PairNEPAdaptersCommon
   void ensure_kokkos_buffers();
   void ensure_kokkos_type_map();
   void ensure_kokkos_tally_buffers();
+  void reverse_kokkos_contributions();
   void pack_kokkos_per_atom_tallies();
 
   Kokkos::View<int*, LMPDeviceType> d_type_map_;

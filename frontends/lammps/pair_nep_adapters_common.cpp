@@ -292,7 +292,7 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
     }
     classic_reverse_per_atom_virial_ =
         !force->newton && want_atom_virial;
-    if (!force->newton && nall > 0) {
+    if (!force->newton) {
       const int force_width = spin_model_ ? 6 : 3;
       const int reverse_width =
           force_width + (classic_reverse_per_atom_virial_ ? 9 : 0);
@@ -395,7 +395,8 @@ void PairNEPAdaptersCommon::compute(int eflag, int vflag) {
   // Per-atom virial uses the same neighbor ownership and must travel with f/fm.
   classic_reverse_per_atom_virial_ =
       !force->newton && want_atom_virial;
-  if (!force->newton && nall > nlocal) {
+  // Even ranks without ghosts must exchange the zero-length MPI messages.
+  if (!force->newton) {
     const int force_width = spin_model_ ? 6 : 3;
     const int reverse_width =
         force_width + (classic_reverse_per_atom_virial_ ? 9 : 0);

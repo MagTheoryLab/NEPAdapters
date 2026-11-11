@@ -24,10 +24,8 @@ struct AnnTypeBlock {
 struct DescriptorCoefficientLayout {
   std::size_t radial_offset = 0;
   std::size_t angular_offset = 0;
-  std::size_t spin_offset = 0;
   std::size_t radial_count = 0;
   std::size_t angular_count = 0;
-  std::size_t spin_count = 0;
 };
 
 struct HostModelParameters {
@@ -37,7 +35,8 @@ struct HostModelParameters {
   std::vector<float> descriptor_coefficients;
   std::vector<float> descriptor_coefficients_type_pair_major;
   std::vector<float> angular_coefficients_center_type_major;
-  std::vector<float> spin_projection_parameters;
+  std::vector<float> spin_parameters;
+  std::vector<float> spin_radial_coefficients;
   std::vector<float> q_scaler;
   std::vector<float> cutoff_radial_pair;
   std::vector<float> cutoff_angular_pair;
@@ -61,7 +60,7 @@ struct DeviceModelUploadSummary {
   std::size_t descriptor_coefficients_bytes = 0;
   std::size_t descriptor_coefficients_type_pair_major_bytes = 0;
   std::size_t angular_coefficients_center_type_major_bytes = 0;
-  std::size_t spin_projection_parameters_bytes = 0;
+  std::size_t spin_parameters_bytes = 0;
   std::size_t q_scaler_bytes = 0;
   std::size_t cutoff_radial_pair_bytes = 0;
   std::size_t cutoff_angular_pair_bytes = 0;
@@ -69,18 +68,19 @@ struct DeviceModelUploadSummary {
   std::size_t zbl_parameters_pair_bytes = 0;
   std::size_t spin_baseline_bytes = 0;
   std::size_t spin_dof_type_active_bytes = 0;
-  std::size_t spin_env_type_active_bytes = 0;
   std::size_t atomic_numbers_bytes = 0;
   std::size_t total_bytes = 0;
 };
 
 struct DeviceModelView {
+  spin_density::View spin_layout{};
+  const float* spin_radial_coefficients = nullptr;
   const float* ann_type_major = nullptr;
   const float* ann_type_major_qscaled = nullptr;
   const float* descriptor_coefficients = nullptr;
   const float* descriptor_coefficients_type_pair_major = nullptr;
   const float* angular_coefficients_center_type_major = nullptr;
-  const float* spin_projection_parameters = nullptr;
+  const float* spin_parameters = nullptr;
   const float* q_scaler = nullptr;
   const float* cutoff_radial_pair = nullptr;
   const float* cutoff_angular_pair = nullptr;
@@ -88,14 +88,13 @@ struct DeviceModelView {
   const float* zbl_parameters_pair = nullptr;
   const double* spin_baseline = nullptr;
   const int* spin_dof_type_active = nullptr;
-  const int* spin_env_type_active = nullptr;
   const int* atomic_numbers = nullptr;
   std::size_t ann_type_major_count = 0;
   std::size_t ann_type_major_qscaled_count = 0;
   std::size_t descriptor_coefficients_count = 0;
   std::size_t descriptor_coefficients_type_pair_major_count = 0;
   std::size_t angular_coefficients_center_type_major_count = 0;
-  std::size_t spin_projection_parameters_count = 0;
+  std::size_t spin_parameters_count = 0;
   std::size_t q_scaler_count = 0;
   std::size_t cutoff_radial_pair_count = 0;
   std::size_t cutoff_angular_pair_count = 0;
@@ -103,7 +102,6 @@ struct DeviceModelView {
   std::size_t zbl_parameters_pair_count = 0;
   std::size_t spin_baseline_count = 0;
   std::size_t spin_dof_type_active_count = 0;
-  std::size_t spin_env_type_active_count = 0;
   std::size_t atomic_numbers_count = 0;
 };
 
@@ -128,7 +126,9 @@ class DeviceModel {
   float* descriptor_coefficients_device_ = nullptr;
   float* descriptor_coefficients_type_pair_major_device_ = nullptr;
   float* angular_coefficients_center_type_major_device_ = nullptr;
-  float* spin_projection_parameters_device_ = nullptr;
+  void* spin_layout_device_ = nullptr;
+  float* spin_radial_coefficients_device_ = nullptr;
+  float* spin_parameters_device_ = nullptr;
   float* q_scaler_device_ = nullptr;
   float* cutoff_radial_pair_device_ = nullptr;
   float* cutoff_angular_pair_device_ = nullptr;
@@ -136,7 +136,6 @@ class DeviceModel {
   float* zbl_parameters_pair_device_ = nullptr;
   double* spin_baseline_device_ = nullptr;
   int* spin_dof_type_active_device_ = nullptr;
-  int* spin_env_type_active_device_ = nullptr;
   int* atomic_numbers_device_ = nullptr;
   DeviceModelView view_{};
   DeviceModelUploadSummary summary_{};

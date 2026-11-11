@@ -198,8 +198,8 @@ bool run_once(
 
 int main(int argc, char** argv)
 {
-  std::string model_path = NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE;
-  const char* model_name = "spin_chiral_fixture";
+  std::string model_path = NEP_ADAPTERS_SPIN_DENSITY_FIXTURE;
+  const char* model_name = "spin_density_fixture";
   bool use_spins = true;
   bool write_spin_transfer = false;
   bool write_per_atom_virial = false;

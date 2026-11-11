@@ -33,15 +33,7 @@ def block_model(path, reference=None, alias=False):
     basis = list(map(int, fields["basis_size"]))
     sizes = [(n + 1) * (b + 1) * types**2 for n, b in zip(nmax, basis)]
     count = ann + sum(sizes)
-    spin = "spin3" in tag
-    if spin:
-        count += types**2 * int(fields["spin_compress"][0]) * (int(fields["spin_basis_size"][0]) + 1)
-        count += int(fields["spin_projection_size"][0])
-        fields.pop("spin_mode")
-        fields["spin_mode" if alias else "spin_version"] = ["3" if alias else "1"]
-        fields["energy_reference"] = fields.pop("spin_baseline")
-        model = "nep_spin3" if alias else "nep_spin"
-    elif charge:
+    if charge:
         model = "qnep" + tag[-1]
     elif "dipole" in tag:
         model = "nep_dipole"
@@ -114,26 +106,8 @@ class BlockFormatTest(unittest.TestCase):
                 descriptors = "descriptors_spin" if "spin" in method else "descriptors"
                 np.testing.assert_allclose(getattr(new, descriptors)(*args), getattr(old, descriptors)(*args), atol=1e-12, rtol=0)
 
-    def test_spin3_and_previous_block_alias(self):
-        for name in ("o3c2_uniform", "o3c2_typewise", "o3c3_uniform", "o3c4_uniform"):
-            for alias in (False, True):
-                with self.subTest(name=name, alias=alias):
-                    self.compare(ROOT / f"nep4_spin3_{name}.nep", "calculate_spin", alias=alias)
-
     def test_ordinary_reference_and_descriptors(self):
         self.compare(ROOT / "cpu_baseline/nep.txt", reference=[-123.1234567890123, 0.234567890123456])
-
-    def test_spin3_zbl(self):
-        text = (ROOT / "nep4_spin3_o3c2_typewise.nep").read_text()
-        fixture = Path(self.temp.name) / "spin-zbl.nep"
-        for flexible in (False, True):
-            with self.subTest(flexible=flexible):
-                zbl = "0 0" if flexible else "0.8 2.5"
-                model = text.replace("nep4_spin3 ", "nep4_spin3_zbl ", 1).replace("\ncutoff ", f"\nzbl {zbl}\ncutoff ", 1)
-                if flexible:
-                    model += "\n".join(map(str, [0.8, 2.5, 0.18175, 3.1998, 0.50986, 0.94229, 0.28022, 0.4029, 0.02817, 0.20162] * 3)) + "\n"
-                fixture.write_text(model)
-                self.compare(fixture, "calculate_spin")
 
     def test_single_element_and_reference_with_dftd3(self):
         self.types[:] = 0
@@ -162,11 +136,9 @@ class BlockFormatTest(unittest.TestCase):
         self.compare(ROOT / "production_api/polarizability/nep.txt", "polarizabilities")
 
     def test_invalid_blocks_rejected(self):
-        text = block_model(ROOT / "nep4_spin3_o3c2_uniform.nep")
+        text = block_model(ROOT / "cpu_baseline/nep.txt")
         cases = {
             "version": text.replace("FORMAT_VERSION 1", "FORMAT_VERSION 2"),
-            "spin version": text.replace("SPIN_VERSION 1", "SPIN_VERSION 2"),
-            "missing spin version": text.replace("SPIN_VERSION 1\n", ""),
             "duplicate field": text + "format_version 1\n",
             "duplicate block": text + "@ parameters 0\n",
             "unknown field": text + "future_feature 1\n",
@@ -176,7 +148,7 @@ class BlockFormatTest(unittest.TestCase):
             "nonfinite": text.replace("# values", "nan", 1),
             "count overflow": text.replace("@ parameters ", "@ parameters 999999999999999999999999999999", 1),
             "missing parameters": text.replace("@ parameters", "@ another_parameters"),
-            "model": text.replace("MODEL nep_spin", "MODEL nep_future"),
+            "model": text.replace("MODEL nep", "MODEL nep_future"),
             "wrong scaler": text.replace("@ q_scaler ", "@ q_scaler 1", 1),
         }
         for name, invalid in cases.items():

@@ -363,12 +363,18 @@ if(NEP_ADAPTERS_BUILD_TESTS)
   endif()
 
   set(_nep_adapters_spin_fixture_dir
-    "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol")
+    "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/lammps")
   if(Python3_Interpreter_FOUND AND
      EXISTS "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}" AND
-     EXISTS "${_nep_adapters_spin_fixture_dir}/nep.txt" AND
+     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep" AND
      EXISTS "${_nep_adapters_spin_fixture_dir}/lammps_structure.json" AND
      EXISTS "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt")
+    set(_nep_adapters_mpiexec_numproc_flag "${MPIEXEC_NUMPROC_FLAG}")
+    if(NOT _nep_adapters_mpiexec_numproc_flag)
+      set(_nep_adapters_mpiexec_numproc_flag "-np")
+    endif()
+    # Independent labels round model parameters to GPUMD's FP32 precision;
+    # CPU retains file values in FP64. E differs by 1.25e-8 eV; keep F/H gates.
     if(TARGET nepadapterscpuplugin)
       add_test(
         NAME nep_adapters_lammps_spin_cpu_plugin_test
@@ -377,12 +383,13 @@ if(NEP_ADAPTERS_BUILD_TESTS)
           "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
           --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
           --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
-          --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+          --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
           --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
           --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
           --pair-style nep/cpu
           --newton off
           --work-dir "${CMAKE_BINARY_DIR}/lammps_spin_cpu_smoke"
+          --energy-tolerance 1.0e-7
       )
       set_tests_properties(
         nep_adapters_lammps_spin_cpu_plugin_test PROPERTIES
@@ -396,12 +403,13 @@ if(NEP_ADAPTERS_BUILD_TESTS)
           "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
           --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
           --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
-          --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+          --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
           --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
           --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
           --pair-style nep/cpu
           --newton on
           --work-dir "${CMAKE_BINARY_DIR}/lammps_spin_cpu_newton_on_smoke"
+          --energy-tolerance 1.0e-7
       )
       set_tests_properties(
         nep_adapters_lammps_spin_cpu_newton_on_plugin_test PROPERTIES
@@ -409,10 +417,6 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
 
       if(MPI_CXX_FOUND AND MPIEXEC_EXECUTABLE)
-        set(_nep_adapters_mpiexec_numproc_flag "${MPIEXEC_NUMPROC_FLAG}")
-        if(NOT _nep_adapters_mpiexec_numproc_flag)
-          set(_nep_adapters_mpiexec_numproc_flag "-np")
-        endif()
         foreach(_mpi_ranks IN ITEMS 2 4 8)
           if(MPIEXEC_MAX_NUMPROCS AND
              _mpi_ranks GREATER MPIEXEC_MAX_NUMPROCS)
@@ -427,7 +431,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
               "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
               --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
               --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
-              --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+              --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
               --structure
                 "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
               --reference
@@ -437,6 +441,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
               --mpiexec "${MPIEXEC_EXECUTABLE}"
               "--mpiexec-numproc-flag=${_nep_adapters_mpiexec_numproc_flag}"
               --mpi-ranks "${_mpi_ranks}"
+              --energy-tolerance 1.0e-7
               --work-dir
                 "${CMAKE_BINARY_DIR}/lammps_spin_cpu_mpi_${_mpi_ranks}_smoke"
           )
@@ -459,7 +464,7 @@ if(NEP_ADAPTERS_BUILD_TESTS)
           "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
           --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
           --plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
-          --model "${_nep_adapters_spin_fixture_dir}/nep.txt"
+          --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
           --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
           --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
           --pair-style nep/gpu/kk
@@ -474,120 +479,44 @@ if(NEP_ADAPTERS_BUILD_TESTS)
         nep_adapters_lammps_spin_cuda_plugin_test PROPERTIES
         LABELS "smoke;frontend;lammps;plugin;spin;cuda;kokkos;device;real_lammps"
         DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
-
-      foreach(_spin2_shape IN ITEMS o2c2 o3c2 zbl_o3c2)
-        set(_spin2_model
-          "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_spin2_shape}.nep")
-        set(_spin2_fixture_dir
-          "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_${_spin2_shape}_lammps")
-        if(EXISTS "${_spin2_model}" AND
-           EXISTS "${_spin2_fixture_dir}/structure.json" AND
-           EXISTS "${_spin2_fixture_dir}/reference.txt")
-          set(_spin2_energy_tolerance 1.0e-6)
-          if(_spin2_shape STREQUAL "zbl_o3c2")
-            set(_spin2_energy_tolerance 1.0e-5)
+      if(MPI_CXX_FOUND AND MPIEXEC_EXECUTABLE)
+        foreach(_mpi_ranks IN ITEMS 2 4 8)
+          if(MPIEXEC_MAX_NUMPROCS AND
+             _mpi_ranks GREATER MPIEXEC_MAX_NUMPROCS)
+            continue()
           endif()
+          set(_mpi_test_name
+            "nep_adapters_lammps_spin_cuda_mpi_${_mpi_ranks}_test")
           add_test(
-            NAME "nep_adapters_lammps_spin2_${_spin2_shape}_cuda_plugin_test"
+            NAME "${_mpi_test_name}"
             COMMAND
               "${Python3_EXECUTABLE}"
               "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
               --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
               --plugin "$<TARGET_FILE:nepadaptersgpuplugin>"
-              --model "${_spin2_model}"
-              --structure "${_spin2_fixture_dir}/structure.json"
-              --reference "${_spin2_fixture_dir}/reference.txt"
+              --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
+              --structure "${_nep_adapters_spin_fixture_dir}/lammps_structure.json"
+              --reference "${_nep_adapters_spin_fixture_dir}/reference_small_pbc.txt"
               --pair-style nep/gpu/kk
               --newton off
-              --work-dir
-                "${CMAKE_BINARY_DIR}/lammps_spin2_${_spin2_shape}_cuda_smoke"
-              --energy-tolerance "${_spin2_energy_tolerance}"
+              --mpiexec "${MPIEXEC_EXECUTABLE}"
+              "--mpiexec-numproc-flag=${_nep_adapters_mpiexec_numproc_flag}"
+              --mpi-ranks "${_mpi_ranks}"
+              --work-dir "${CMAKE_BINARY_DIR}/lammps_spin_cuda_mpi_${_mpi_ranks}_smoke"
+              --energy-tolerance 1.0e-6
               --force-tolerance 2.0e-4
               --mforce-tolerance 2.0e-4
-              --virial-tolerance 2.0e-4)
+              --virial-tolerance 2.0e-4
+          )
           set_tests_properties(
-            "nep_adapters_lammps_spin2_${_spin2_shape}_cuda_plugin_test"
-            PROPERTIES
-              LABELS
-                "oracle;frontend;lammps;plugin;spin2;${_spin2_shape};cuda;kokkos;device;real_lammps"
-              DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test")
-        endif()
-      endforeach()
-    endif()
-
-    if(TARGET nepadapterscpuplugin)
-      foreach(_spin2_shape IN ITEMS o2c2 o3c2 zbl_o3c2)
-        set(_spin2_model
-          "${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_${_spin2_shape}.nep")
-        set(_spin2_fixture_dir
-          "${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_${_spin2_shape}_lammps")
-        if(EXISTS "${_spin2_model}" AND
-           EXISTS "${_spin2_fixture_dir}/structure.json" AND
-           EXISTS "${_spin2_fixture_dir}/reference.txt")
-          set(_spin2_virial_tolerance 1.0e-5)
-          if(_spin2_shape STREQUAL "zbl_o3c2")
-            set(_spin2_virial_tolerance 2.0e-5)
-          endif()
-          foreach(_newton_mode IN ITEMS on off)
-            add_test(
-              NAME
-                "nep_adapters_lammps_spin2_${_spin2_shape}_cpu_newton_${_newton_mode}_plugin_test"
-              COMMAND
-                "${Python3_EXECUTABLE}"
-                "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
-                --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
-                --plugin "$<TARGET_FILE:nepadapterscpuplugin>"
-                --model "${_spin2_model}"
-                --structure "${_spin2_fixture_dir}/structure.json"
-                --reference "${_spin2_fixture_dir}/reference.txt"
-                --pair-style nep/cpu
-                --newton "${_newton_mode}"
-                --virial-tolerance "${_spin2_virial_tolerance}"
-                --work-dir
-                  "${CMAKE_BINARY_DIR}/lammps_spin2_${_spin2_shape}_cpu_newton_${_newton_mode}_smoke")
-            set_tests_properties(
-              "nep_adapters_lammps_spin2_${_spin2_shape}_cpu_newton_${_newton_mode}_plugin_test"
-              PROPERTIES
-                LABELS
-                  "oracle;frontend;lammps;plugin;spin2;${_spin2_shape};cpu;real_lammps;newton_${_newton_mode}"
-                DEPENDS "nep_adapters_lammps_cpu_plugin_compile_test")
-          endforeach()
-        endif()
-      endforeach()
+            "${_mpi_test_name}" PROPERTIES
+            LABELS "smoke;frontend;lammps;plugin;spin;cuda;kokkos;device;mpi;mpi_${_mpi_ranks};real_lammps"
+            PROCESSORS "${_mpi_ranks}"
+            ENVIRONMENT "OMP_NUM_THREADS=1"
+            DEPENDS "nep_adapters_lammps_gpu_plugin_compile_test"
+            TIMEOUT 120)
+        endforeach()
+      endif()
     endif()
   endif()
-endif()
-
-if(NEP_ADAPTERS_BUILD_TESTS AND NEP_ADAPTERS_LAMMPS_EXECUTABLE AND Python3_EXECUTABLE)
-  foreach(backend cpu gpu)
-    if(TARGET nepadapters${backend}plugin)
-      set(_spin_type_pair nep/cpu)
-      set(_spin_type_newton_modes on off)
-      if(backend STREQUAL "gpu")
-        set(_spin_type_pair nep/gpu/kk)
-        set(_spin_type_newton_modes off)
-      endif()
-      foreach(input_case noncollinear noncollinear_raw_spins)
-        foreach(channels 2 3)
-          foreach(newton ${_spin_type_newton_modes})
-            set(_spin_type_test nep_adapters_lammps_spin_type_c${channels}_${backend}_${newton}_${input_case}_test)
-            add_test(NAME ${_spin_type_test}
-              COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/run_lammps_spin_smoke.py"
-                --lmp "${NEP_ADAPTERS_LAMMPS_EXECUTABLE}"
-                --plugin "$<TARGET_FILE:nepadapters${backend}plugin>"
-                --model "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/nep_spin_o3c${channels}_uniform.nep"
-                --structure "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/${input_case}.json"
-                --reference "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_type/c${channels}_lammps_reference.txt"
-                --pair-style "${_spin_type_pair}" --newton "${newton}"
-                --energy-tolerance 1e-6 --force-tolerance 2e-4
-                --mforce-tolerance 2e-4 --virial-tolerance 2e-4
-                --work-dir "${CMAKE_BINARY_DIR}/${_spin_type_test}")
-            set_tests_properties(${_spin_type_test} PROPERTIES
-              LABELS "oracle;frontend;lammps;plugin;spin3;spin_type;${backend};real_lammps"
-              ENVIRONMENT "OMP_NUM_THREADS=4")
-          endforeach()
-        endforeach()
-      endforeach()
-    endif()
-  endforeach()
 endif()

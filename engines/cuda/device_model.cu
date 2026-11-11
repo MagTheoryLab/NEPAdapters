@@ -5,6 +5,10 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <cstring>
+#include <cstdint>
+#include <type_traits>
+#include <iterator>
 
 namespace nep_adapters::cuda_backend {
 namespace {
@@ -125,12 +129,46 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.angular_coefficients_center_type_major_count =
         host.angular_coefficients_center_type_major.size();
     upload_float_array(
-        host.spin_projection_parameters,
-        spin_projection_parameters_device_,
-        summary_.spin_projection_parameters_bytes,
-        "upload spin projection parameters");
-    view_.spin_projection_parameters_count =
-        host.spin_projection_parameters.size();
+        host.spin_parameters,
+        spin_parameters_device_,
+        summary_.spin_parameters_bytes,
+        "upload density spin parameters");
+    view_.spin_parameters_count =
+        host.spin_parameters.size();
+    if (host.protocol.spin_mode) {
+      const auto layout = make_spin_density_layout(host.protocol);
+      // One aligned, model-owned allocation holds immutable contraction tables.
+      std::vector<unsigned char> bytes;
+      auto append = [&](const auto* values, std::size_t count) {
+        using T = std::remove_cv_t<std::remove_reference_t<decltype(*values)>>;
+        const std::size_t offset = (bytes.size() + alignof(T) - 1) / alignof(T) * alignof(T);
+        bytes.resize(offset + count * sizeof(T));
+        if (count) std::memcpy(bytes.data() + offset, values, count * sizeof(T));
+        return offset;
+      };
+      const auto p = append(layout.primitives.data(), layout.primitives.size());
+      const auto s = append(layout.sectors.data(), layout.sectors.size());
+      const auto t = append(layout.terms.data(), layout.terms.size());
+      const auto c = append(layout.centers.data(), layout.centers.size());
+      const auto h = append(spin_density::harmonics, std::size(spin_density::harmonics));
+      check_cuda(cudaMalloc(&spin_layout_device_, bytes.size()), "allocate density layout");
+      check_cuda(cudaMemcpy(spin_layout_device_, bytes.data(), bytes.size(), cudaMemcpyHostToDevice), "upload density layout");
+      const auto* base = static_cast<const unsigned char*>(spin_layout_device_);
+      view_.spin_layout = {layout.channels, layout.order, layout.lmax,
+        static_cast<int>(layout.primitives.size()), layout.spin_components, layout.components,
+        static_cast<int>(layout.sectors.size()), static_cast<int>(layout.terms.size()),
+        static_cast<int>(layout.centers.size()), layout.path_count, layout.local_count, layout.dimension,
+        reinterpret_cast<const spin_density::Primitive*>(base+p),
+        reinterpret_cast<const spin_density::Sector*>(base+s),
+        reinterpret_cast<const spin_density::Term*>(base+t),
+        reinterpret_cast<const spin_density::Center*>(base+c),
+        reinterpret_cast<const spin_density::Harmonic*>(base+h),
+        static_cast<int>(std::size(spin_density::harmonics))};
+      std::size_t radial_bytes = 0;
+      upload_float_array(host.spin_radial_coefficients, spin_radial_coefficients_device_, radial_bytes, "upload density radial coefficients");
+      view_.spin_radial_coefficients = spin_radial_coefficients_device_;
+      summary_.total_bytes += bytes.size() + radial_bytes;
+    }
     upload_float_array(
         host.q_scaler,
         q_scaler_device_,
@@ -175,13 +213,6 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.spin_dof_type_active_count =
         host.protocol.spin_dof_type_active.size();
     upload_int_array(
-        host.protocol.spin_env_type_active,
-        spin_env_type_active_device_,
-        summary_.spin_env_type_active_bytes,
-        "upload spin_env_type_active");
-    view_.spin_env_type_active_count =
-        host.protocol.spin_env_type_active.size();
-    upload_int_array(
         host.atomic_numbers,
         atomic_numbers_device_,
         summary_.atomic_numbers_bytes,
@@ -194,7 +225,7 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         descriptor_coefficients_type_pair_major_device_;
     view_.angular_coefficients_center_type_major =
         angular_coefficients_center_type_major_device_;
-    view_.spin_projection_parameters = spin_projection_parameters_device_;
+    view_.spin_parameters = spin_parameters_device_;
     view_.q_scaler = q_scaler_device_;
     view_.cutoff_radial_pair = cutoff_radial_pair_device_;
     view_.cutoff_angular_pair = cutoff_angular_pair_device_;
@@ -202,15 +233,14 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
     view_.zbl_parameters_pair = zbl_parameters_pair_device_;
     view_.spin_baseline = spin_baseline_device_;
     view_.spin_dof_type_active = spin_dof_type_active_device_;
-    view_.spin_env_type_active = spin_env_type_active_device_;
     view_.atomic_numbers = atomic_numbers_device_;
-    summary_.total_bytes =
+    summary_.total_bytes +=
         summary_.ann_type_major_bytes +
         summary_.ann_type_major_qscaled_bytes +
         summary_.descriptor_coefficients_bytes +
         summary_.descriptor_coefficients_type_pair_major_bytes +
         summary_.angular_coefficients_center_type_major_bytes +
-        summary_.spin_projection_parameters_bytes +
+        summary_.spin_parameters_bytes +
         summary_.q_scaler_bytes +
         summary_.cutoff_radial_pair_bytes +
         summary_.cutoff_angular_pair_bytes +
@@ -218,7 +248,6 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
         summary_.zbl_parameters_pair_bytes +
         summary_.spin_baseline_bytes +
         summary_.spin_dof_type_active_bytes +
-        summary_.spin_env_type_active_bytes +
         summary_.atomic_numbers_bytes;
   } catch (...) {
     release();
@@ -247,8 +276,12 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
       other.descriptor_coefficients_type_pair_major_device_;
   angular_coefficients_center_type_major_device_ =
       other.angular_coefficients_center_type_major_device_;
-  spin_projection_parameters_device_ =
-      other.spin_projection_parameters_device_;
+  spin_parameters_device_ =
+      other.spin_parameters_device_;
+  spin_layout_device_ = other.spin_layout_device_;
+  spin_radial_coefficients_device_ = other.spin_radial_coefficients_device_;
+  other.spin_layout_device_ = nullptr;
+  other.spin_radial_coefficients_device_ = nullptr;
   q_scaler_device_ = other.q_scaler_device_;
   cutoff_radial_pair_device_ = other.cutoff_radial_pair_device_;
   cutoff_angular_pair_device_ = other.cutoff_angular_pair_device_;
@@ -256,7 +289,6 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   zbl_parameters_pair_device_ = other.zbl_parameters_pair_device_;
   spin_baseline_device_ = other.spin_baseline_device_;
   spin_dof_type_active_device_ = other.spin_dof_type_active_device_;
-  spin_env_type_active_device_ = other.spin_env_type_active_device_;
   atomic_numbers_device_ = other.atomic_numbers_device_;
   view_ = other.view_;
   summary_ = other.summary_;
@@ -266,7 +298,7 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   other.descriptor_coefficients_device_ = nullptr;
   other.descriptor_coefficients_type_pair_major_device_ = nullptr;
   other.angular_coefficients_center_type_major_device_ = nullptr;
-  other.spin_projection_parameters_device_ = nullptr;
+  other.spin_parameters_device_ = nullptr;
   other.q_scaler_device_ = nullptr;
   other.cutoff_radial_pair_device_ = nullptr;
   other.cutoff_angular_pair_device_ = nullptr;
@@ -274,7 +306,6 @@ DeviceModel& DeviceModel::operator=(DeviceModel&& other) noexcept {
   other.zbl_parameters_pair_device_ = nullptr;
   other.spin_baseline_device_ = nullptr;
   other.spin_dof_type_active_device_ = nullptr;
-  other.spin_env_type_active_device_ = nullptr;
   other.atomic_numbers_device_ = nullptr;
   other.view_ = {};
   other.summary_ = {};
@@ -295,7 +326,10 @@ void DeviceModel::release() {
   free_device(descriptor_coefficients_device_);
   free_device(descriptor_coefficients_type_pair_major_device_);
   free_device(angular_coefficients_center_type_major_device_);
-  free_device(spin_projection_parameters_device_);
+  free_device(spin_parameters_device_);
+  if (spin_layout_device_) cudaFree(spin_layout_device_);
+  spin_layout_device_ = nullptr;
+  free_device(spin_radial_coefficients_device_);
   free_device(q_scaler_device_);
   free_device(cutoff_radial_pair_device_);
   free_device(cutoff_angular_pair_device_);
@@ -303,7 +337,6 @@ void DeviceModel::release() {
   free_device(zbl_parameters_pair_device_);
   free_device(spin_baseline_device_);
   free_device(spin_dof_type_active_device_);
-  free_device(spin_env_type_active_device_);
   free_device(atomic_numbers_device_);
   view_ = {};
   summary_ = {};

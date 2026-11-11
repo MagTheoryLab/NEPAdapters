@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "../common/spin_polynomial_layout.hpp"
+#include "../common/spin_density_layout.hpp"
 
 namespace nep_adapters::cuda_backend {
 
@@ -41,15 +41,10 @@ struct ModelProtocol {
   int spin_descriptor_dim = 0;
   int spin_compress = 0;
   int spin_basis_size = 0;
-  int spin_basis_size_angular = 0;
-  int spin_n_max_radial = 0;
-  int spin_n_max_angular = 0;
   int spin_l_max = 0;
-  int spin_chiral = 0;
   int spin_order = 0;
   int spin_soc = 0;
   int spin_scaler = 0;
-  int spin_projection_size = 0;
   int hidden_neurons = 0;
   int hidden_neurons2 = 0;
   int max_neighbors_radial = 0;
@@ -71,8 +66,7 @@ struct ModelProtocol {
   std::size_t ann_parameter_count = 0;
   std::size_t descriptor_parameter_count = 0;
   std::size_t ordinary_descriptor_parameter_count = 0;
-  std::size_t spin_descriptor_parameter_count = 0;
-  std::size_t spin_projection_parameter_count = 0;
+  std::size_t spin_parameter_count = 0;
   std::size_t model_parameter_count = 0;
   std::size_t q_scaler_count = 0;
   std::vector<std::string> elements;
@@ -83,105 +77,17 @@ struct ModelProtocol {
   std::vector<double> spin_baseline;
   std::vector<double> energy_reference;
   std::vector<int> spin_dof_type_active;
-  std::vector<int> spin_env_type_active;
   BodyChannelConfig body_channels;
 };
 
-struct SpinCoreLayout {
-  int channels = 0;
-  int basis_count = 0;
-  int l_max = 0;
-  int chi_channels = 0;
-  int rho0_offset = -1;
-  int l1_rdot_offset = -1;
-  int l1_cross_offset = -1;
-  int l1_stf_offset = -1;
-  int angular2_offset = -1;
-  int angular3_offset = -1;
-  int angular4_offset = -1;
-  int geom_offset = -1;
-  int rho0_dot_offset = -1;
-  int raw1_dot_offset = -1;
-  int chiral_offset = -1;
-  int descriptor_dim = 0;
-};
-
-// Canonical layout for TorchNEP's unified nep4_spin2 O/C descriptor.  Keeping
-// the grammar here gives the parser, workspace planner and CUDA kernels one
-// source of truth instead of separate hard-coded 37/46/51 channel tables.
-using SpinPolynomialLayout = nep_adapters::common::SpinPolynomialLayout;
-
-inline SpinPolynomialLayout make_spin_polynomial_layout(
-    const ModelProtocol& protocol) noexcept {
-  return nep_adapters::common::make_spin_polynomial_layout(
-      protocol.spin_compress, protocol.spin_l_max,
-      protocol.spin_order, protocol.spin_soc, protocol.spin_mode == 3);
+inline spin_density::Layout make_spin_density_layout(const ModelProtocol& p) {
+  return spin_density::Layout(p.spin_compress, p.spin_l_max, p.spin_order, p.spin_soc);
 }
-
-inline SpinCoreLayout make_spin_core_layout(
-    const ModelProtocol& protocol) noexcept {
-  SpinCoreLayout layout;
-  layout.channels = protocol.spin_compress;
-  layout.basis_count = protocol.spin_basis_size + 1;
-  layout.l_max = protocol.spin_l_max;
-  layout.chi_channels = layout.channels < 2 ? layout.channels : 2;
-
-  int offset = 2 + 4 * layout.channels;
-  layout.rho0_offset = offset;
-  offset += layout.channels;
-  if (layout.l_max >= 1) {
-    layout.l1_rdot_offset = offset;
-    offset += layout.channels;
-    layout.l1_cross_offset = offset;
-    offset += layout.channels;
-    layout.l1_stf_offset = offset;
-    offset += layout.channels;
-  }
-  if (layout.l_max >= 2) {
-    layout.angular2_offset = offset;
-    offset += layout.channels;
-  }
-  if (layout.l_max >= 3) {
-    layout.angular3_offset = offset;
-    offset += layout.channels;
-  }
-  if (layout.l_max >= 4) {
-    layout.angular4_offset = offset;
-    offset += layout.channels;
-  }
-  layout.geom_offset = offset;
-  offset += layout.channels;
-  layout.rho0_dot_offset = offset;
-  offset += layout.channels;
-  if (layout.l_max >= 1) {
-    layout.raw1_dot_offset = offset;
-    offset += layout.channels;
-  }
-  if (protocol.spin_chiral != 0) {
-    layout.chiral_offset = offset;
-    offset += layout.chi_channels + 2 * layout.channels;
-  }
-  layout.descriptor_dim = offset;
-  return layout;
-}
-
-inline bool supports_cuda_spin_shape(const ModelProtocol& protocol) noexcept {
-  if (protocol.spin_mode == 0) {
-    return true;
-  }
-  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
-    return protocol.spin_compress >= 1 && protocol.spin_compress <= 9 &&
-           protocol.spin_basis_size == 8 && protocol.spin_l_max >= 0 &&
-           protocol.spin_l_max <= 2 && protocol.spin_order >= 1 &&
-           protocol.spin_order <= 3 &&
-           (protocol.spin_soc == 0 || protocol.spin_soc == 1) &&
-           protocol.spin_projection_size ==
-               4 * protocol.spin_compress * protocol.spin_compress;
-  }
-  const int basis_count = protocol.spin_basis_size + 1;
-  return protocol.spin_compress >= 1 && protocol.spin_compress <= 4 &&
-         basis_count >= protocol.spin_compress && basis_count <= 9 &&
-         protocol.spin_l_max >= 0 && protocol.spin_l_max <= 4;
+inline bool supports_cuda_spin_shape(const ModelProtocol& p) noexcept {
+  return !p.spin_mode || (p.spin_mode == 1 && p.spin_compress >= 1 && p.spin_compress <= 9 &&
+    p.spin_l_max >= 0 && p.spin_l_max <= 4 && p.spin_order >= 1 && p.spin_order <= 4 &&
+    p.spin_basis_size == p.basis_size_angular && p.spin_basis_size <= 12 &&
+    (p.spin_soc == 0 || p.spin_soc == 1));
 }
 
 struct ParsedModelFile {

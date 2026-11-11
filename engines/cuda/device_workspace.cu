@@ -116,34 +116,8 @@ void set_view_pointer(
     view.f12z = static_cast<float*>(device);
   } else if (name == "per_atom_virial_float_soa9") {
     view.per_atom_virial_float_soa9 = static_cast<float*>(device);
-  } else if (name == "spin_density_rho0") {
-    view.spin_density_rho0 = static_cast<float*>(device);
-  } else if (name == "spin_density_raw1") {
-    view.spin_density_raw1 = static_cast<float*>(device);
-  } else if (name == "spin_density_angular2") {
-    view.spin_density_angular2 = static_cast<float*>(device);
-  } else if (name == "spin_density_angular3") {
-    view.spin_density_angular3 = static_cast<float*>(device);
-  } else if (name == "spin_density_angular4") {
-    view.spin_density_angular4 = static_cast<float*>(device);
-  } else if (name == "spin_density_geom") {
-    view.spin_density_geom = static_cast<float*>(device);
-  } else if (name == "spin_density_rho0_dot") {
-    view.spin_density_rho0_dot = static_cast<float*>(device);
-  } else if (name == "spin_density_raw1_dot") {
-    view.spin_density_raw1_dot = static_cast<float*>(device);
-  } else if (name == "spin_chiral_polar") {
-    view.spin_chiral_polar = static_cast<float*>(device);
-  } else if (name == "spin_chiral_octupoles_raw") {
-    view.spin_chiral_octupoles_raw = static_cast<float*>(device);
-  } else if (name == "spin_chiral_hexadecapoles_raw") {
-    view.spin_chiral_hexadecapoles_raw = static_cast<float*>(device);
-  } else if (name == "spin_chiral_chirals") {
-    view.spin_chiral_chirals = static_cast<float*>(device);
-  } else if (name == "spin2_moments") {
-    view.spin2_moments = static_cast<float*>(device);
-  } else if (name == "spin2_pulls") {
-    view.spin2_pulls = static_cast<float*>(device);
+  } else if (name == "spin_moments") {
+    view.spin_moments = static_cast<float*>(device);
   }
 }
 

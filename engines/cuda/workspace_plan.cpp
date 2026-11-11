@@ -6,8 +6,6 @@ namespace nep_adapters::cuda_backend {
 namespace {
 
 constexpr std::size_t kLammpsReductionThreads = 256;
-constexpr std::size_t kSpinChiralOReducedCount = 7;
-constexpr std::size_t kSpinChiralHReducedCount = 9;
 
 std::size_t scalar_size(ScalarType type) {
   switch (type) {
@@ -41,98 +39,12 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   if (protocol.spin_mode == 0) {
     return;
   }
-  if (!supports_cuda_spin_shape(protocol)) {
-    throw std::runtime_error(
-        "CUDA spin workspace requires 1 <= spin_compress <= 4, "
-        "spin_compress <= spin_basis_size + 1 <= 9, and spin_l_max <= 4");
-  }
+  if (!supports_cuda_spin_shape(protocol)) throw std::runtime_error("unsupported density spin shape");
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
-  if (protocol.spin_mode == 2 || protocol.spin_mode == 3) {
-    const SpinPolynomialLayout layout = make_spin_polynomial_layout(protocol);
-    add_array(
-        plan,
-        "spin2_moments",
-        ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(layout.moment_count));
-    add_array(
-        plan,
-        "spin2_pulls",
-        ScalarType::float32,
-        plan.atom_capacity * static_cast<std::size_t>(layout.moment_count));
-    return;
-  }
-  const std::size_t spin_compress =
-      static_cast<std::size_t>(protocol.spin_compress);
-  add_array(
-      plan,
-      "spin_density_rho0",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 3);
-  add_array(
-      plan,
-      "spin_density_raw1",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 9);
-  if (protocol.spin_l_max >= 2) {
-    add_array(
-        plan,
-        "spin_density_angular2",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * 15);
-  }
-  if (protocol.spin_l_max >= 3) {
-    add_array(
-        plan,
-        "spin_density_angular3",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * 21);
-  }
-  if (protocol.spin_l_max >= 4) {
-    add_array(
-        plan,
-        "spin_density_angular4",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * 27);
-  }
-  add_array(
-      plan,
-      "spin_density_geom",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 6);
-  add_array(
-      plan,
-      "spin_density_rho0_dot",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 3);
-  add_array(
-      plan,
-      "spin_density_raw1_dot",
-      ScalarType::float32,
-      plan.atom_capacity * spin_compress * 9);
-  if (protocol.spin_chiral != 0) {
-    const std::size_t chi_c = spin_compress < 2 ? spin_compress : 2;
-    add_array(
-        plan,
-        "spin_chiral_polar",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * 3);
-    add_array(
-        plan,
-        "spin_chiral_octupoles_raw",
-        ScalarType::float32,
-        plan.atom_capacity * spin_compress * kSpinChiralOReducedCount);
-    add_array(
-        plan,
-        "spin_chiral_hexadecapoles_raw",
-        ScalarType::float32,
-        plan.atom_capacity * chi_c * kSpinChiralHReducedCount);
-    add_array(
-        plan,
-        "spin_chiral_chirals",
-        ScalarType::float32,
-        plan.atom_capacity * chi_c);
-  }
+  const auto layout = make_spin_density_layout(protocol);
+  add_array(plan, "spin_moments", ScalarType::float32,
+    plan.atom_capacity * static_cast<std::size_t>(layout.channels * layout.components));
 }
 
 void add_slot_major_neighbor_arrays(

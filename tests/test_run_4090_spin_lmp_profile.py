@@ -189,6 +189,7 @@ class SpinLmpProfileTest(unittest.TestCase):
         "CMakeLists.txt",
         "cmake",
         "include",
+        "engines/common",
         "engines/cpu_common",
         "engines/cpu",
         "engines/cuda",
@@ -446,14 +447,13 @@ class SpinLmpProfileTest(unittest.TestCase):
       result = profile.run_ncu(profile={}, plan=plan, gpu="0", args=args,
                                run_dir="/remote/runs/run")
 
-    self.assertEqual(set(result), {"primitive", "ann", "chiral", "density"})
+    self.assertEqual(set(result), {"primitive", "ann", "density"})
     self.assertEqual(
         [call.args[6] for call in run_one.call_args_list],
         [
-            "build_spin_descriptor_core_streaming",
+            "spin_density::descriptors",
             "evaluate_ann_energy_scheduled_subwarp",
-            "accumulate_spin_chiral_forces",
-            "accumulate_spin_density_forces_tile_f32",
+            "spin_density::forces",
         ])
 
   def test_detailed_ncu_export_failures_do_not_become_nonempty_artifacts(self):

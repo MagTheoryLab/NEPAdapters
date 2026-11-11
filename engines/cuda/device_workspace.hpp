@@ -117,20 +117,7 @@ struct DeviceWorkspaceView {
   float* f12y = nullptr;
   float* f12z = nullptr;
   float* per_atom_virial_float_soa9 = nullptr;
-  float* spin_density_rho0 = nullptr;
-  float* spin_density_raw1 = nullptr;
-  float* spin_density_angular2 = nullptr;
-  float* spin_density_angular3 = nullptr;
-  float* spin_density_angular4 = nullptr;
-  float* spin_density_geom = nullptr;
-  float* spin_density_rho0_dot = nullptr;
-  float* spin_density_raw1_dot = nullptr;
-  float* spin_chiral_polar = nullptr;
-  float* spin_chiral_octupoles_raw = nullptr;
-  float* spin_chiral_hexadecapoles_raw = nullptr;
-  float* spin_chiral_chirals = nullptr;
-  float* spin2_moments = nullptr;
-  float* spin2_pulls = nullptr;
+  float* spin_moments = nullptr;
 };
 
 class DeviceWorkspace {

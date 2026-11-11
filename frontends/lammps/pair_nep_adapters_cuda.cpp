@@ -386,6 +386,27 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
   const int nlocal = atom->nlocal;
   const int nall = atom->nlocal + atom->nghost;
   if (nlocal <= 0) {
+    // Empty ranks still relay ghost contributions and zero-length messages.
+    // Skipping this exchange leaves messages for later LAMMPS communication.
+    ensure_kokkos_tally_buffers();
+    auto* atom_kk = lmp->atomKK;
+    atom_kk->sync(execution_space, datamask_modify);
+    auto f = atom_kk->k_f.template view<LMPDeviceType>();
+    auto fm = atom_kk->k_fm.template view<LMPDeviceType>();
+    const bool clear_mforce = spin_model_;
+    Kokkos::parallel_for(
+        "nepa:clear_empty_rank_forces",
+        Kokkos::RangePolicy<LMPDeviceType>(0, nall),
+        KOKKOS_LAMBDA(const int i) {
+          for (int component = 0; component < 3; ++component) {
+            f(i, component) = 0.0;
+            if (clear_mforce) fm(i, component) = 0.0;
+          }
+        });
+    if (vflag_atom || cvflag_atom) Kokkos::deep_copy(d_lammps_raw9_, 0.0);
+    atom_kk->modified(execution_space, datamask_modify);
+    reverse_kokkos_contributions();
+    pack_kokkos_per_atom_tallies();
     return;
   }
   if (list == nullptr) {
@@ -525,35 +546,7 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
 
   atom_kk->modified(execution_space, datamask_modify);
   profiler.split(mark_ms);
-  // The n2 virial decomposition assigns some terms to ghost atoms.  In the
-  // normal Kokkos newton-off configuration LAMMPS does not reverse vatom, so
-  // carry raw9 with the existing device force/mforce reverse communication.
-  reverse_per_atom_virial_ =
-      !force->newton && (vflag_atom || cvflag_atom);
-  if (nall > nlocal) {
-    const bool reverse_force_comm_on_device =
-        lmp->kokkos != nullptr && lmp->kokkos->reverse_comm_classic == 0 &&
-        lmp->kokkos->reverse_comm_on_host == 0 &&
-        lmp->kokkos->reverse_pair_comm_classic == 0;
-    if (reverse_force_comm_on_device) {
-      const int reverse_width =
-          comm_reverse_off + (reverse_per_atom_virial_ ? 9 : 0);
-      comm->reverse_comm(this, reverse_width);
-    } else {
-      if (reverse_per_atom_virial_) {
-        error->all(
-            FLERR,
-            (label_ +
-             ": per-atom virial with Kokkos newton off requires comm device")
-                .c_str());
-      }
-      comm->reverse_comm();
-      atom_kk->sync(execution_space, datamask_modify);
-      Kokkos::fence();
-    }
-    atom_kk->modified(execution_space, datamask_modify);
-  }
-  reverse_per_atom_virial_ = false;
+  reverse_kokkos_contributions();
   profiler.split(reverse_ms);
 
   pack_kokkos_per_atom_tallies();
@@ -577,6 +570,36 @@ void PairNEPAdaptersCUDA::compute(int eflag_in, int vflag_in) {
 }
 
 #ifdef LMP_KOKKOS
+void PairNEPAdaptersCUDA::reverse_kokkos_contributions() {
+  // Every rank must participate, including ranks with no owned or ghost atoms.
+  // Newton-off per-atom virial travels with the force/mforce contribution.
+  reverse_per_atom_virial_ =
+      !force->newton && (vflag_atom || cvflag_atom);
+  auto* atom_kk = lmp->atomKK;
+  const bool reverse_force_comm_on_device =
+      lmp->kokkos != nullptr && lmp->kokkos->reverse_comm_classic == 0 &&
+      lmp->kokkos->reverse_comm_on_host == 0 &&
+      lmp->kokkos->reverse_pair_comm_classic == 0;
+  if (reverse_force_comm_on_device) {
+    const int reverse_width =
+        comm_reverse_off + (reverse_per_atom_virial_ ? 9 : 0);
+    comm->reverse_comm(this, reverse_width);
+  } else {
+    if (reverse_per_atom_virial_) {
+      error->all(
+          FLERR,
+          (label_ +
+           ": per-atom virial with Kokkos newton off requires comm device")
+              .c_str());
+    }
+    comm->reverse_comm();
+    atom_kk->sync(execution_space, datamask_modify);
+    Kokkos::fence();
+  }
+  atom_kk->modified(execution_space, datamask_modify);
+  reverse_per_atom_virial_ = false;
+}
+
 int PairNEPAdaptersCUDA::pack_reverse_comm_kokkos(
     int n,
     int first,
