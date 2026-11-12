@@ -11,7 +11,7 @@ void check_launch() {
   const auto status = cudaGetLastError();
   if (status != cudaSuccess) throw std::runtime_error(std::string("density spin kernel: ") + cudaGetErrorString(status));
 }
-template<bool FactorCenter = false, class Layout>
+template<bool FactorCenter = false, bool CenterVirial = false, class Layout>
 void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBox& box,
             const DeviceModelView& m, const DeviceWorkspaceView& w, bool backward,
             VirialTarget target = VirialTarget::none, bool transfer = false) {
@@ -30,7 +30,7 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
   } else {
     const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
       target == VirialTarget::neighbor_atom ? 2 : 3;
-    spin_density::forces<<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
+    spin_density::forces<Layout, CenterVirial, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
       p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
       w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
       w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
@@ -40,6 +40,7 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
   }
   check_launch();
 }
+template<bool CenterVirial = false>
 void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
               const DeviceModel& model, DeviceWorkspace& workspace, bool backward,
               VirialTarget target = VirialTarget::none, bool transfer = false) {
@@ -51,12 +52,12 @@ void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
   if (p.spin_compress == 3 && p.spin_l_max == 2 && p.spin_order == 2) {
     // SOC compresses the factored moments into registers. The larger non-SOC
     // tensor stays faster with direct accumulation in the neighbor loop.
-    if (p.spin_soc) launch<true>(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
-    else launch(spin_density::MDLayoutNoSOC<4>{}, p, count, box, m, w, backward, target, transfer);
+    if (p.spin_soc) launch<true, CenterVirial>(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
+    else launch<false, CenterVirial>(spin_density::MDLayoutNoSOC<4>{}, p, count, box, m, w, backward, target, transfer);
   } else if (m.spin_layout.components <= 100) {
-    launch(spin_density::RuntimeLayout<100, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
   } else {
-    launch(spin_density::RuntimeLayout<625, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+    launch<false, CenterVirial>(spin_density::RuntimeLayout<625, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
   }
 }
 }  // namespace
@@ -78,7 +79,11 @@ void accumulate_spin_forces_on_device(const ModelProtocol& p, int count,
   }
   cudaEvent_t start = nullptr, end = nullptr;
   if (timings) { cudaEventCreate(&start); cudaEventCreate(&end); cudaEventRecord(start); }
-  dispatch(p, count, box, m, w, true, target, transfer);
+  if (target == VirialTarget::center_atom ||
+      target == VirialTarget::center_and_neighbor_float_sink)
+    dispatch<true>(p, count, box, m, w, true, target, transfer);
+  else
+    dispatch(p, count, box, m, w, true, target, transfer);
   if (timings) {
     cudaEventRecord(end); cudaEventSynchronize(end);
     cudaEventElapsedTime(&timings->density_ms, start, end);

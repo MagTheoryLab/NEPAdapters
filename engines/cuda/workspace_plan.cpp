@@ -43,8 +43,13 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
   const auto layout = make_spin_density_layout(protocol);
+  // The compiled SOC forward pass also retains its geometric moments for
+  // the center-spin pullback. Other layouts store only descriptor moments.
+  const int geometric_components = protocol.spin_soc && protocol.spin_compress == 3 &&
+    protocol.spin_l_max == 2 && protocol.spin_order == 2 ? 9 : 0;
   add_array(plan, "spin_moments", ScalarType::float32,
-    plan.atom_capacity * static_cast<std::size_t>(layout.channels * layout.components));
+    plan.atom_capacity * static_cast<std::size_t>(
+      layout.channels * (layout.components + geometric_components)));
 }
 
 void add_slot_major_neighbor_arrays(

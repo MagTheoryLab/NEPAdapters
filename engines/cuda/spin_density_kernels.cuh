@@ -277,6 +277,11 @@ static __global__ void descriptors(
   }
   if (lane != 0) return;
   if constexpr (FactorCenter) {
+    // Keep the reduced geometric moments after the descriptor moments. The
+    // reverse pass can contract center-spin derivatives once per center.
+    #pragma unroll
+    for (int g = 0; g < Layout::harmonic_capacity; ++g)
+      moments[(v.channels*v.components+c*Layout::harmonic_capacity+g)*n+i] = geometric[g];
     #pragma unroll
     for (int t = 0; t < v.term_count; ++t) {
       const Term term = v.term(t);
@@ -309,7 +314,7 @@ static __global__ void descriptors(
   }
 }
 
-template<class Layout>
+template<class Layout, bool CenterVirial = false, bool FactorCenter = false>
 static __global__ void forces(
   Layout v, int atom_count, int n, int structural_dim, int types, int na, int basis, Geometry box,
   const int* type, const int* active, const double* positions, const double* spins,
@@ -326,6 +331,7 @@ static __global__ void forces(
   if (i >= atom_count) return;
   float s[3], pull[Layout::component_capacity] = {}, center_pull[3] = {};
   double center_force[3] = {};
+  double center_virial[CenterVirial ? 9 : 1] = {};
   Value phi_i[Layout::spin_capacity];
   read_spin(n, i, type, active, spins, s);
   primitives_at(v, s, phi_i);
@@ -363,7 +369,8 @@ static __global__ void forces(
   constexpr int harmonics = Layout::harmonic_capacity;
   constexpr int spin_components = Layout::spin_capacity;
   constexpr int groups_per_block = 128 / Layout::tile;
-  constexpr int coefficients = 4 * harmonics + harmonics * (spin_components - 1);
+  constexpr int center_planes = FactorCenter ? 1 : 4;
+  constexpr int coefficients = center_planes * harmonics + harmonics * (spin_components - 1);
   constexpr int cache_size = Layout::tile > 1 ? coefficients * groups_per_block : 1;
   __shared__ volatile float edge_pull[cache_size];
   const int group = threadIdx.x / Layout::tile;
@@ -379,19 +386,54 @@ static __global__ void forces(
           weights[term.path * v.channels + c] * term.coefficient;
         if (term.neighbor) {
           // The degree-zero primitive has only a center path.
-          const int k = 4 * harmonics +
+          const int k = center_planes * harmonics +
             term.geometry * (spin_components - 1) + term.spin - 1;
           edge_pull[k * groups_per_block + group] += adjoint;
         } else {
           edge_pull[term.geometry * groups_per_block + group] +=
             adjoint * phi_i[term.spin].value;
           #pragma unroll
-          for (int d = 0; d < 3; ++d)
-            edge_pull[((d + 1) * harmonics + term.geometry) *
-                      groups_per_block + group] +=
-              adjoint * phi_i[term.spin].derivative[d];
+          for (int d = 0; d < 3; ++d) {
+            if constexpr (FactorCenter) {
+              const float geometric = moments[
+                (v.channels*v.components+c*harmonics+term.geometry)*n+i];
+              center_pull[d] += adjoint * phi_i[term.spin].derivative[d] * geometric;
+            } else {
+              edge_pull[((d + 1) * harmonics + term.geometry) *
+                        groups_per_block + group] +=
+                adjoint * phi_i[term.spin].derivative[d];
+            }
+          }
         }
       }
+    }
+    __syncwarp(mask);
+    // The compiled spin primitives span the Cartesian polynomials of degree
+    // one and two. Contract their adjoints once, so each edge evaluates the
+    // polynomial and its gradient directly instead of rebuilding primitives.
+    static_assert(spin_components == 10 && harmonics == 9);
+    for (int g = lane; g < harmonics; g += Layout::tile) {
+      const int base = center_planes * harmonics + g * (spin_components - 1);
+      float a[9];
+      #pragma unroll
+      for (int k = 0; k < 9; ++k)
+        a[k] = edge_pull[(base+k) * groups_per_block + group];
+      const float linear = v.harmonic(3).value;
+      const float diagonal = v.harmonic(4).value;
+      const float difference = v.harmonic(5).value;
+      const float cross = v.harmonic(6).value;
+      // a indexes phi[1..9]: x,y,z,s2,xz,xy,Qyy,yz,Qzz-xx.
+      // The rank-two primitive starts at phi[5], harmonic component four.
+      // Store coefficients of x,y,z,xx,yy,zz,xy,xz,yz respectively.
+      const float cartesian[9] = {
+        linear*a[0], linear*a[1], linear*a[2],
+        a[3]+diagonal*a[6]-difference*a[8],
+        a[3]-2*diagonal*a[6],
+        a[3]+diagonal*a[6]+difference*a[8],
+        cross*a[5], cross*a[4], cross*a[7]};
+      #pragma unroll
+      for (int k = 0; k < 9; ++k)
+        edge_pull[(base+k) * groups_per_block + group] = cartesian[k];
     }
     __syncwarp(mask);
   }
@@ -405,7 +447,7 @@ static __global__ void forces(
     Value y[Layout::harmonic_capacity], phi_j[Layout::spin_capacity];
     spherical(v, u, y);
     read_spin(n, j, type, active, spins, s);
-    primitives_at(v, s, phi_j);
+    if constexpr (Layout::tile == 1) primitives_at(v, s, phi_j);
     float weight, derivative;
     radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance, angular, parameters, weight, derivative);
     float radial_pull = 0, angular_pull[3] = {}, neighbor_pull[3] = {};
@@ -414,22 +456,25 @@ static __global__ void forces(
       for (int g = 0; g < harmonics; ++g) {
         float value = edge_pull[g * groups_per_block + group];
         float spin_gradient[3] = {};
+        const int base = center_planes * harmonics + g * (spin_components - 1);
+        float a[9];
         #pragma unroll
-        for (int s = 1; s < spin_components; ++s) {
-          const int k = 4 * harmonics + g * (spin_components - 1) + s - 1;
-          const float adjoint = edge_pull[k * groups_per_block + group];
-          value += adjoint * phi_j[s].value;
-          #pragma unroll
-          for (int d = 0; d < 3; ++d)
-            spin_gradient[d] += adjoint * phi_j[s].derivative[d];
-        }
+        for (int k = 0; k < 9; ++k)
+          a[k] = edge_pull[(base+k) * groups_per_block + group];
+        value += s[0]*(a[0]+a[3]*s[0]+a[6]*s[1]+a[7]*s[2]) +
+                 s[1]*(a[1]+a[4]*s[1]+a[8]*s[2]) +
+                 s[2]*(a[2]+a[5]*s[2]);
+        spin_gradient[0] = a[0]+2*a[3]*s[0]+a[6]*s[1]+a[7]*s[2];
+        spin_gradient[1] = a[1]+2*a[4]*s[1]+a[6]*s[0]+a[8]*s[2];
+        spin_gradient[2] = a[2]+2*a[5]*s[2]+a[7]*s[0]+a[8]*s[1];
         radial_pull += value * y[g].value;
         #pragma unroll
         for (int d = 0; d < 3; ++d) {
           angular_pull[d] += weight * value * y[g].derivative[d];
           neighbor_pull[d] += weight * y[g].value * spin_gradient[d];
-          center_pull[d] += weight * y[g].value *
-            edge_pull[((d + 1) * harmonics + g) * groups_per_block + group];
+          if constexpr (!FactorCenter)
+            center_pull[d] += weight * y[g].value *
+              edge_pull[((d + 1) * harmonics + g) * groups_per_block + group];
         }
       }
     } else {
@@ -456,12 +501,14 @@ static __global__ void forces(
       atomicAdd(force+d*n+j, -static_cast<double>(grad[d]));
       if (active[type[j]]) atomicAdd(mforce+d*n+j, -static_cast<double>(neighbor_pull[d]));
     }
+    #pragma unroll
     for (int a = 0; a < 3; ++a)
+      #pragma unroll
       for (int b = 0; b < 3; ++b) {
         const int raw_to_internal[9] = {0,3,4,6,1,5,7,8,2};
         const int k = raw_to_internal[3*a+b];
         const double value = -static_cast<double>(r[a]) * grad[b];
-        if (virial_mode == 1 || virial_mode == 3) atomicAdd(virial+k*n+i, value);
+        if constexpr (CenterVirial) center_virial[k] += value;
         if (virial_mode == 2) atomicAdd(virial+k*n+j, value);
         if (virial_mode == 3) atomicAdd(virial_float+k*n+j, static_cast<float>(value));
         if (transfer && active[type[j]])
@@ -474,6 +521,17 @@ static __global__ void forces(
     for (int offset = Layout::tile/2; offset > 0; offset /= 2) {
       center_pull[d] += __shfl_down_sync(mask, center_pull[d], offset, Layout::tile);
       center_force[d] += __shfl_down_sync(mask, center_force[d], offset, Layout::tile);
+    }
+  }
+  // Keep the center tensor in FP64, including its antisymmetric components.
+  // Only center-output instantiations carry these registers through the loop.
+  if constexpr (CenterVirial) {
+    #pragma unroll
+    for (int k = 0; k < 9; ++k) {
+      #pragma unroll
+      for (int offset = Layout::tile/2; offset > 0; offset /= 2)
+        center_virial[k] += __shfl_down_sync(mask, center_virial[k], offset, Layout::tile);
+      if (lane == 0) atomicAdd(virial+k*n+i, center_virial[k]);
     }
   }
   if (lane != 0) return;
