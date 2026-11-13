@@ -8,8 +8,8 @@ import unittest
 
 import numpy as np
 from ase import Atoms
-from nep_adapters import NEPCalculator, inspect_model, load_model
-from nep_adapters.ase import NepAseCalculator
+from nep_adapters import NEPCalculator, InvalidInputError, inspect_model, load_model
+from nep_adapters.ase import NepAseCalculator, attach_single_point
 
 ROOT = Path(__file__).resolve().parents[3] / 'tests/fixtures/spin_density'
 BACKEND = os.environ.get('NEP_BLOCK_TEST_BACKEND', 'cpu')
@@ -91,6 +91,56 @@ class DensitySpinTest(unittest.TestCase):
             np.testing.assert_allclose(after[0] - before[0], shifts[args[0]], atol=1e-12, rtol=0)
             for x, y in zip(before[1:], after[1:]): np.testing.assert_allclose(x, y, atol=2e-6)
             np.testing.assert_allclose(a.descriptors_spin(*args), b.descriptors_spin(*args), atol=2e-6)
+
+    def test_ase_spin_changes_invalidate_cached_results(self):
+        c = self.case
+        for key in ('spin', 'spins', 'initial_magmoms'):
+            with self.subTest(source=key):
+                atoms = Atoms(c['types'], positions=c['positions'],
+                              cell=np.array(c['cell']).reshape(3, 3), pbc=True)
+                atoms.set_array(key, np.array(c['spins']))
+                atoms.calc = NepAseCalculator(self.path, backend=BACKEND)
+                self.addCleanup(atoms.calc._calc.close)
+                before = atoms.get_potential_energy()
+                self.assertEqual(atoms.calc.check_state(atoms), [])
+                atoms.arrays[key][0] *= .2
+                self.assertTrue(atoms.calc.check_state(atoms))
+                with NEPCalculator(self.path, backend=BACKEND) as core:
+                    expected = core.predict_spin_structures([atoms])
+                self.assertGreater(abs(before - expected.energy[0]), 1e-3)
+                self.assertAlmostEqual(atoms.get_potential_energy(), expected.energy[0], places=5)
+                np.testing.assert_allclose(atoms.get_forces(), expected.forces, atol=2e-5)
+                np.testing.assert_allclose(atoms.calc.get_property('mforces', atoms),
+                                           expected.mforces, atol=2e-5)
+                self.assertEqual(atoms.calc.check_state(atoms), [])
+
+    def test_spin_single_point_rejects_changed_spins(self):
+        from ase.calculators.calculator import PropertyNotImplementedError
+        c = self.case
+        atoms = Atoms(c['types'], positions=c['positions'],
+                      cell=np.array(c['cell']).reshape(3, 3), pbc=True)
+        atoms.set_array('spin', np.array(c['spins']))
+        with NEPCalculator(self.path, backend=BACKEND) as core:
+            attach_single_point(atoms, core)
+        self.assertTrue(np.isfinite(atoms.get_potential_energy()))
+        atoms.arrays['spin'][0] *= .2
+        with self.assertRaises(PropertyNotImplementedError):
+            atoms.get_potential_energy()
+
+    def test_invalid_arrays_rejected_before_compute(self):
+        args = list(arguments(self.case))
+        with load_model(BACKEND, str(self.path)) as model:
+            for index, column in ((1, 1), (2, 0), (3, 0)):
+                changed = [a.copy() for a in args]
+                changed[index][0, column] = np.nan
+                with self.subTest(array=index), self.assertRaises(InvalidInputError):
+                    model.calculate_spin(*changed)
+                with self.assertRaises(InvalidInputError):
+                    model.descriptors_spin(*changed)
+            changed = [a.copy() for a in args]
+            changed[1][:] = 0
+            with self.assertRaises(InvalidInputError):
+                model.calculate_spin(*changed)
 
     def test_removed_models_and_invalid_density_shapes(self):
         text = self.path.read_text()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nep_adapters/detail/model_file.hpp"
+#include "nep_adapters/detail/structure_batch.hpp"
 #include "nep_adapters/engine.hpp"
 
 #include <algorithm>
@@ -144,7 +145,8 @@ class CpuModel final : public Model {
       const NepaStructureBatch& batch,
       NepaFindForceResult& result,
       NepaFindDescriptorResult* descriptor_result = nullptr) {
-    if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
+    if (!detail::valid_structure_batch(batch, nep_.paramb.num_types) ||
+        result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
@@ -442,7 +444,8 @@ class CpuModel final : public Model {
   NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
       NepaFindDescriptorResult& result) override {
-    if (!valid_batch(batch) || result.descriptors == nullptr) {
+    if (!detail::valid_structure_batch(batch, nep_.paramb.num_types) ||
+        result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     if (is_cancelled()) {
@@ -616,7 +619,8 @@ class CpuModel final : public Model {
     if (model_kind() != NEPA_MODEL_KIND_DIPOLE) {
       return NEPA_STATUS_UNSUPPORTED;
     }
-    if (!valid_batch(batch) || result.dipoles_row_major3 == nullptr) {
+    if (!detail::valid_structure_batch(batch, nep_.paramb.num_types) ||
+        result.dipoles_row_major3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     try {
@@ -655,7 +659,8 @@ class CpuModel final : public Model {
     if (model_kind() != NEPA_MODEL_KIND_POLARIZABILITY) {
       return NEPA_STATUS_UNSUPPORTED;
     }
-    if (!valid_batch(batch) || result.polarizabilities_row_major6 == nullptr) {
+    if (!detail::valid_structure_batch(batch, nep_.paramb.num_types) ||
+        result.polarizabilities_row_major6 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     try {
@@ -697,7 +702,8 @@ class CpuModel final : public Model {
     if (model_kind() != NEPA_MODEL_KIND_ORDINARY) {
       return NEPA_STATUS_UNSUPPORTED;
     }
-    if (!valid_batch(batch) || parameters.functional == nullptr ||
+    if (!detail::valid_structure_batch(batch, nep_.paramb.num_types) ||
+        parameters.functional == nullptr ||
         parameters.functional[0] == '\0' || parameters.cutoff <= 0.0 ||
         parameters.cutoff_cn <= 0.0 || result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
@@ -926,48 +932,6 @@ class CpuModel final : public Model {
         9,
         box.data());
     return NEPA_STATUS_OK;
-  }
-
-  bool valid_batch(const NepaStructureBatch& batch) const {
-    if (batch.num_structures <= 0 || batch.total_atoms <= 0 ||
-        batch.atom_counts == nullptr || batch.atom_offsets == nullptr ||
-        batch.types == nullptr || batch.positions_aos3 == nullptr ||
-        batch.boxes_row_major9 == nullptr || batch.pbc_flags3 == nullptr ||
-        nep_.paramb.num_types <= 0) {
-      return false;
-    }
-    std::vector<unsigned char> covered(
-        static_cast<std::size_t>(batch.total_atoms), 0);
-    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-      const std::int32_t atom_count = batch.atom_counts[structure];
-      const std::int32_t atom_offset = batch.atom_offsets[structure];
-      if (atom_count <= 0 || atom_offset < 0 ||
-          atom_offset > batch.total_atoms ||
-          atom_count > batch.total_atoms - atom_offset) {
-        return false;
-      }
-      for (std::int32_t axis = 0; axis < 3; ++axis) {
-        if (batch.pbc_flags3[3 * structure + axis] != 1) {
-          return false;
-        }
-      }
-      for (std::int32_t local_atom = 0; local_atom < atom_count; ++local_atom) {
-        const std::int32_t atom = atom_offset + local_atom;
-        if (covered[static_cast<std::size_t>(atom)] != 0) {
-          return false;
-        }
-        covered[static_cast<std::size_t>(atom)] = 1;
-      }
-    }
-    for (std::int32_t atom = 0; atom < batch.total_atoms; ++atom) {
-      if (covered[static_cast<std::size_t>(atom)] == 0 ||
-          batch.types[atom] < 0 ||
-          static_cast<std::size_t>(batch.types[atom]) >=
-              nep_.paramb.num_types) {
-        return false;
-      }
-    }
-    return true;
   }
 
   CpuBatchScratch serial_batch_scratch_;

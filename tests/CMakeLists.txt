@@ -5,6 +5,24 @@ add_test(NAME nep_adapters_registry_test COMMAND nep_adapters_registry_test)
 set_tests_properties(nep_adapters_registry_test PROPERTIES
   LABELS "contract;core")
 
+foreach(backend IN ITEMS cpu cuda)
+  if(TARGET NEPAdapters::${backend})
+    add_executable(nep_adapters_${backend}_batch_input_validation_test
+      test_batch_input_validation.cpp)
+    target_link_libraries(nep_adapters_${backend}_batch_input_validation_test
+      PRIVATE NEPAdapters::${backend})
+    if(backend STREQUAL "cuda")
+      target_compile_definitions(nep_adapters_${backend}_batch_input_validation_test
+        PRIVATE NEP_ADAPTERS_TEST_CUDA_ENGINE=1)
+    endif()
+    add_test(NAME nep_adapters_${backend}_batch_input_validation_test
+      COMMAND nep_adapters_${backend}_batch_input_validation_test
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep")
+    set_tests_properties(nep_adapters_${backend}_batch_input_validation_test PROPERTIES
+      LABELS "contract;validation;${backend};spin" TIMEOUT 30)
+  endif()
+endforeach()
+
 if(TARGET NEPAdapters::cpu)
   # CUDA's file parser/host packing is plain C++ and can be checked without a GPU.
   add_executable(nep_adapters_block_format_test

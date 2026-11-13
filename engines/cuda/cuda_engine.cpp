@@ -1,5 +1,6 @@
 #include "nep_adapters/engine.hpp"
 #include "nep_adapters/engines/cuda.hpp"
+#include "nep_adapters/detail/structure_batch.hpp"
 
 #include "device_operations.hpp"
 #include "device_model.hpp"
@@ -26,13 +27,6 @@
 #include <cuda_runtime.h>
 
 namespace {
-
-bool valid_batch(const NepaStructureBatch& batch) {
-  return batch.num_structures > 0 && batch.total_atoms > 0 &&
-         batch.atom_counts != nullptr && batch.atom_offsets != nullptr &&
-         batch.types != nullptr && batch.positions_aos3 != nullptr &&
-         batch.boxes_row_major9 != nullptr;
-}
 
 std::size_t max_structure_atom_count(const NepaStructureBatch& batch) {
   std::size_t maximum = 0;
@@ -977,21 +971,13 @@ class CudaModel : public nep_adapters::Model {
       const NepaStructureBatch& batch,
       NepaFindForceResult& result,
       bool allow_periodic_expansion = true) {
-    if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
+    if (!nep_adapters::detail::valid_structure_batch(batch, protocol_.num_types) ||
+        result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     if (is_cancelled()) {
       return NEPA_STATUS_CANCELLED;
-    }
-
-    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-      const std::int32_t atom_count = batch.atom_counts[structure];
-      const std::int32_t atom_offset = batch.atom_offsets[structure];
-      if (atom_count <= 0 || atom_offset < 0 ||
-          atom_offset + atom_count > batch.total_atoms) {
-        return NEPA_STATUS_INVALID_ARGUMENT;
-      }
     }
 
     try {
@@ -1217,7 +1203,8 @@ class CudaModel : public nep_adapters::Model {
   NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
       NepaFindDescriptorResult& result) override {
-    if (!valid_batch(batch) || result.descriptors == nullptr) {
+    if (!nep_adapters::detail::valid_structure_batch(batch, protocol_.num_types) ||
+        result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     if (is_cancelled()) {
