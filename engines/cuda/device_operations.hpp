@@ -7,6 +7,8 @@
 
 #include "nep_adapters/api.h"
 
+#include <stdexcept>
+
 namespace nep_adapters::cuda_backend {
 
 // Internal device-operation interface used by CUDA orchestration and focused
@@ -239,6 +241,17 @@ void stage_lammps_device_neighbors_on_device(
     DeviceWorkspace& workspace,
     bool check_overflow = true,
     const int* spin_type_active = nullptr);
+
+// Counts are complete even when the slot arrays could only hold a prefix.
+// Callers must rebuild with a larger workspace before consuming the lists.
+struct NeighborCapacityExceeded : std::runtime_error {
+  NeighborCapacityExceeded(int radial, int angular)
+      : std::runtime_error("internal neighbor list exceeded CUDA workspace capacity"),
+        radial(radial), angular(angular) {}
+
+  int radial;
+  int angular;
+};
 
 void build_internal_neighbors_on_device(
     const ModelProtocol& protocol,
