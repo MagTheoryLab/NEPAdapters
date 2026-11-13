@@ -74,6 +74,7 @@ struct DeviceModelUploadSummary {
 
 struct DeviceModelView {
   spin_density::View spin_layout{};
+  const int* spin_reverse_index = nullptr;
   const float* spin_radial_coefficients = nullptr;
   const float* ann_type_major = nullptr;
   const float* ann_type_major_qscaled = nullptr;

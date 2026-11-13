@@ -4,6 +4,7 @@
 #else
 #include "nep_adapters/engines/cuda.hpp"
 #include <cuda_runtime.h>
+#include "../engines/cuda/device_model.hpp"
 #endif
 
 #include <algorithm>
@@ -429,6 +430,53 @@ int main(int argc, char** argv) {
   bool ok = true;
   try {
     const auto cases = read_oracle(argv[2]);
+    #if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+    {
+      const auto host = nep_adapters::cuda_backend::load_host_model_parameters(argv[1]);
+      const nep_adapters::cuda_backend::DeviceModel device(host);
+      const int* pointer = device.view().spin_reverse_index;
+      if (!host.protocol.spin_soc && host.protocol.spin_l_max == 4 &&
+          host.protocol.spin_order == 4) {
+        const auto layout = nep_adapters::cuda_backend::make_spin_density_layout(host.protocol);
+        const int geometry = (layout.lmax + 1) * (layout.lmax + 1);
+        const int groups = geometry + layout.spin_components;
+        std::vector<int> index(groups + 1 + layout.terms.size() + 26 + device.view().spin_layout.harmonic_count), seen(layout.terms.size(), 0);
+        if (!pointer || cudaMemcpy(index.data(), pointer, index.size()*sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
+          throw std::runtime_error("missing cooperative reverse index");
+        if (index[0] != 0 || index[groups] != static_cast<int>(layout.terms.size()))
+          throw std::runtime_error("incomplete cooperative reverse index");
+        for (int group = 0; group < groups; ++group) {
+          if (index[group] > index[group+1]) throw std::runtime_error("invalid reverse index offsets");
+          int previous = -1;
+          for (int k = index[group]; k < index[group+1]; ++k) {
+            const int t = index[groups+1+k];
+            if (t <= previous || t >= static_cast<int>(layout.terms.size()))
+              throw std::runtime_error("unstable reverse term partition");
+            const auto& term = layout.terms[t];
+            if ((term.neighbor ? geometry + term.spin : term.geometry) != group || ++seen[t] != 1)
+              throw std::runtime_error("invalid reverse term ownership");
+            previous = t;
+          }
+        }
+        if (std::find(seen.begin(), seen.end(), 0) != seen.end())
+          throw std::runtime_error("missing reverse term");
+        const int* offsets = index.data() + groups + 1 + layout.terms.size();
+        if (offsets[0] != 0 || offsets[25] != device.view().spin_layout.harmonic_count)
+          throw std::runtime_error("incomplete component harmonics");
+        for (int g = 0; g < 25; ++g) {
+          int previous = -1;
+          for (int k = offsets[g]; k < offsets[g+1]; ++k) {
+            const int h = offsets[26+k];
+            if (h <= previous || h >= device.view().spin_layout.harmonic_count ||
+                nep_adapters::spin_density::harmonics[h].component != g)
+              throw std::runtime_error("invalid harmonic component partition");
+            previous = h;
+          }
+        }
+      } else if (pointer) throw std::runtime_error("unexpected reverse index for serial layout");
+    }
+    #endif
+
     for (const Case& item : cases) {
       ok = check_case(model, item, forward_only) && ok;
       if (!forward_only && item.name == "large") {

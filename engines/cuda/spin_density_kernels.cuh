@@ -67,10 +67,10 @@ __device__ inline void radial_basis(int basis, float inverse, float distance, fl
 }
 
 // The generic and compiled layouts use the same arithmetic and output ordering.
-template<int Capacity, bool Contracted = false>
+template<int Capacity, bool Contracted = false, int Spins = 35, int Harmonics = 25>
 struct RuntimeLayout : View {
   explicit RuntimeLayout(View v) : View(v) {}
-  enum : int { component_capacity = Capacity, spin_capacity = 35, harmonic_capacity = 25, contracted = Contracted, tile = 1, edge_cached = 0 };
+  enum : int { component_capacity = Capacity, spin_capacity = Spins, harmonic_capacity = Harmonics, contracted = Contracted, tile = 1, edge_cached = 0 };
   const float* edge_radial = nullptr;
   __device__ inline Primitive primitive(int i) const { return primitives[i]; }
   __device__ inline Sector sector(int i) const { return sectors[i]; }
@@ -225,10 +225,13 @@ static __global__ void descriptors(
   const unsigned mask = Layout::tile > 1 ? __ballot_sync(0xffffffff, i < atom_count) : 0;
   if (i >= atom_count) return;
   float s[3], h[Layout::component_capacity] = {};
-  // Center-spin terms factor through just the geometric moments. Their path
-  // weights and spin primitives are independent of the neighbor.
+  float density[Layout::tile == 1 ? Layout::harmonic_capacity : 1]
+               [Layout::tile == 1 ? Layout::spin_capacity : 1] = {};
   constexpr int geometric_components = FactorCenter ? Layout::harmonic_capacity : 1;
   float geometric[geometric_components] = {};
+  const int geometry_count = (v.lmax + 1) * (v.lmax + 1);
+  int spin_components = Layout::spin_capacity;
+  if constexpr (Layout::tile == 1) spin_components = v.spin_components;
   Value phi_i[Layout::spin_capacity];
   read_spin(n, i, type, active, spins, s);
   primitives_at(v, s, phi_i);
@@ -247,18 +250,40 @@ static __global__ void descriptors(
     primitives_at(v, s, phi_j);
     float weight, derivative;
     radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance, angular, parameters, weight, derivative);
-    if constexpr (FactorCenter) {
+    // Keep the compact C3L2 accumulation instead of another live density tensor.
+    if constexpr (Layout::tile > 1) {
+      if constexpr (FactorCenter) {
+        #pragma unroll
+        for (int g = 0; g < Layout::harmonic_capacity; ++g)
+          geometric[g] += weight * y[g].value;
+      }
       #pragma unroll
-      for (int g = 0; g < Layout::harmonic_capacity; ++g)
-        geometric[g] += weight * y[g].value;
+      for (int t = 0; t < v.term_count; ++t) {
+        const Term term = v.term(t);
+        if constexpr (FactorCenter)
+          if (!term.neighbor) continue;
+        float spin = (term.neighbor ? phi_j : phi_i)[term.spin].value;
+        h[term.output] += weight*weights[term.path*v.channels+c]*term.coefficient*y[term.geometry].value*spin;
+      }
+    } else {
+      #pragma unroll
+      for (int g = 0; g < geometry_count; ++g) {
+        const float weighted_y = weight * y[g].value;
+        density[g][0] += weighted_y;
+        #pragma unroll
+        for (int a = 1; a < spin_components; ++a)
+          density[g][a] += weighted_y * phi_j[a].value;
+      }
     }
+  }
+  if constexpr (Layout::tile == 1) {
+    // Couple once per center/channel after accumulating the neighbor density.
     #pragma unroll
     for (int t = 0; t < v.term_count; ++t) {
       const Term term = v.term(t);
-      if constexpr (FactorCenter)
-        if (!term.neighbor) continue;
-      float spin = (term.neighbor ? phi_j : phi_i)[term.spin].value;
-      h[term.output] += weight*weights[term.path*v.channels+c]*term.coefficient*y[term.geometry].value*spin;
+      const float product = term.neighbor ? density[term.geometry][term.spin] :
+        density[term.geometry][0] * phi_i[term.spin].value;
+      h[term.output] += weights[term.path*v.channels+c] * term.coefficient * product;
     }
   }
   #pragma unroll
@@ -437,6 +462,24 @@ static __global__ void forces(
     }
     __syncwarp(mask);
   }
+  float density_pull[Layout::tile == 1 ? Layout::harmonic_capacity : 1]
+                    [Layout::tile == 1 ? Layout::spin_capacity : 1] = {};
+  float center_gradient[Layout::tile == 1 ? Layout::harmonic_capacity : 1][3] = {};
+  float geometry_sum[Layout::tile == 1 ? Layout::harmonic_capacity : 1] = {};
+  const int geometry_count = (v.lmax + 1) * (v.lmax + 1);
+  if constexpr (Layout::tile == 1) {
+    for (int t = 0; t < v.term_count; ++t) {
+      const Term term = v.term(t);
+      const float adjoint = pull[term.output] *
+        weights[term.path*v.channels+c] * term.coefficient;
+      if (term.neighbor) density_pull[term.geometry][term.spin] += adjoint;
+      else {
+        density_pull[term.geometry][0] += adjoint * phi_i[term.spin].value;
+        for (int d = 0; d < 3; ++d)
+          center_gradient[term.geometry][d] += adjoint * phi_i[term.spin].derivative[d];
+      }
+    }
+  }
   for (int neighbor = lane; neighbor < nn[i]; neighbor += Layout::tile) {
     int slot = neighbor*n+i, j = nl[slot], pair = type[i]*types+type[j];
     float r[3], u[3];
@@ -478,18 +521,22 @@ static __global__ void forces(
         }
       }
     } else {
-      #pragma unroll
-      for (int t = 0; t < v.term_count; ++t) {
-        Term term = v.term(t);
-        const Value spin = (term.neighbor ? phi_j : phi_i)[term.spin];
-        const Value harmonic = y[term.geometry];
-        float adjoint = pull[term.output]*weights[term.path*v.channels+c]*term.coefficient;
-        radial_pull += adjoint*harmonic.value*spin.value;
-        for (int d = 0; d < 3; ++d) {
-          angular_pull[d] += adjoint*weight*harmonic.derivative[d]*spin.value;
-          (term.neighbor ? neighbor_pull : center_pull)[d] += adjoint*weight*harmonic.value*spin.derivative[d];
+      float spin_pull[Layout::spin_capacity] = {};
+      for (int g = 0; g < geometry_count; ++g) {
+        float y_pull = density_pull[g][0];
+        const float weighted_y = weight * y[g].value;
+        geometry_sum[g] += weighted_y;
+        for (int a = 1; a < v.spin_components; ++a) {
+          y_pull += density_pull[g][a] * phi_j[a].value;
+          spin_pull[a] += weighted_y * density_pull[g][a];
         }
+        radial_pull += y_pull * y[g].value;
+        for (int d = 0; d < 3; ++d)
+          angular_pull[d] += weight * y_pull * y[g].derivative[d];
       }
+      for (int a = 1; a < v.spin_components; ++a)
+        for (int d = 0; d < 3; ++d)
+          neighbor_pull[d] += spin_pull[a] * phi_j[a].derivative[d];
     }
     float longitudinal = 0;
     for (int d = 0; d < 3; ++d) longitudinal += angular_pull[d]*u[d];
@@ -515,6 +562,11 @@ static __global__ void forces(
           atomicAdd(transfer+(3*a+b)*n+j, -r[a]*neighbor_pull[b]);
       }
   }
+  if constexpr (Layout::tile == 1) {
+    for (int g = 0; g < geometry_count; ++g)
+      for (int d = 0; d < 3; ++d)
+        center_pull[d] += geometry_sum[g] * center_gradient[g][d];
+  }
   #pragma unroll
   for (int d = 0; d < 3; ++d) {
     #pragma unroll
@@ -539,5 +591,237 @@ static __global__ void forces(
     for (int d = 0; d < 3; ++d) atomicAdd(force+d*n+i, center_force[d]);
   if (active[type[i]])
     for (int d = 0; d < 3; ++d) atomicAdd(mforce+d*n+i, -static_cast<double>(center_pull[d]));
+}
+
+// Stable per-component monomial lists allow all lanes to evaluate a harmonic.
+template<class Layout>
+__device__ inline Value component_harmonic(Layout v, const float* x, int component,
+                                         const int* offsets, const int* order) {
+  Value value = {};
+  for (int k = offsets[component]; k < offsets[component+1]; ++k) {
+    const Harmonic h = v.harmonic(order[k]);
+    const int p[3] = {h.x, h.y, h.z};
+    float val = h.value;
+    for (int d = 0; d < 3; ++d) val *= power(x[d], p[d]);
+    value.value += val;
+    for (int d = 0; d < 3; ++d) {
+      if (!p[d]) continue;
+      float grad = h.value * p[d];
+      for (int j = 0; j < 3; ++j) grad *= power(x[j], p[j] - (d == j));
+      value.derivative[d] += grad;
+    }
+  }
+  return value;
+}
+template<class Layout>
+__device__ inline Value component_primitive(Layout v, const float* s, Value harmonic, int a) {
+  int component = 0, exponent = 0;
+  for (int p = 0; p < v.primitive_count; ++p) {
+    const Primitive label = v.primitive(p);
+    if (a >= label.offset && a < label.offset + 2*label.l + 1) {
+      component = label.l*label.l + a - label.offset;
+      exponent = (label.degree - label.l) / 2;
+    }
+  }
+  Value y;
+  y.value = __shfl_sync(0xffffffff, harmonic.value, component);
+  for (int d = 0; d < 3; ++d)
+    y.derivative[d] = __shfl_sync(0xffffffff, harmonic.derivative[d], component);
+  const float s2 = s[0]*s[0] + s[1]*s[1] + s[2]*s[2];
+  const float factor = power(s2, exponent);
+  const float grad_factor = exponent ? 2*exponent*power(s2, exponent-1) : 0;
+  Value result;
+  result.value = factor * y.value;
+  for (int d = 0; d < 3; ++d)
+    result.derivative[d] = factor*y.derivative[d] + grad_factor*s[d]*y.value;
+  return result;
+}
+// A warp owns one center/channel; spin rows are shared in a-major order so
+// adjacent lanes read different banks while traversing the same harmonic.
+template<class Layout, bool CenterVirial = false>
+static __global__ void forces_components(
+  Layout v, int atom_count, int n, int structural_dim, int types, int na, int basis, Geometry box,
+  const int* type, const int* active, const double* positions, const double* spins,
+  const int* nn, const int* nl, const double* edges, int plane, const float* cutoffs,
+  const float* angular, const float* parameters, const float* moments, const float* fp,
+  double* force, double* mforce, double* virial, int virial_mode,
+  float* virial_float, float* transfer, const int* reverse_index) {
+  constexpr int width = 32, groups = 128 / width;
+  constexpr int harmonics = Layout::harmonic_capacity, spin_capacity = Layout::spin_capacity;
+  struct State {
+    Value center[spin_capacity], y[harmonics];
+    float pull[Layout::component_capacity], density[spin_capacity][harmonics];
+  };
+  __shared__ State states[groups];
+  const int lane = threadIdx.x % width;
+  const int work = (blockIdx.x * blockDim.x + threadIdx.x) / width;
+  const int i = work / v.channels, c = work % v.channels;
+  if (i >= atom_count) return;
+  constexpr unsigned mask = 0xffffffff;
+  State& state = states[threadIdx.x / width];
+  const int geometry_count = (v.lmax + 1) * (v.lmax + 1);
+  const int* order = reverse_index + geometry_count + v.spin_components + 1;
+  const int* harmonic_offsets = order + v.term_count;
+  const int* harmonic_order = harmonic_offsets + 26;
+  constexpr int spin_rounds = (spin_capacity + width - 1) / width;
+  const float* weights = parameters + (na+1)*v.channels;
+  const float* center = weights + v.path_count*v.channels;
+  float si[3];
+  read_spin(n, i, type, active, spins, si);
+  const Value center_harmonic = lane < geometry_count ?
+    component_harmonic(v, si, lane, harmonic_offsets, harmonic_order) : Value{};
+  #pragma unroll
+  for (int round = 0; round < spin_rounds; ++round) {
+    const int a = lane + round*width;
+    const Value phi = component_primitive(v, si, center_harmonic, a);
+    if (a < v.spin_components) state.center[a] = phi;
+  }
+  for (int k = 0; k < v.sector_count; ++k) {
+    const Sector sector = v.sector(k);
+    const float derivative = 2*fp[(structural_dim+sector.norm_column+c)*n+i]/sector.size;
+    for (int m = lane; m < sector.size; m += width)
+      state.pull[sector.offset+m] = derivative*moments[(c*v.components+sector.offset+m)*n+i];
+    if (lane == 0 && sector.scalar_column >= 0)
+      state.pull[sector.offset] += fp[(structural_dim+sector.scalar_column+c)*n+i];
+  }
+  __syncwarp(mask);
+  float center_value = 0, center_gradient[3] = {}, geometry_sum = 0;
+  if (lane < geometry_count) {
+    for (int k = reverse_index[lane]; k < reverse_index[lane+1]; ++k) {
+      const Term term = v.term(order[k]);
+      const float adjoint = state.pull[term.output] *
+        weights[term.path*v.channels+c] * term.coefficient;
+      center_value += adjoint * state.center[term.spin].value;
+      for (int d = 0; d < 3; ++d)
+        center_gradient[d] += adjoint * state.center[term.spin].derivative[d];
+    }
+  }
+  #pragma unroll
+  for (int round = 0; round < spin_rounds; ++round) {
+    const int a = lane + round*width;
+    if (a > 0 && a < v.spin_components) {
+      for (int g = 0; g < geometry_count; ++g) state.density[a][g] = 0;
+      for (int k = reverse_index[geometry_count+a]; k < reverse_index[geometry_count+a+1]; ++k) {
+        const Term term = v.term(order[k]);
+        state.density[a][term.geometry] += state.pull[term.output] *
+          weights[term.path*v.channels+c] * term.coefficient;
+      }
+    }
+  }
+  __syncwarp(mask);
+  float center_pull[3] = {};
+  double center_force[3] = {}, center_virial[CenterVirial ? 9 : 1] = {};
+  if (lane == 0) {
+    for (int k = 0; k < v.center_count; ++k) {
+      const Center term = v.center(k);
+      for (int d = 0; d < 3; ++d)
+        center_pull[d] += state.pull[term.output] * center[term.weight*v.channels+c] *
+          state.center[term.primitive].derivative[d];
+    }
+    if (c == 0) {
+      int column = structural_dim;
+      for (int p = 1; p < v.primitive_count; ++p)
+        if (v.primitive(p).l == 0) {
+          for (int d = 0; d < 3; ++d)
+            center_pull[d] += fp[column*n+i] * state.center[v.primitive(p).offset].derivative[d];
+          ++column;
+        }
+    }
+  }
+  for (int neighbor = 0; neighbor < nn[i]; ++neighbor) {
+    const int slot = neighbor*n+i, j = nl[slot], pair = type[i]*types+type[j];
+    float r[3], unit[3], sj[3];
+    displacement(n, i, j, slot, box, positions, edges, plane, r);
+    const float distance = sqrtf(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]);
+    if (!(distance > 1.0e-12f && distance < cutoffs[pair])) continue;
+    for (int d = 0; d < 3; ++d) unit[d] = r[d] / distance;
+    const Value y = lane < geometry_count ?
+      component_harmonic(v, unit, lane, harmonic_offsets, harmonic_order) : Value{};
+    if (lane < geometry_count) state.y[lane] = y;
+    read_spin(n, j, type, active, spins, sj);
+    const Value spin_harmonic = lane < geometry_count ?
+      component_harmonic(v, sj, lane, harmonic_offsets, harmonic_order) : Value{};
+    Value neighbor_spin[spin_rounds];
+    #pragma unroll
+    for (int round = 0; round < spin_rounds; ++round)
+      neighbor_spin[round] = component_primitive(v, sj, spin_harmonic, lane + round*width);
+    float weight, derivative;
+    radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance,
+           angular, parameters, weight, derivative);
+    __syncwarp(mask);
+    float radial_pull = 0, angular_pull[3] = {}, neighbor_pull[3] = {};
+    if (lane < geometry_count) {
+      geometry_sum += weight * y.value;
+      radial_pull += center_value * y.value;
+      for (int d = 0; d < 3; ++d)
+        angular_pull[d] += weight * center_value * y.derivative[d];
+    }
+    #pragma unroll
+    for (int round = 0; round < spin_rounds; ++round) {
+      const int a = lane + round*width;
+      if (a > 0 && a < v.spin_components) {
+        const Value spin = neighbor_spin[round];
+        float value_pull = 0, direction_pull[3] = {};
+        for (int g = 0; g < geometry_count; ++g) {
+          const float coefficient = state.density[a][g];
+          value_pull += coefficient * state.y[g].value;
+          for (int d = 0; d < 3; ++d)
+            direction_pull[d] += coefficient * state.y[g].derivative[d];
+        }
+        radial_pull += value_pull * spin.value;
+        for (int d = 0; d < 3; ++d) {
+          angular_pull[d] += weight * spin.value * direction_pull[d];
+          neighbor_pull[d] += weight * value_pull * spin.derivative[d];
+        }
+      }
+    }
+    #pragma unroll
+    for (int offset = width/2; offset > 0; offset /= 2) {
+      radial_pull += __shfl_down_sync(mask, radial_pull, offset);
+      for (int d = 0; d < 3; ++d) {
+        angular_pull[d] += __shfl_down_sync(mask, angular_pull[d], offset);
+        neighbor_pull[d] += __shfl_down_sync(mask, neighbor_pull[d], offset);
+      }
+    }
+    if (lane == 0) {
+      float longitudinal = 0, grad[3];
+      for (int d = 0; d < 3; ++d) longitudinal += angular_pull[d] * unit[d];
+      for (int d = 0; d < 3; ++d) {
+        grad[d] = derivative*radial_pull*unit[d] +
+          (angular_pull[d]-longitudinal*unit[d]) / distance;
+        center_force[d] += static_cast<double>(grad[d]);
+        atomicAdd(force+d*n+j, -static_cast<double>(grad[d]));
+        if (active[type[j]]) atomicAdd(mforce+d*n+j, -static_cast<double>(neighbor_pull[d]));
+      }
+      #pragma unroll
+      for (int a = 0; a < 3; ++a)
+        #pragma unroll
+        for (int b = 0; b < 3; ++b) {
+          const int raw_to_internal[9] = {0,3,4,6,1,5,7,8,2};
+          const int k = raw_to_internal[3*a+b];
+          const double value = -static_cast<double>(r[a]) * grad[b];
+          if constexpr (CenterVirial) center_virial[k] += value;
+          if (virial_mode == 2) atomicAdd(virial+k*n+j, value);
+          if (virial_mode == 3) atomicAdd(virial_float+k*n+j, static_cast<float>(value));
+          if (transfer && active[type[j]])
+            atomicAdd(transfer+(3*a+b)*n+j, -r[a]*neighbor_pull[b]);
+        }
+    }
+    __syncwarp(mask);
+  }
+  float geometry_pull[3];
+  for (int d = 0; d < 3; ++d) geometry_pull[d] = geometry_sum * center_gradient[d];
+  #pragma unroll
+  for (int offset = width/2; offset > 0; offset /= 2)
+    for (int d = 0; d < 3; ++d)
+      geometry_pull[d] += __shfl_down_sync(mask, geometry_pull[d], offset);
+  if (lane != 0) return;
+  for (int d = 0; d < 3; ++d) {
+    atomicAdd(force+d*n+i, center_force[d]);
+    if (active[type[i]])
+      atomicAdd(mforce+d*n+i, -static_cast<double>(center_pull[d] + geometry_pull[d]));
+  }
+  if constexpr (CenterVirial)
+    for (int k = 0; k < 9; ++k) atomicAdd(virial+k*n+i, center_virial[k]);
 }
 } // namespace nep_adapters::spin_density

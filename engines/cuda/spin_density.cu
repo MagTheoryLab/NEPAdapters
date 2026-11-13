@@ -30,6 +30,21 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
   } else {
     const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
       target == VirialTarget::neighbor_atom ? 2 : 3;
+    if constexpr (Layout::tile == 1 && Layout::component_capacity == 625 &&
+                  Layout::spin_capacity == 35) {
+      if (!p.spin_soc && p.spin_l_max == 4 && p.spin_order == 4) {
+        const int warp_blocks = (count * p.spin_compress * 32 + 127) / 128;
+        spin_density::forces_components<Layout, CenterVirial><<<warp_blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
+          p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
+          w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
+          w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
+          m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.fp,
+          w.force_soa3, w.mforce_soa3, w.virial_soa9, mode, w.per_atom_virial_float_soa9,
+          transfer ? w.spin_transfer_soa9 : nullptr, m.spin_reverse_index);
+        check_launch();
+        return;
+      }
+    }
     spin_density::forces<Layout, CenterVirial, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
       p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
       w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
@@ -50,10 +65,17 @@ void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
       count < 0 || static_cast<std::size_t>(count) > w.atom_capacity)
     throw std::runtime_error("invalid density spin workspace or protocol");
   if (p.spin_compress == 3 && p.spin_l_max == 2 && p.spin_order == 2) {
-    // SOC compresses the factored moments into registers. The larger non-SOC
-    // tensor stays faster with direct accumulation in the neighbor loop.
     if (p.spin_soc) launch<true, CenterVirial>(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
     else launch<false, CenterVirial>(spin_density::MDLayoutNoSOC<4>{}, p, count, box, m, w, backward, target, transfer);
+  } else if (p.spin_l_max == 0) {
+    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 3, 1>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+  } else if (p.spin_l_max == 1) {
+    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 9, 4>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+  } else if (m.spin_layout.spin_components == 10) {
+    if (m.spin_layout.components <= 100)
+      launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 10>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+    else
+      launch<false, CenterVirial>(spin_density::RuntimeLayout<625, true, 10>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
   } else if (m.spin_layout.components <= 100) {
     launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
   } else {

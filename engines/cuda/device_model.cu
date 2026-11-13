@@ -151,9 +151,40 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
       const auto t = append(layout.terms.data(), layout.terms.size());
       const auto c = append(layout.centers.data(), layout.centers.size());
       const auto h = append(spin_density::harmonics, std::size(spin_density::harmonics));
+      std::vector<int> reverse_index;
+      if (!host.protocol.spin_soc && host.protocol.spin_l_max == 4 &&
+          host.protocol.spin_order == 4) {
+        const int geometry = (layout.lmax + 1) * (layout.lmax + 1);
+        const int groups = geometry + layout.spin_components;
+        reverse_index.resize(groups + 1 + layout.terms.size(), 0);
+        for (const auto& term : layout.terms) {
+          const int group = term.neighbor ? geometry + term.spin : term.geometry;
+          ++reverse_index[group + 1];
+        }
+        for (int g = 0; g < groups; ++g)
+          reverse_index[g + 1] += reverse_index[g];
+        std::vector<int> cursor(reverse_index.begin(), reverse_index.begin() + groups);
+        for (int k = 0; k < static_cast<int>(layout.terms.size()); ++k) {
+          const auto& term = layout.terms[k];
+          const int group = term.neighbor ? geometry + term.spin : term.geometry;
+          reverse_index[groups + 1 + cursor[group]++] = k;
+        }
+        const int footer = groups + 1 + layout.terms.size();
+        reverse_index.resize(footer + 26 + std::size(spin_density::harmonics), 0);
+        for (const auto& harmonic : spin_density::harmonics)
+          ++reverse_index[footer + harmonic.component + 1];
+        for (int g = 0; g < 25; ++g)
+          reverse_index[footer + g + 1] += reverse_index[footer + g];
+        cursor.assign(reverse_index.begin() + footer, reverse_index.begin() + footer + 25);
+        for (int k = 0; k < static_cast<int>(std::size(spin_density::harmonics)); ++k)
+          reverse_index[footer + 26 + cursor[spin_density::harmonics[k].component]++] = k;
+      }
+      const auto r = append(reverse_index.data(), reverse_index.size());
       check_cuda(cudaMalloc(&spin_layout_device_, bytes.size()), "allocate density layout");
       check_cuda(cudaMemcpy(spin_layout_device_, bytes.data(), bytes.size(), cudaMemcpyHostToDevice), "upload density layout");
       const auto* base = static_cast<const unsigned char*>(spin_layout_device_);
+      view_.spin_reverse_index = reverse_index.empty() ? nullptr :
+        reinterpret_cast<const int*>(base+r);
       view_.spin_layout = {layout.channels, layout.order, layout.lmax,
         static_cast<int>(layout.primitives.size()), layout.spin_components, layout.components,
         static_cast<int>(layout.sectors.size()), static_cast<int>(layout.terms.size()),
