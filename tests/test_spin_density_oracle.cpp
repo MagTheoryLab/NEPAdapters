@@ -155,6 +155,85 @@ Evaluation evaluate(
   return out;
 }
 
+bool check_multi_box(NepaModel* model, std::vector<Case> cases) {
+  // Mix sizes and an expanded periodic box before changing output masks.
+  Case small = cases.front();
+  --small.atoms;
+  small.types.resize(small.atoms);
+  small.positions.resize(3 * small.atoms);
+  small.spins.resize(3 * small.atoms);
+  for (double& value : small.cell) value *= 0.3;
+  cases.push_back(small);
+  std::vector<int> counts, offsets, types, pbc(3 * cases.size(), 1);
+  std::vector<double> positions, spins, boxes, energies(cases.size());
+  Evaluation expected;
+  for (const auto& item : cases) {
+    offsets.push_back(types.size()); counts.push_back(item.atoms);
+    types.insert(types.end(), item.types.begin(), item.types.end());
+    positions.insert(positions.end(), item.positions.begin(), item.positions.end());
+    spins.insert(spins.end(), item.spins.begin(), item.spins.end());
+    boxes.insert(boxes.end(), item.cell.begin(), item.cell.end());
+    const auto single = evaluate(model, item, false);
+    energies[counts.size() - 1] = single.energy;
+    for (auto field : {&Evaluation::potential, &Evaluation::forces,
+                       &Evaluation::atom_virial, &Evaluation::virial,
+                       &Evaluation::mforces, &Evaluation::transfer}) {
+      auto& target = expected.*field;
+      const auto& source = single.*field;
+      target.insert(target.end(), source.begin(), source.end());
+    }
+  }
+  NepaStructureBatch batch{};
+  batch.num_structures = cases.size(); batch.total_atoms = types.size();
+  batch.atom_counts = counts.data(); batch.atom_offsets = offsets.data();
+  batch.types = types.data(); batch.positions_aos3 = positions.data();
+  batch.spins_aos3 = spins.data(); batch.boxes_row_major9 = boxes.data();
+  batch.pbc_flags3 = pbc.data();
+  Evaluation actual = expected;
+  const Evaluation first = evaluate(model, cases.front(), false);
+  std::vector<double> actual_energies(energies.size());
+  // Full outputs, total-only, no auxiliary outputs, full again (transfer reset).
+  for (int mode : {2, 1, 0, 2}) {
+    for (auto field : {&Evaluation::potential, &Evaluation::forces,
+                       &Evaluation::atom_virial, &Evaluation::virial,
+                       &Evaluation::mforces, &Evaluation::transfer})
+      std::fill((actual.*field).begin(), (actual.*field).end(), NAN);
+    NepaFindForceResult result{};
+    result.energy_per_structure = actual_energies.data();
+    result.potential_per_atom = actual.potential.data();
+    result.forces_aos3 = actual.forces.data();
+    result.mforces_aos3 = actual.mforces.data();
+    result.virials_row_major9 = mode ? actual.virial.data() : nullptr;
+    result.virials_per_atom_row_major9 = mode == 2 ? actual.atom_virial.data() : nullptr;
+    result.spin_transfer_per_atom_row_major9 = mode == 2 ? actual.transfer.data() : nullptr;
+    if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK)
+      throw std::runtime_error(nepa_last_error_message());
+    if (!std::all_of(actual_energies.begin(), actual_energies.end(),
+                     [](double v) { return std::isfinite(v); }) ||
+        !within_tolerance(actual_energies, energies, 3e-5, 1e-5)) return false;
+    for (auto field : {&Evaluation::potential, &Evaluation::forces,
+                       &Evaluation::atom_virial, &Evaluation::virial,
+                       &Evaluation::mforces, &Evaluation::transfer}) {
+      if ((!mode && field == &Evaluation::virial) ||
+          (mode != 2 && (field == &Evaluation::atom_virial ||
+                         field == &Evaluation::transfer))) continue;
+      const auto& values = actual.*field;
+      if (!std::all_of(values.begin(), values.end(), [](double v) { return std::isfinite(v); }) ||
+          !within_tolerance(values, expected.*field, 5e-4, 1e-5)) {
+        std::cerr << "multi-box output mismatch, mode=" << mode
+                  << " max_abs=" << max_abs(values, expected.*field) << '\n';
+        return false;
+      }
+    }
+  }
+  const Evaluation reused = evaluate(model, cases.front(), false);
+  if (!within_tolerance(reused.forces, first.forces, 1e-6, 0) ||
+      !within_tolerance(reused.mforces, first.mforces, 1e-6, 0) ||
+      !within_tolerance(reused.transfer, first.transfer, 1e-6, 0)) return false;
+  std::cout << "multi_box passed\n";
+  return true;
+}
+
 #if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
 template<class T> struct DeviceBuffer {
   T* data = nullptr;
@@ -484,6 +563,7 @@ int main(int argc, char** argv) {
         if (g_spin_type_semantics) ok = check_spin_type_lammps(model, item) && ok;
       }
     }
+    ok = check_multi_box(model, cases) && ok;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n'; ok = false;
   }

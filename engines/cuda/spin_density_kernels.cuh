@@ -636,6 +636,113 @@ __device__ inline Value component_primitive(Layout v, const float* s, Value harm
     result.derivative[d] = factor*y.derivative[d] + grad_factor*s[d]*y.value;
   return result;
 }
+// NoSOC L4/O4: a lane owns one spatial component and retains only its spin row.
+template<class Layout>
+static __global__ void descriptors_components(
+  Layout v, int atom_count, int n, int structural_dim, int types, int na, int basis, Geometry box,
+  const int* type, const int* active, const double* positions, const double* spins,
+  const int* nn, const int* nl, int plane, const float* cutoffs,
+  const float* angular, const float* parameters, float* moments, float* q,
+  const int* reverse_index) {
+  constexpr int width = 32, groups = 128 / width;
+  constexpr int geometry_count = 25, spin_count = 35;
+  struct State { float center[spin_count], h[625]; };
+  __shared__ State states[groups];
+  const int lane = threadIdx.x % width;
+  const int work = (blockIdx.x * blockDim.x + threadIdx.x) / width;
+  const int i = work / v.channels, c = work % v.channels;
+  if (i >= atom_count) return;
+  constexpr unsigned mask = 0xffffffff;
+  State& state = states[threadIdx.x / width];
+  const int* harmonic_offsets = reverse_index + geometry_count + spin_count + 1 + v.term_count;
+  const int* harmonic_order = harmonic_offsets + 26;
+  const float* weights = parameters + (na+1)*v.channels;
+  const float* center = weights + v.path_count*v.channels;
+  float s[3], density[spin_count] = {};
+  read_spin(n, i, type, active, spins, s);
+  const Value center_harmonic = lane < geometry_count ?
+    component_harmonic(v, s, lane, harmonic_offsets, harmonic_order) : Value{};
+  #pragma unroll
+  for (int round = 0; round < 2; ++round) {
+    const int a = lane + round*width;
+    const Value phi = component_primitive(v, s, center_harmonic, a);
+    if (a < spin_count) state.center[a] = phi.value;
+  }
+  __syncwarp(mask);
+  for (int neighbor = 0; neighbor < nn[i]; ++neighbor) {
+    const int slot = neighbor*n+i, j = nl[slot], pair = type[i]*types+type[j];
+    float r[3], unit[3];
+    displacement(n, i, j, slot, box, positions, nullptr, plane, r);
+    const float distance = sqrtf(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]);
+    if (!(distance > 1.0e-12f && distance < cutoffs[pair])) continue;
+    for (int d = 0; d < 3; ++d) unit[d] = r[d]/distance;
+    const float y = lane < geometry_count ?
+      component_harmonic(v, unit, lane, harmonic_offsets, harmonic_order).value : 0;
+    read_spin(n, j, type, active, spins, s);
+    const Value spin_harmonic = lane < geometry_count ?
+      component_harmonic(v, s, lane, harmonic_offsets, harmonic_order) : Value{};
+    float phi[2];
+    #pragma unroll
+    for (int round = 0; round < 2; ++round)
+      phi[round] = component_primitive(v, s, spin_harmonic, lane + round*width).value;
+    float weight, derivative;
+    radial(v, slot, plane, c, v.channels, na, basis, pair, cutoffs[pair], distance,
+           angular, parameters, weight, derivative);
+    const float weighted_y = weight*y;
+    density[0] += weighted_y;
+    #pragma unroll
+    for (int a = 1; a < spin_count; ++a)
+      density[a] += weighted_y * __shfl_sync(mask, phi[a/width], a%width);
+  }
+  if (lane < geometry_count) {
+    const int g = lane >= 16 ? 4 : lane >= 9 ? 3 : lane >= 4 ? 2 : lane >= 1 ? 1 : 0;
+    // NoSOC repeats the same primitive paths for each spatial rank.
+    int path = g * (v.path_count / 5);
+    for (int j = 0; j <= 4; ++j) {
+      const Sector sector = v.sector(g*5+j);
+      int next_path = path;
+      for (int a = 0; a < 2*j+1; ++a) {
+        float value = 0;
+        int term_path = path;
+        for (int p = 0; p < v.primitive_count; ++p) {
+          const Primitive primitive = v.primitive(p);
+          if (primitive.l != j) continue;
+          value += weights[(term_path++)*v.channels+c] *
+            (density[0] * state.center[primitive.offset+a]);
+          if (primitive.degree)
+            value += weights[(term_path++)*v.channels+c] * density[primitive.offset+a];
+        }
+        next_path = term_path;
+        if (g == 0)
+          for (int p = 1; p < v.primitive_count; ++p) {
+            const Primitive primitive = v.primitive(p);
+            if (primitive.l == j)
+              value += center[(p-1)*v.channels+c] * state.center[primitive.offset+a];
+          }
+        const int m = sector.offset + (lane-g*g)*(2*j+1) + a;
+        state.h[m] = value;
+        moments[(c*v.components+m)*n+i] = value;
+      }
+      path = next_path;
+    }
+  }
+  __syncwarp(mask);
+  if (c == 0 && lane == 0) {
+    int column = structural_dim;
+    for (int p = 1; p < v.primitive_count; ++p)
+      if (v.primitive(p).l == 0) q[(column++)*n+i] = state.center[v.primitive(p).offset];
+  }
+  if (lane < v.sector_count) {
+    const Sector sector = v.sector(lane);
+    float norm = 0;
+    for (int m = 0; m < sector.size; ++m)
+      norm += state.h[sector.offset+m]*state.h[sector.offset+m];
+    q[(structural_dim+sector.norm_column+c)*n+i] = norm/sector.size;
+    if (sector.scalar_column >= 0)
+      q[(structural_dim+sector.scalar_column+c)*n+i] = state.h[sector.offset];
+  }
+}
+
 // A warp owns one center/channel; spin rows are shared in a-major order so
 // adjacent lanes read different banks while traversing the same harmonic.
 template<class Layout, bool CenterVirial = false>

@@ -21,19 +21,20 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
     w.boxes_row_major9, w.box_inverse_row_major9, w.pbc_flags3};
   const int blocks = (count * p.spin_compress * Layout::tile + 127) / 128;
   if (!blocks) return;
-  if (!backward) {
-    spin_density::descriptors<Layout, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
-      p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
-      w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
-      w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
-      m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.descriptors);
-  } else {
-    const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
-      target == VirialTarget::neighbor_atom ? 2 : 3;
-    if constexpr (Layout::tile == 1 && Layout::component_capacity == 625 &&
-                  Layout::spin_capacity == 35) {
-      if (!p.spin_soc && p.spin_l_max == 4 && p.spin_order == 4) {
-        const int warp_blocks = (count * p.spin_compress * 32 + 127) / 128;
+  const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
+    target == VirialTarget::neighbor_atom ? 2 : 3;
+  if constexpr (Layout::tile == 1 && Layout::component_capacity == 625 &&
+                Layout::spin_capacity == 35) {
+    if (!p.spin_soc && p.spin_l_max == 4 && p.spin_order == 4) {
+      const int warp_blocks = (count * p.spin_compress * 32 + 127) / 128;
+      if (!backward) {
+        spin_density::descriptors_components<<<warp_blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
+          p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
+          w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
+          w.nn_radial, w.nl_radial_slot_major, plane, m.spin_cutoff_pair,
+          m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.descriptors,
+          m.spin_reverse_index);
+      } else {
         spin_density::forces_components<Layout, CenterVirial><<<warp_blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
           p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
           w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
@@ -41,10 +42,18 @@ void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBo
           m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.fp,
           w.force_soa3, w.mforce_soa3, w.virial_soa9, mode, w.per_atom_virial_float_soa9,
           transfer ? w.spin_transfer_soa9 : nullptr, m.spin_reverse_index);
-        check_launch();
-        return;
       }
+      check_launch();
+      return;
     }
+  }
+  if (!backward) {
+    spin_density::descriptors<Layout, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
+      p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
+      w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
+      w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
+      m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.descriptors);
+  } else {
     spin_density::forces<Layout, CenterVirial, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
       p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
       w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,

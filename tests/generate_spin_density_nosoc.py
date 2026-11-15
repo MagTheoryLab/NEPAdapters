@@ -186,11 +186,12 @@ def generate(directory):
     cell = np.diag([24., 25., 26.])
     for C, L, S, active in [(3,2,2,(True,False,False)), (2,1,4,(True,False,False)),
                            (1,3,2,(True,False,False)), (1,4,4,(True,False,False)),
-                           (1,0,2,(True,False,False)), (3,2,2,(True,True,False))]:
+                           (1,0,2,(True,False,False)), (3,2,2,(True,True,False)),
+                           (3,4,4,(True,True,False))]:
         name = f'c{C}l{L}s{S}'+('-Bi' if active[1] else '')
         oracle = Oracle(C,L,S,active)
         cases = [oracle.case('large',r,spins,cell), oracle.case('zero',r,np.zeros_like(spins),cell)]
-        if (C,L,S)==(3,2,2):
+        if (C,L,S) in ((3,2,2), (3,4,4)):
             cases += [oracle.case('triclinic',r,spins,np.array([[4.4,0,0],[.7,4.8,0],[.2,.6,4.5]])),
                       oracle.case('isolated',r+np.arange(4)[:,None]*7,spins,np.diag([40.]*3))]
         # Two genuinely independent, non-axis-permuting rotations.

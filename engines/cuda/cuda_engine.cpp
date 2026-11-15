@@ -1012,7 +1012,8 @@ class CudaModel : public nep_adapters::Model {
         }
       }
       const bool multi_box_execution =
-          protocol_.charge_mode == 0 && protocol_.spin_mode == 0;
+          protocol_.charge_mode == 0 &&
+          (protocol_.spin_mode == 0 || batch.num_structures > 1);
       const std::size_t workspace_atom_capacity =
           multi_box_execution
               ? static_cast<std::size_t>(batch.total_atoms)
@@ -1032,13 +1033,17 @@ class CudaModel : public nep_adapters::Model {
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+        if (view.mforce_soa3 != nullptr) {
+          clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+        }
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
         const auto force_request = make_force_evaluation_request(
             nep_adapters::cuda_backend::
                 ForceNeighborTopology::batched_multi_box,
             true,
             true,
-            result.virials_per_atom_row_major9 != nullptr);
+            result.virials_per_atom_row_major9 != nullptr,
+            result.spin_transfer_per_atom_row_major9 != nullptr);
         nep_adapters::cuda_backend::run_force_pipeline(
             protocol_,
             force_request,
@@ -1057,7 +1062,7 @@ class CudaModel : public nep_adapters::Model {
             batch.total_atoms,
             0,
             0,
-            false,
+            protocol_.spin_mode != 0,
             false,
             result);
         return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
