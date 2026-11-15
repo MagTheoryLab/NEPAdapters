@@ -8,7 +8,7 @@
   参考模型生成；JSON 保留模型 SHA256 和全部参考 Python 源文件的 SHA256。
 - `nosoc/`：用上游 `tests_pytest/validate_spin_nosoc.py` 的独立 Legendre oracle
   生成，适配后的生成器为 `tests/generate_spin_density_nosoc.py`。
-  六套形状、45 状态；包含独立空间/自旋旋转、时间反演、单 spin 旋转响应。
+  七套形状、54 状态；包含独立空间/自旋旋转、时间反演、单 spin 旋转响应。
   模型固定种子，JSON 保留模型 SHA256 和不同 FD 步长的一致性误差。
   非 SOC 模型 ANN 的结构输入权重为零，独立 descriptor 标签只含 spin 列，
   不能把结构 descriptor 假定为零。
