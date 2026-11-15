@@ -21,13 +21,14 @@ DEFAULT_PLAN = Path(
     "/Users/superbing/Desktop/Workspace/.hpc-platform/plans/"
     "4090-nepadapters-spin-lmp.json"
 )
-MODEL_REL = "tests/fixtures/spin_chiral_protocol/nep.txt"
+MODEL_REL = "tests/fixtures/spin_density/soc/c3l2s2.nep"
 BENCH_REL = "benchmarks/nep_adapters_bench_cuda_lammps_device_layout"
 PROFILE_CUDA_RELEASE_FLAGS = "-O3 -DNDEBUG -lineinfo"
 SOURCE_INPUTS = (
     "CMakeLists.txt",
     "cmake",
     "include",
+    "engines/common",
     "engines/cpu_common",
     "engines/cpu",
     "benchmarks",
@@ -40,7 +41,7 @@ SOURCE_INPUTS = (
 BUILD_FINGERPRINT_INPUTS = tuple(
     item for item in SOURCE_INPUTS
     if item != "tools/run_4090_spin_lmp_profile.py")
-NCU_LABELS = ("primitive", "ann", "chiral", "density")
+NCU_LABELS = ("primitive", "ann", "density")
 NCU_SELECTED_METRICS = (
     "gpu__time_duration.sum",
     "launch__registers_per_thread",
@@ -204,8 +205,7 @@ def build_remote(profile, plan, gpu):
       cmake --build {q(build_dir)} --clean-first --parallel 16 --target \
         nep_adapters_bench_spin_gpu \
         nep_adapters_bench_cuda_lammps_device_layout \
-        nep_adapters_cuda_spin_fixture_test \
-        nep_adapters_cuda_spin_chiral_polar_test \
+        nep_adapters_cuda_spin_density_test \
         nep_adapters_cuda_lammps_kk_sim_test
       """)
   ssh_bash(profile, script, capture=False)
@@ -214,7 +214,7 @@ def build_remote(profile, plan, gpu):
 def run_correctness(profile, plan, gpu):
   script = remote_env(gpu) + textwrap.dedent(f"""
       cd {q(plan["build_dir"])}
-      ctest --output-on-failure -R 'cuda_spin_fixture|cuda_spin_chiral_polar|cuda_lammps_kk_sim'
+      ctest --output-on-failure -R 'cuda_spin_density|cuda_lammps_kk_sim'
       """)
   return ssh_bash(profile, script).stdout
 
@@ -746,10 +746,9 @@ def run_ncu(profile, plan, gpu, args, run_dir, on_result=None):
   small.warmup = 1
   small.iterations = 1
   targets = (
-      ("primitive", "build_spin_descriptor_core_streaming"),
+      ("primitive", "spin_density::descriptors"),
       ("ann", "evaluate_ann_energy_scheduled_subwarp"),
-      ("chiral", "accumulate_spin_chiral_forces"),
-      ("density", "accumulate_spin_density_forces_tile_f32"),
+      ("density", "spin_density::forces"),
   )
   results = {}
   for label, kernel_regex in targets:
@@ -1031,7 +1030,7 @@ def main():
   parser.add_argument("--run-name", default="")
   parser.add_argument(
       "--workload-id",
-      default="spin-chiral-api",
+      default="spin-density-api",
       help="stable workload identifier recorded in the summary")
   parser.add_argument(
       "--workload-role",

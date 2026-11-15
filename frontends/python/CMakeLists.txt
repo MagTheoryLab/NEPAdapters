@@ -143,20 +143,6 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
   )
 
   add_test(
-    NAME nep_adapters_python_spin2_batch_test
-    COMMAND
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/tests/test_spin2_batch.py"
-  )
-  set_tests_properties(
-    nep_adapters_python_spin2_batch_test
-    PROPERTIES
-      LABELS "oracle;frontend;python;batch;cpu;spin2"
-      ENVIRONMENT
-        "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN2_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/nep4_spin2_o3c2.nep;NEP_ADAPTERS_PYTHON_SPIN2_ORACLE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin2_o3c2_oracle.txt"
-  )
-
-  add_test(
     NAME nep_adapters_python_model_concurrency_test
     COMMAND
       "${Python3_EXECUTABLE}"
@@ -240,39 +226,6 @@ if(NEP_ADAPTERS_BUILD_TESTS AND BUILD_SHARED_LIBS AND TARGET NEPAdapters::cpu
         "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz"
   )
 
-  if(EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt" AND
-     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt")
-    add_test(
-      NAME nep_adapters_python_spin_calculator_test
-      COMMAND
-        "${Python3_EXECUTABLE}"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/test_spin_calculator.py"
-    )
-    set_tests_properties(
-      nep_adapters_python_spin_calculator_test
-      PROPERTIES
-        LABELS "parity;frontend;python;calculator;cpu;spin"
-        ENVIRONMENT
-          "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt;NEP_ADAPTERS_PYTHON_SPIN_REFERENCE=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/reference_small_pbc.txt"
-    )
-
-    if(TARGET NEPAdapters::cuda)
-      add_test(
-        NAME nep_adapters_python_cuda_smoke_test
-        COMMAND
-          "${Python3_EXECUTABLE}"
-          "${CMAKE_CURRENT_LIST_DIR}/tests/test_cuda_smoke.py"
-      )
-      set_tests_properties(
-        nep_adapters_python_cuda_smoke_test
-        PROPERTIES
-          LABELS "parity;frontend;python;cuda;spin"
-          ENVIRONMENT
-            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_ADAPTERS_PYTHON_TEST_MODEL=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/nep.txt;NEP_ADAPTERS_PYTHON_TEST_XYZ=${NEP_ADAPTERS_CPU_TEST_DATA_DIR}/train.xyz;NEP_ADAPTERS_PYTHON_SPIN_MODEL=${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
-      )
-    endif()
-  endif()
-
   if(TARGET NEPAdapters::cuda
      AND EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/nep.txt"
      AND EXISTS "${NEP_ADAPTERS_QNEP_TEST_DATA_DIR}/xyz.in"
@@ -297,10 +250,10 @@ endif()
 if(NEP_ADAPTERS_BUILD_TESTS)
   foreach(backend cpu cuda)
     if(TARGET NEPAdapters::${backend})
-      add_test(NAME nep_adapters_python_${backend}_spin_type_test
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/tests/test_spin_type.py")
-      set_tests_properties(nep_adapters_python_${backend}_spin_type_test PROPERTIES
-        LABELS "oracle;parity;frontend;python;${backend};spin3;model_format"
+      add_test(NAME nep_adapters_python_${backend}_spin_density_test
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/tests/test_spin_density.py")
+      set_tests_properties(nep_adapters_python_${backend}_spin_density_test PROPERTIES
+        LABELS "oracle;parity;frontend;python;${backend};spin;density;model_format"
         ENVIRONMENT "OMP_NUM_THREADS=4;PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};NEP_BLOCK_TEST_BACKEND=${backend}")
     endif()
   endforeach()

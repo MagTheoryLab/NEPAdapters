@@ -11,7 +11,7 @@ NEPAdapters 最初从 [NepTrainKit](https://github.com/aboys-cb/NepTrainKit) 内
 各部分的来源和关系如下：
 
 - **CPU 后端**以 Zheyong Fan、Junjie Wang、Eric Lindgren 等作者维护的 [NEP_CPU](https://github.com/brucefan1983/NEP_CPU) 独立 C++ 实现为基础，在保留原版权和 GPL 许可证声明的前提下，继续进行接口适配、正确性修复、OpenMP 并行和性能优化。
-- **CUDA 后端**由 NEPAdapters 独立实现，没有直接引入 GPUMD 的 CUDA 源码树。它遵循 NEP 论文和 [GPUMD](https://github.com/brucefan1983/GPUMD) 的模型格式、数学定义与结果语义，并以 NEP_CPU 参考结果和 CPU/CUDA 一致性测试约束正确性。这里的“独立实现”指代码和数据流设计独立，不代表重新发明了 NEP 方法。
+- **CUDA 后端**的普通 NEP 数据流由 NEPAdapters 实现；新的 spin 密度布局、系数表和 CUDA 核改编自 GPUMD-MagTheoryLab `c516@cd6ed6b9`，保留 LGPL 来源声明。CPU 的 spin 计算使用独立 FP64 实现，双方以独立 oracle 和导数检查约束正确性。
 - **适配层与前端**源自 NepTrainKit 的实际使用需求，负责稳定 API、跨平台打包、运行时能力检查，以及 Python、C/C++ 和 LAMMPS 集成。
 
 NEP 方法及其科学贡献来自 Zheyong Fan 等作者的原创工作，并在 GPUMD 中持续发展。NEPAdapters 的工作重点是工程实现与集成；它不是新的势函数方法，也不是 NEP_CPU 或 GPUMD 的官方发行组成部分。
@@ -200,21 +200,23 @@ LAMMPS 有两种支持的安装方式：
 
 ## 当前支持范围
 
-模型读取自动兼容旧的 `nep4`、`nep5`、`nep4_spin*`、charge 和响应模型格式，
-以及 GPUMD `spin3-refactor` 的 `nep ...` / `format_version 1` 块格式，无需手动转换。
-新格式支持 `model nep`、`qnep1`、`qnep2`、`nep_spin`（`spin_version 1`）、
-`nep_dipole` 和 `nep_polarizability`；也接受过渡格式 `nep_spin3` / `spin_mode 3`。
-`energy_reference` 按元素以双精度加回能量一次，不改变力、virial、磁力或 charge/BEC。
-结构系数的新旧排列在读取时转换，ANN、磁性径向系数和投影系数保持各自顺序。
+模型读取兼容普通 `nep4`、`nep5`、charge、响应模型的原格式，以及
+`nep ...` / `format_version 1` 块格式。块格式支持 `model nep`、`qnep1`、
+`qnep2`、`nep_dipole`、`nep_polarizability`。
 
-Spin 块模型的 `spin_type Fe` 只选择自旋自由度和磁性描述符中心；截断范围内的
-**所有元素**仍贡献几何环境。Fe 以外元素的有效自旋在计算前自动清零，返回的磁力为零，
-但保留磁性几何环境产生的原子力。调用方的原始自旋、能量和原子力标签不被改写，
-无需手动清理输入文件；磁力标签不参与推理。省略选择字段时默认全部元素。
-历史模型的 `spin_dof_type` / `spin_env_type` 继续保持原有数值语义：显式环境掩码生效，
-省略 `spin_env_type` 时仍默认与 `spin_dof_type` 相同，也仍允许环境元素的历史非零自旋输入。
-`spin_type` 与任一旧选择字段混用会报错；这里不采用 GPUMD c516 过渡输入中“忽略旧 env”的行为。
-以上规则共用于 CPU/CUDA、Python/ASE 和 LAMMPS 推理路径；自旋积分和热浴选择由 MD 程序负责。
+Spin 已切换到 GPUMD-MagTheoryLab `c516@cd6ed6b9` 的密度描述符，统一使用
+`model nep_spin` / `spin_version 1`，由 `spin_soc 0/1` 选择非 SOC/SOC。
+旧 Spin1/2/3 实现和模型读取已删除，包括旧块格式 `nep_spin3`；旧模型需要重新训练并按新格式导出，
+不能只改版本号沿用权重。新模型复用结构角向系数，后接径向混合、路径权重和中心混合参数；
+不再使用旧的独立磁性径向系数或 `spin_projection_size`。迁移范围和验证见
+[描述符迁移说明](docs/spin_density_migration.md)。
+
+`spin_type Fe` 选择具有自旋自由度的元素；Fe 以外元素的有效自旋与返回磁力为零。
+**所有几何原子仍是能量中心**，也仍作为几何邻居；非磁 Bi/O 中心的 spin 密度描述符可以非零，
+并贡献能量与原子力。输入的原始自旋不被改写，省略 `spin_type` 时默认所有元素可磁。
+旧 `spin_dof_type` / `spin_env_type` 字段不再接受。
+`energy_reference` 按元素以双精度加回能量一次，不改变力、virial、磁力或描述符。
+这些规则共用于 CPU/CUDA、Python/ASE 和 LAMMPS；自旋积分和热浴选择由 MD 程序负责。
 
 未知版本、重复字段、未知字段/块和参数计数不匹配会报错。支持的模型尺寸和后端能力仍受下表限制；
 这不新增温度模型、vdW 模型或 CUDA 响应模型的计算能力，也不恢复 NEP3 支持。
@@ -223,14 +225,14 @@ Spin 块模型的 `spin_type Fe` 只选择自旋自由度和磁性描述符中�
 |---|---|---|---|---|
 | Python / CPU | 支持 | charge/BEC 支持 | 支持 | dipole、polarizability、DFT-D3 支持；DFT-D3 仅普通非 spin、非 charge 模型 |
 | Python / CUDA | 支持 NEP4/NEP5 | 支持 direct；预编译 wheel 不包含 PPPM | 支持 | 不支持 dipole、polarizability、DFT-D3 |
-| LAMMPS / CPU 插件 | 支持，已完成普通模型 MPI 冒烟测试 | 尚未列入已验证支持范围 | 已验证单节点 1/2/4/8 个 MPI 进程，覆盖能量、力、磁力、virial、spin 读回和短程 dynspin | 不适用 |
+| LAMMPS / CPU 插件 | 支持，已完成普通模型 MPI 冒烟测试 | 尚未列入已验证支持范围 | 已验证单节点 1/2/4/8 个 MPI 进程的静态推理，覆盖能量、力、磁力、virial 和 spin 读回 | 不适用 |
 | LAMMPS / CUDA Kokkos 插件 | 支持 | **不支持，运行时会明确报错** | 已验证单节点 1/2/4/8 个 MPI 进程 | 不适用 |
 
 补充边界：
 
 - 所有 Python batch 接口目前只接受全周期 `pbc=(1, 1, 1)`。
 - LAMMPS spin 不使用单独的 `nep/spin/*` 名称；仍使用 `nep/cpu` 或 `nep/gpu/kk`，并配合 `atom_style spin` 或 `spin/kk`。
-- 构建 LAMMPS CPU plugin 且检测到 MPI launcher 时，CTest 除单 rank 外，还会根据 `MPIEXEC_MAX_NUMPROCS` 自动注册最多 2/4/8 ranks 的 spin 回归；在 Slurm 上应先申请足够的计算资源，再运行 `ctest -L mpi --output-on-failure`。
+- 构建 LAMMPS CPU 或 CUDA plugin 且检测到 MPI launcher 时，CTest 除单 rank 外，还会根据 `MPIEXEC_MAX_NUMPROCS` 自动注册最多 2/4/8 ranks 的 spin 回归；在 Slurm 上应先申请足够的计算资源，再运行 `ctest -L mpi --output-on-failure`。
 - qNEP 的 CUDA batch API 可用，但 LAMMPS Kokkos 需要独立的 ghost/charge 数据流，因此当前会明确拒绝该组合，不会静默降级。
 - virial 在不同公共入口有不同顺序；调用前请查 [Python 接口指南](docs/python.md) 或 [公共 API 契约](include/nep_adapters/api.h)。
 

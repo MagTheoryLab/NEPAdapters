@@ -64,7 +64,7 @@ if(TARGET NEPAdapters::cpu)
   target_compile_definitions(
     nep_adapters_bench_cpu_spin_lammps
     PRIVATE
-      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt"
+      NEP_ADAPTERS_SPIN_DENSITY_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
       NEP_ADAPTERS_NONMAG_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/cpu_baseline/nep.txt"
   )
   add_test(
@@ -128,7 +128,7 @@ if(TARGET NEPAdapters::cuda)
 endif()
 
 if(TARGET NEPAdapters::cuda AND TARGET NEPAdapters::cpu AND
-   EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt")
+   EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep")
   add_executable(nep_adapters_bench_spin_gpu cuda/bench_spin_gpu.cpp)
   target_link_libraries(
     nep_adapters_bench_spin_gpu
@@ -138,7 +138,7 @@ if(TARGET NEPAdapters::cuda AND TARGET NEPAdapters::cpu AND
   target_compile_definitions(
     nep_adapters_bench_spin_gpu
     PRIVATE
-      NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_chiral_protocol/nep.txt")
+      NEP_ADAPTERS_SPIN_DENSITY_FIXTURE="${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep")
   add_test(
     NAME nep_adapters_bench_spin_gpu
     COMMAND nep_adapters_bench_spin_gpu --warmup 1 --iterations 2 --replicate 2)

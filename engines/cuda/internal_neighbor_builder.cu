@@ -475,6 +475,12 @@ __global__ void build_neighbors_from_cells(
     }
   }
 
+  if (radial_count > radial_capacity) {
+    atomicMax(overflow + 1, radial_count);
+  }
+  if (angular_count > angular_capacity) {
+    atomicMax(overflow + 2, angular_count);
+  }
   nn_radial[atom] = min(radial_count, radial_capacity);
   nn_angular[atom] = min(angular_count, angular_capacity);
 }
@@ -601,6 +607,12 @@ __global__ void build_neighbors_from_batched_cells(
     }
   }
 
+  if (radial_count > radial_capacity) {
+    atomicMax(overflow + 1, radial_count);
+  }
+  if (angular_count > angular_capacity) {
+    atomicMax(overflow + 2, angular_count);
+  }
   nn_radial[atom] = min(radial_count, radial_capacity);
   nn_angular[atom] = min(angular_count, angular_capacity);
 }
@@ -744,6 +756,12 @@ __global__ void build_neighbors_from_batched_orthorhombic_cells(
     }
   }
 
+  if (radial_count > radial_capacity) {
+    atomicMax(overflow + 1, radial_count);
+  }
+  if (angular_count > angular_capacity) {
+    atomicMax(overflow + 2, angular_count);
+  }
   nn_radial[atom] = min(radial_count, radial_capacity);
   nn_angular[atom] = min(angular_count, angular_capacity);
 }
@@ -817,7 +835,7 @@ void build_internal_neighbors_on_device(
               static_cast<std::size_t>(protocol.neighbor_capacity_angular) *
               sizeof(int)),
       "zero angular neighbors");
-  check_cuda(cudaMemset(view.neighbor_overflow, 0, sizeof(int)),
+  check_cuda(cudaMemset(view.neighbor_overflow, 0, 3 * sizeof(int)),
              "zero neighbor overflow");
 
   const int blocks = (atom_count + kBlockSize - 1) / kBlockSize;
@@ -878,15 +896,17 @@ void build_internal_neighbors_on_device(
   check_cuda(cudaGetLastError(), "build internal neighbors");
   check_cuda(cudaDeviceSynchronize(), "synchronize internal neighbor build");
 
-  int overflow = 0;
+  int overflow[3] = {};
   check_cuda(
       cudaMemcpy(
-          &overflow,
+          overflow,
           view.neighbor_overflow,
-          sizeof(int),
+          sizeof(overflow),
           cudaMemcpyDeviceToHost),
       "copy neighbor overflow");
-  require(overflow == 0, "neighbor list exceeded workspace capacity");
+  if (overflow[0] != 0) {
+    throw NeighborCapacityExceeded(overflow[1], overflow[2]);
+  }
 }
 
 void build_internal_neighbors_batched(
@@ -930,7 +950,7 @@ void build_internal_neighbors_batched(
   check_cuda(cudaMemset(view.structure_cell_dims4, 0,
                         view.structure_capacity * 4 * sizeof(int)),
              "zero structure cell dims");
-  check_cuda(cudaMemset(view.neighbor_overflow, 0, sizeof(int)),
+  check_cuda(cudaMemset(view.neighbor_overflow, 0, 3 * sizeof(int)),
              "zero batched neighbor overflow");
 
   const int structure_blocks = (structure_count + kBlockSize - 1) / kBlockSize;
@@ -988,7 +1008,7 @@ void build_internal_neighbors_batched(
               static_cast<std::size_t>(protocol.neighbor_capacity_angular) *
               sizeof(int)),
       "zero batched angular neighbors");
-  check_cuda(cudaMemset(view.neighbor_overflow, 0, sizeof(int)),
+  check_cuda(cudaMemset(view.neighbor_overflow, 0, 3 * sizeof(int)),
              "zero batched neighbor overflow");
 
   const int blocks = (atom_count + kBlockSize - 1) / kBlockSize;
@@ -1101,15 +1121,17 @@ void build_internal_neighbors_batched(
   check_cuda(cudaGetLastError(), "build batched neighbors");
   check_cuda(cudaDeviceSynchronize(), "synchronize batched neighbor builder");
 
-  overflow = 0;
+  int neighbor_overflow[3] = {};
   check_cuda(
       cudaMemcpy(
-          &overflow,
+          neighbor_overflow,
           view.neighbor_overflow,
-          sizeof(int),
+          sizeof(neighbor_overflow),
           cudaMemcpyDeviceToHost),
       "copy batched neighbor overflow");
-  require(overflow == 0, "batched neighbor list exceeded CUDA workspace capacity");
+  if (neighbor_overflow[0] != 0) {
+    throw NeighborCapacityExceeded(neighbor_overflow[1], neighbor_overflow[2]);
+  }
 }
 
 }  // namespace nep_adapters::cuda_backend

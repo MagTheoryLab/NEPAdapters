@@ -202,8 +202,6 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
       (checked_count(protocol.basis_size_angular, "basis_size_angular") + 1);
   packed.descriptor_layout.radial_offset = 0;
   packed.descriptor_layout.angular_offset = packed.descriptor_layout.radial_count;
-  packed.descriptor_layout.spin_offset = protocol.ordinary_descriptor_parameter_count;
-  packed.descriptor_layout.spin_count = protocol.spin_descriptor_parameter_count;
   append_range(
       packed.descriptor_coefficients,
       raw,
@@ -248,11 +246,23 @@ HostModelParameters load_host_model_parameters(const std::string& model_path) {
   }
   raw_offset += protocol.descriptor_parameter_count;
   append_range(
-      packed.spin_projection_parameters,
+      packed.spin_parameters,
       raw,
       raw_offset,
-      protocol.spin_projection_parameter_count);
-  raw_offset += protocol.spin_projection_parameter_count;
+      protocol.spin_parameter_count);
+  raw_offset += protocol.spin_parameter_count;
+
+  if (protocol.spin_mode) {
+    packed.spin_radial_coefficients.assign(type_pairs * protocol.spin_compress * (protocol.spin_basis_size + 1), 0);
+    for (std::size_t pair = 0; pair < type_pairs; ++pair)
+      for (int c = 0; c < protocol.spin_compress; ++c)
+        for (int k = 0; k <= protocol.spin_basis_size; ++k)
+          for (int a = 0; a <= protocol.n_max_angular; ++a)
+            packed.spin_radial_coefficients[(pair * protocol.spin_compress + c) * (protocol.spin_basis_size + 1) + k] +=
+              packed.descriptor_coefficients_type_pair_major[packed.descriptor_layout.angular_offset +
+                (pair * (protocol.n_max_angular + 1) + a) * (protocol.spin_basis_size + 1) + k] *
+              packed.spin_parameters[a * protocol.spin_compress + c];
+  }
 
   if (raw_offset != protocol.model_parameter_count) {
     throw std::runtime_error("model parameter layout did not consume all model parameters");

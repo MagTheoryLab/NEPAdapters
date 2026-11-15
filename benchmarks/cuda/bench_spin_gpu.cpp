@@ -1,4 +1,6 @@
 #include "nep_adapters/api.h"
+#include "nep_adapters/detail/model_file.hpp"
+#include "../../engines/common/spin_density_layout.hpp"
 #include "nep_adapters/engines/cpu.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
@@ -85,7 +87,8 @@ int as_int(const std::string& value) {
 }
 
 std::string write_struct_model_from_spin() {
-  std::ifstream input(NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE);
+  nep_adapters::detail::ModelInput model_input(NEP_ADAPTERS_SPIN_DENSITY_FIXTURE);
+  auto& input = model_input.stream();
   if (!input) {
     std::cerr << "failed to open spin fixture\n";
     std::exit(EXIT_FAILURE);
@@ -105,11 +108,15 @@ std::string write_struct_model_from_spin() {
   const std::vector<std::string> first = split(lines[0]);
   std::size_t cursor = 1;
   int spin_compress = 0;
-  int spin_basis_size = 0;
+  int spin_lmax = 0, spin_order = 0, spin_soc = 0;
   while (cursor < lines.size()) {
     const std::vector<std::string> tokens = split(lines[cursor]);
-    if (tokens[0] == "spin_basis_size") {
-      spin_basis_size = as_int(tokens[1]);
+    if (tokens[0] == "spin_l_max") {
+      spin_lmax = as_int(tokens[1]);
+    } else if (tokens[0] == "spin_order") {
+      spin_order = as_int(tokens[1]);
+    } else if (tokens[0] == "spin_soc") {
+      spin_soc = as_int(tokens[1]);
     } else if (tokens[0] == "spin_compress") {
       spin_compress = as_int(tokens[1]);
     } else if (tokens[0] == "cutoff") {
@@ -139,17 +146,14 @@ std::string write_struct_model_from_spin() {
   }
   const int hidden = as_int(ann_tokens[1]);
   const int struct_dim = (n_max_radial + 1) + (n_max_angular + 1) * channels;
-  const int spin_dim = 2 + 4 * spin_compress + spin_compress +
-                       3 * spin_compress + 3 * spin_compress +
-                       spin_compress + spin_compress + spin_compress +
-                       std::min(2, spin_compress) + 2 * spin_compress;
+  const nep_adapters::spin_density::Layout layout(spin_compress, spin_lmax, spin_order, spin_soc);
+  const int spin_dim = layout.dimension;
   const int spin_model_dim = struct_dim + spin_dim;
   const int ordinary_coeff_count =
       num_types * num_types *
       ((n_max_radial + 1) * (basis_radial + 1) +
        (n_max_angular + 1) * (basis_angular + 1));
-  const int spin_coeff_count =
-      num_types * num_types * spin_compress * (spin_basis_size + 1);
+  const int spin_coeff_count = layout.parameter_count(n_max_angular + 1);
 
   std::vector<double> scalars;
   for (; cursor < lines.size(); ++cursor) {
@@ -165,6 +169,7 @@ std::string write_struct_model_from_spin() {
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() / "nep_adapters_struct_from_spin.nep";
   std::ofstream out(path);
+  out.precision(17);
   out << "nep4";
   for (std::size_t i = 1; i < first.size(); ++i) {
     out << ' ' << first[i];
@@ -438,7 +443,7 @@ int main(int argc, char** argv) {
   nep_adapters::register_cuda_engine();
   const std::string model_path = options.model_file.empty()
                                      ? (options.model == "spin"
-                                            ? NEP_ADAPTERS_SPIN_CHIRAL_FIXTURE
+                                            ? NEP_ADAPTERS_SPIN_DENSITY_FIXTURE
                                             : write_struct_model_from_spin())
                                      : options.model_file;
   NepaModel* model = nullptr;
@@ -475,7 +480,7 @@ int main(int argc, char** argv) {
       system.numneigh.empty()
           ? 0.0
           : static_cast<double>(neighbor_count) / system.atom_count;
-  std::cout << "{\"benchmark\":\"spin_chiral_fixture\","
+  std::cout << "{\"benchmark\":\"spin_density_fixture\","
             << "\"engine\":\"" << options.engine << "\","
             << "\"mode\":\"" << options.mode << "\","
             << "\"model\":\"" << options.model << "\","

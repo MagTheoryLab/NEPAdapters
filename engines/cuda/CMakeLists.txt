@@ -21,9 +21,9 @@ target_sources(nep_adapters_cuda PRIVATE
   qnep_charge.cu
   radial_force.cu
   runtime_probe.cu
-  spin_onsite.cu
-  spin_onsite_descriptors.cuh
-  spin_onsite_forces.cuh
+  spin_density.cu
+  spin_density_kernels.cuh
+  spin_density_md_layouts.cuh
   zbl_force.cu
 )
 set_source_files_properties(
@@ -38,7 +38,7 @@ set_source_files_properties(
   qnep_charge.cu
   radial_force.cu
   runtime_probe.cu
-  spin_onsite.cu
+  spin_density.cu
   zbl_force.cu
   PROPERTIES LANGUAGE CUDA)
 target_include_directories(

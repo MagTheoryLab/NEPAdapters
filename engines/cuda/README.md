@@ -35,7 +35,7 @@ qNEP 默认使用 direct reciprocal-space。实验性单节点 PPPM 只有在 `N
 - `cuda_engine.cpp`：engine 接口和调用方特定 staging；
 - `force_pipeline.*`：模型驱动的完整 force dataflow。调用方提供 topology 与输出请求；普通/spin 选择、ZBL 组合和 virial 放置都留在模块内部；
 - `device_operations.hpp`：device staging、邻居构建、descriptor、ANN、force 和输出的唯一私有接口。各 `.cu` 文件是独立 CUDA 编译单元，不是公共模块；
-- `spin_onsite.cu`：spin orchestration，descriptor 与 force device 实现放在 2 个私有 `.cuh` 中；
+- `spin_density.cu`：密度描述符与反向力计算的调度；`spin_density_kernels.cuh` 和 `spin_density_md_layouts.cuh` 改编自 c516 的 generic/编译布局，常用 C3L2S2 使用四线程协作；
 - `model_protocol.*`：模型协议解析与参数数量；
 - `device_model.hpp`：device model 接口；`model_parameters.cpp` 和 `device_model.cu` 分别实现 host packing 与 device upload；
 - `device_workspace.hpp`：workspace plan、allocation 与 view；`workspace_plan.cpp` 和 `device_workspace.cu` 实现规划和分配。

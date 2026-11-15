@@ -1,7 +1,10 @@
 #include "nep_adapters/api.h"
+#include "nep_adapters/detail/model_file.hpp"
+#include "../../engines/common/spin_density_layout.hpp"
 #include "nep_adapters/engines/cuda.hpp"
 
 #include "device_operations.hpp"
+#include "force_pipeline.hpp"
 #include "device_model.hpp"
 #include "device_workspace.hpp"
 #include "simulation_box.hpp"
@@ -196,7 +199,8 @@ int parse_model_int(const std::string& value) {
 }
 
 std::string write_struct_model_from_spin(const std::string& spin_model_path) {
-  std::ifstream input(spin_model_path);
+  nep_adapters::detail::ModelInput model_input(spin_model_path);
+  auto& input = model_input.stream();
   if (!input) {
     throw std::runtime_error("failed to open spin model: " + spin_model_path);
   }
@@ -215,11 +219,15 @@ std::string write_struct_model_from_spin(const std::string& spin_model_path) {
   const std::vector<std::string> first = split_tokens(lines[0]);
   std::size_t cursor = 1;
   int spin_compress = 0;
-  int spin_basis_size = 0;
+  int spin_lmax = 0, spin_order = 0, spin_soc = 0;
   while (cursor < lines.size()) {
     const std::vector<std::string> tokens = split_tokens(lines[cursor]);
-    if (tokens[0] == "spin_basis_size") {
-      spin_basis_size = parse_model_int(tokens[1]);
+    if (tokens[0] == "spin_l_max") {
+      spin_lmax = parse_model_int(tokens[1]);
+    } else if (tokens[0] == "spin_order") {
+      spin_order = parse_model_int(tokens[1]);
+    } else if (tokens[0] == "spin_soc") {
+      spin_soc = parse_model_int(tokens[1]);
     } else if (tokens[0] == "spin_compress") {
       spin_compress = parse_model_int(tokens[1]);
     } else if (tokens[0] == "cutoff") {
@@ -253,17 +261,14 @@ std::string write_struct_model_from_spin(const std::string& spin_model_path) {
   }
   const int hidden = parse_model_int(ann_tokens[1]);
   const int struct_dim = (n_max_radial + 1) + (n_max_angular + 1) * channels;
-  const int spin_dim =
-      2 + 4 * spin_compress + spin_compress + 3 * spin_compress +
-      3 * spin_compress + spin_compress + spin_compress + spin_compress +
-      std::min(2, spin_compress) + 2 * spin_compress;
+  const nep_adapters::spin_density::Layout layout(spin_compress, spin_lmax, spin_order, spin_soc);
+  const int spin_dim = layout.dimension;
   const int spin_model_dim = struct_dim + spin_dim;
   const int ordinary_coeff_count =
       num_types * num_types *
       ((n_max_radial + 1) * (basis_radial + 1) +
        (n_max_angular + 1) * (basis_angular + 1));
-  const int spin_coeff_count =
-      num_types * num_types * spin_compress * (spin_basis_size + 1);
+  const int spin_coeff_count = layout.parameter_count(n_max_angular + 1);
 
   std::vector<double> scalars;
   for (; cursor < lines.size(); ++cursor) {
@@ -280,6 +285,7 @@ std::string write_struct_model_from_spin(const std::string& spin_model_path) {
       std::filesystem::temp_directory_path() /
       "nep_adapters_lammps_device_struct_from_spin.nep";
   std::ofstream out(path);
+  out.precision(17);
   out << "nep4";
   for (std::size_t i = 1; i < first.size(); ++i) {
     out << ' ' << first[i];
@@ -962,11 +968,28 @@ std::size_t workspace_atom_capacity(const LayoutStorage& storage) {
   return static_cast<std::size_t>(atom_count);
 }
 
-void clear_potential(nep_adapters::cuda_backend::DeviceWorkspace& workspace) {
+void clear_workspace_outputs(nep_adapters::cuda_backend::DeviceWorkspace& workspace) {
   const nep_adapters::cuda_backend::DeviceWorkspaceView view = workspace.view();
-  check_cuda(
-      cudaMemset(view.potential, 0, view.atom_capacity * sizeof(double)),
-      "clear potential");
+  const auto clear = [&](double* output, int width) {
+    if (output) check_cuda(
+        cudaMemset(output, 0, view.atom_capacity * width * sizeof(double)),
+        "clear reused workspace output");
+  };
+  clear(view.potential, 1);
+  clear(view.force_soa3, 3);
+  clear(view.mforce_soa3, 3);
+  clear(view.virial_soa9, 9);
+}
+
+nep_adapters::cuda_backend::ForceEvaluationRequest reused_force_request(const Options& options) {
+  using namespace nep_adapters::cuda_backend;
+  ForceEvaluationRequest request;
+  request.topology = ForceNeighborTopology::external_full;
+  request.store_potential = options.write_totals || options.write_per_atom;
+  request.virial = options.write_per_atom ? VirialOutputMode::per_atom_n2 :
+      options.write_totals ? VirialOutputMode::total_only : VirialOutputMode::none;
+  request.spin_transfer_per_atom = options.write_spin_transfer;
+  return request;
 }
 
 void run_reused_workspace_once(
@@ -993,51 +1016,18 @@ void run_reused_workspace_once(
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
 
+  result.spin_transfer_per_atom_row_major9 = options.write_spin_transfer ? storage.spin_transfer : nullptr;
+  result.spin_transfer_atom_stride = 9;
+  result.spin_transfer_component_stride = 1;
   nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
-      input,
-      protocol,
-      workspace,
-      check_overflow);
-  const nep_adapters::cuda_backend::SimulationBox box = make_nonperiodic_box();
-  const bool store_potential =
-      options.write_totals || options.write_per_atom;
-  if (store_potential) {
-    clear_potential(workspace);
-  }
-  const bool has_angular = protocol.body_channels.channel_count() > 0;
-  nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
-      protocol,
-      storage.atom_count,
-      box,
-      model,
-      workspace,
-      nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
-  nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-      protocol, storage.atom_count, model, workspace);
-  const bool accumulate_virial = options.write_totals || options.write_per_atom;
-  const auto virial_target = accumulate_virial
-      ? nep_adapters::cuda_backend::VirialTarget::center_atom
-      : nep_adapters::cuda_backend::VirialTarget::none;
-  nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
-      protocol,
-      storage.atom_count,
-      box,
-      model,
-      workspace,
-      virial_target,
-      store_potential);
-  if (has_angular) {
-    nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
-        protocol,
-        storage.atom_count,
-        model,
-        workspace,
-        virial_target);
-  }
+      input, protocol, workspace, check_overflow,
+      protocol.spin_type_semantics ? model.view().spin_dof_type_active : nullptr);
+  clear_workspace_outputs(workspace);
+  nep_adapters::cuda_backend::run_force_pipeline(
+      protocol, reused_force_request(options), storage.atom_count,
+      make_nonperiodic_box(), model, workspace);
   nep_adapters::cuda_backend::write_lammps_device_outputs(
-      input,
-      result,
-      workspace);
+      input, result, workspace, protocol.spin_mode ? model.view().spin_dof_type_active : nullptr);
 }
 
 ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
@@ -1065,67 +1055,29 @@ ReusedWorkspaceTiming run_reused_workspace_once_breakdown(
   result.virial_atom_stride = storage.virial_atom_stride;
   result.virial_component_stride = storage.virial_component_stride;
 
-  const nep_adapters::cuda_backend::SimulationBox box = make_nonperiodic_box();
+  result.spin_transfer_per_atom_row_major9 = options.write_spin_transfer ? storage.spin_transfer : nullptr;
+  result.spin_transfer_atom_stride = 9;
+  result.spin_transfer_component_stride = 1;
   timing.stage_ms = time_synchronized_phase([&]() {
     nep_adapters::cuda_backend::stage_lammps_device_neighbors_on_device(
-        input,
-        protocol,
-        workspace,
-        check_overflow);
+        input, protocol, workspace, check_overflow,
+        protocol.spin_type_semantics ? model.view().spin_dof_type_active : nullptr);
   });
-  const bool store_potential =
-      options.write_totals || options.write_per_atom;
-  timing.clear_ms = time_synchronized_phase([&]() {
-    if (store_potential) {
-      clear_potential(workspace);
-    }
-  });
-  const bool has_angular = protocol.body_channels.channel_count() > 0;
-  timing.descriptor_ms = time_synchronized_phase([&]() {
-    nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
-        protocol,
-        storage.atom_count,
-        box,
-        model,
-        workspace,
-        nep_adapters::cuda_backend::DescriptorCoreTopology::single_box);
-  });
-  timing.ann_ms = time_synchronized_phase([&]() {
-    nep_adapters::cuda_backend::evaluate_ann_energy_on_device(
-        protocol, storage.atom_count, model, workspace);
-  });
-  timing.force_ms = time_synchronized_phase([&]() {
-    const bool accumulate_virial =
-        options.write_totals || options.write_per_atom;
-    const auto virial_target = accumulate_virial
-        ? nep_adapters::cuda_backend::VirialTarget::center_atom
-        : nep_adapters::cuda_backend::VirialTarget::none;
-    nep_adapters::cuda_backend::accumulate_lammps_radial_forces_on_device(
-        protocol,
-        storage.atom_count,
-        box,
-        model,
-        workspace,
-        virial_target,
-        store_potential);
-    if (has_angular) {
-      nep_adapters::cuda_backend::accumulate_l2_angular_forces_on_device(
-          protocol,
-          storage.atom_count,
-          model,
-          workspace,
-          virial_target);
-    }
-  });
+  timing.clear_ms = time_synchronized_phase([&]() { clear_workspace_outputs(workspace); });
+  nep_adapters::cuda_backend::ForcePipelineTimings pipeline;
+  nep_adapters::cuda_backend::run_force_pipeline(
+      protocol, reused_force_request(options), storage.atom_count,
+      make_nonperiodic_box(), model, workspace, &pipeline);
+  // The production pipeline times descriptor + ANN together.
+  timing.descriptor_ms = pipeline.descriptor_ann_ms;
+  timing.force_ms = pipeline.radial_force_ms + pipeline.angular_force_ms +
+      pipeline.zbl_force_ms + pipeline.spin_density_ms;
   timing.output_ms = time_synchronized_phase([&]() {
     nep_adapters::cuda_backend::write_lammps_device_outputs(
-        input,
-        result,
-        workspace);
+        input, result, workspace, protocol.spin_mode ? model.view().spin_dof_type_active : nullptr);
   });
-  timing.total_ms =
-      timing.stage_ms + timing.clear_ms + timing.radial_cache_ms +
-      timing.descriptor_ms + timing.ann_ms + timing.force_ms + timing.output_ms;
+  timing.total_ms = timing.stage_ms + timing.clear_ms + timing.descriptor_ms +
+      timing.force_ms + timing.output_ms;
   return timing;
 }
 
@@ -1145,7 +1097,7 @@ ReusedWorkspaceTiming time_reused_workspace_layout(
           external_protocol,
           workspace_atom_capacity(storage),
           static_cast<std::size_t>(storage.atom_count),
-          false));
+          options.write_per_atom, options.write_spin_transfer));
   for (int i = 0; i < options.warmup; ++i) {
     run_reused_workspace_once(
         external_protocol,

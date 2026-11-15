@@ -1,5 +1,5 @@
 #include "nep_adapters/detail/model_file.hpp"
-#include "../engines/common/spin_polynomial_layout.hpp"
+#include "../engines/common/spin_density_layout.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -151,20 +151,20 @@ Document read_document(std::istream& input) {
   return doc;
 }
 
-// Syntax/layout contract: GPUMD spin3-refactor b7d58c1, utilities/nep_*_file.
+// Syntax/layout contract: GPUMD c516 cd6ed6b9, NEP_Spin_Model_File.
 // Only structural coefficients transpose; magnetic and ANN parameters retain
 // their original order. Token strings preserve the CPU engine's FP64 inputs.
 std::string normalize(Document& doc, std::vector<double>& reference) {
   if (doc.field("format_version", 1, 1)[0] != "1") fail("unsupported format_version (expected 1)");
   const auto model = lower(doc.field("model", 1, 1)[0]);
-  const bool spin = model == "nep_spin" || model == "nep_spin3";
+  const bool spin = model == "nep_spin";
   const bool charge = model == "qnep1" || model == "qnep2";
   const bool response = model == "nep_dipole" || model == "nep_polarizability";
   if (!spin && !charge && !response && model != "nep") fail("unsupported model " + model);
   const std::size_t types = doc.elements.size(), pairs = types * types;
   const bool zbl = doc.fields.count("zbl") != 0;
   if (response && zbl) fail("ZBL is not supported for response models");
-  std::string tag = spin ? "nep4_spin3" : "nep4";
+  std::string tag = spin ? "nep4_spin_density" : "nep4";
   if (zbl) tag += "_zbl";
   if (charge) tag += model == "qnep1" ? "_charge1" : "_charge2";
   if (response) tag += model == "nep_dipole" ? "_dipole" : "_polarizability";
@@ -183,57 +183,64 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
     if (!spin) for (const auto& value : values) reference.push_back(number(value, "energy_reference"));
     else for (const auto& value : values) number(value, "energy_reference");
   }
-  int spin_dim = 0, magnetic_count = 0, projection = 0;
+  int spin_dim = 0, spin_parameter_count = 0;
   if (spin) {
-    const auto key = model == "nep_spin" ? "spin_version" : "spin_mode";
-    if (doc.field(key, 1, 1)[0] != (model == "nep_spin" ? "1" : "3"))
-      fail(std::string("unsupported ") + key);
+    if (doc.field("spin_version", 1, 1)[0] != "1") fail("unsupported spin_version");
     const bool selected = doc.fields.count("spin_type");
-    const bool dof = doc.fields.count("spin_dof_type"), env = doc.fields.count("spin_env_type");
-    if (selected && (dof || env))
-      fail("spin_type cannot be combined with legacy spin_dof_type/spin_env_type");
-    // New selectors restrict spin centers, never the geometric environment.
-    // Historical files retain their explicit env mask and env=dof default.
-    out << "spin_mode 3 " << 9 + (selected ? 2 : dof + env) << '\n';
+    out << "spin_mode 1 " << 8 + selected << '\n';
     emit("spin_baseline", doc.fields.at("energy_reference"));
     for (const auto* name : {"spin_basis_size", "spin_l_max", "spin_compress", "spin_order",
-                             "spin_soc", "spin_projection_size", "spin_scaler"})
+                             "spin_soc", "spin_scaler"})
       emit(name, doc.field(name, 1, 1));
     const int c = doc.integer("spin_compress", 0, 9);
-    const int sb = doc.integer("spin_basis_size", 0, 8);
-    const int l = doc.integer("spin_l_max", 0, 2);
-    const int order = doc.integer("spin_order", 0, 3);
+    const int sb = doc.integer("spin_basis_size", 0, 12);
+    const int l = doc.integer("spin_l_max", 0, 4);
+    const int order = doc.integer("spin_order", 0, 4);
     const int soc = doc.integer("spin_soc", 0, 1);
-    projection = doc.integer("spin_projection_size", 0, 324);
-    if (c == 0 || order == 0 || sb != 8 || projection != 4 * c * c ||
-        doc.integer("spin_scaler", 0, 1) != 1) fail("unsupported Spin3 shape");
-    spin_dim = common::make_spin_polynomial_layout(c, l, order, soc, true).descriptor_dim;
-    magnetic_count = static_cast<int>(pairs) * c * (sb + 1);
+    if (!c || !order || doc.integer("spin_scaler", 0, 1) != 1)
+      fail("unsupported NEP-spin shape");
+    const auto& nmax = doc.field("n_max", 2, 2);
+    (void)nmax;
+    const int na = doc.integer("n_max", 1, 8);
+    const auto& basis = doc.field("basis_size", 2, 2);
+    (void)basis;
+    if (sb != doc.integer("basis_size", 1, 12))
+      fail("spin_basis_size must equal the structural angular basis_size");
+    const spin_density::Layout layout(c, l, order, soc);
+    spin_dim = layout.dimension;
+    if (spin_dim > 96) fail("spin descriptor dimension exceeds 96");
+    spin_parameter_count = layout.parameter_count(na + 1);
     const auto& cutoff = doc.field("spin_cutoff", 1, types);
     if (cutoff.size() != 1 && cutoff.size() != types) fail("invalid spin_cutoff count");
-    for (const auto& value : cutoff) if (number(value, "spin_cutoff") <= 0) fail("invalid spin_cutoff");
+    const auto& structural_cutoff = doc.field("cutoff", 4, 4);
+    const double radial = number(structural_cutoff[0], "cutoff");
+    const double angular = number(structural_cutoff[1], "cutoff");
+    if (angular < 3 || radial > 100) fail("spin cutoff requires 3 <= angular <= radial <= 100");
+    for (const auto& value : cutoff)
+      if (number(value, "spin_cutoff") <= 0 || number(value, "spin_cutoff") > radial)
+        fail("spin_cutoff must be positive and not exceed the structural radial cutoff");
     emit("spin_cutoff", cutoff);
-    for (const auto* name : {"spin_type", "spin_dof_type", "spin_env_type"}) {
-      if (!doc.fields.count(name)) continue;
-      auto values = doc.field(name, 1, types);
+    if (selected) {
+      auto values = doc.field("spin_type", 1, types);
       std::set<std::string> seen;
       for (auto& value : values) {
         auto found = std::find_if(doc.elements.begin(), doc.elements.end(),
           [&](const auto& element) { return lower(element) == lower(value); });
-        if (found == doc.elements.end() || !seen.insert(*found).second) fail(std::string("invalid ") + name);
+        if (found == doc.elements.end() || !seen.insert(*found).second) fail("invalid spin_type");
         value = *found;
       }
-      emit(std::string(name) == "spin_type" ? "spin_dof_type" : name, values);
+      emit("spin_type", values);
     }
-    if (selected) emit("spin_env_type", doc.elements);
   }
+
   bool flexible_zbl = false;
   if (zbl) {
     const auto& values = doc.field("zbl", 2, 3);
     const double inner = number(values[0], "zbl"), outer = number(values[1], "zbl");
     flexible_zbl = inner == 0 && outer == 0;
     if (flexible_zbl ? values.size() != 2 : inner < 0 || outer <= inner) fail("invalid ZBL cutoffs");
-    if (values.size() == 3 && number(values[2], "zbl") <= 0) fail("invalid ZBL factor");
+    if (spin && flexible_zbl) fail("NEP-spin does not support flexible ZBL");
+    if (values.size() == 3 && (spin ? number(values[2], "zbl") < 0.5 : number(values[2], "zbl") <= 0.0)) fail("invalid ZBL factor");
     emit("zbl", values);
   }
   const auto& cutoff = doc.field("cutoff", 4, 2 * types + 2);
@@ -261,6 +268,9 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
     if (flag && l < minimum[i]) fail("l_max flag exceeds angular order");
     channels += flag != 0;
   }
+  if (spin && l < 2) fail("NEP-spin requires structural l_max >= 2");
+  if (spin && doc.integer("l_max", 1, 2) == 1)
+    fail("NEP-spin requires the q222 flag to be 0 or 2");
   const int dim = nr + 1 + (na + 1) * channels + spin_dim;
   if ((na + 1) * channels > 90 || dim > (spin ? 199 : 103)) fail("descriptor dimension exceeds supported range");
   const int h1 = doc.integer("ann", 0, 120), h2 = doc.integer("ann", 1, 120);
@@ -269,7 +279,7 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
   ann_count = ann_count * types + (charge ? 2 : 1);
   if (model == "nep_polarizability") ann_count *= 2;
   const std::size_t radial_basis = (nr + 1) * (br + 1), angular_basis = (na + 1) * (ba + 1);
-  auto parameters = doc.block("parameters", ann_count + pairs * (radial_basis + angular_basis) + magnetic_count + projection);
+  auto parameters = doc.block("parameters", ann_count + pairs * (radial_basis + angular_basis) + spin_parameter_count);
   std::size_t offset = ann_count;
   for (const auto count : {radial_basis, angular_basis}) {
     const Tokens original(parameters.begin() + offset, parameters.begin() + offset + pairs * count);
@@ -302,11 +312,13 @@ ModelInput::ModelInput(const std::string& path) : file_(open_model_input(path)) 
   file_ >> token;
   file_.clear();
   file_.seekg(0);
+  if (lower(token).find("spin") != std::string::npos)
+    fail("legacy Spin1/Spin2/Spin3 models were removed; export a density NEP-spin block model from GPUMD c516");
   block_format_ = lower(token) == "nep";
   if (block_format_) {
     auto doc = read_document(file_);
     converted_.str(normalize(doc, reference_));
-    spin_type_semantics_ = doc.fields.count("spin_type") != 0;
+    spin_type_semantics_ = lower(doc.fields.at("model")[0]) == "nep_spin";
   }
 }
 }  // namespace nep_adapters::detail

@@ -37,8 +37,7 @@ const int MAX_NEURON = 120; // maximum number of neurons in the hidden layer
 const int MN = 1000;        // default batch capacity; DFT-D3 grows it as needed
 const int NUM_OF_ABC = 80;  // 3 + 5 + 7 + 9 + 11 + 13 + 15 + 17 for L_max = 8
 const int MAX_NUM_N = 17;   // basis_size_radial+1 = 16+1
-// Unified spin2 O3/C9 reaches 280 descriptors.  Keep a small headroom for
-// future protocol-compatible channel layouts without changing ANN storage.
+// Shared ANN scratch accommodates structural and density spin descriptors.
 const int MAX_DIM = 320;
 const int MAX_DIM_ANGULAR = 90;
 const double C3B[NUM_OF_ABC] = {

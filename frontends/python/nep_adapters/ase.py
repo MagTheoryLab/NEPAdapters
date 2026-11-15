@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .calculator import NEPCalculator, SpinPrediction
+from .calculator import NEPCalculator, SpinPrediction, _structure_spins
 
 try:
     from ase.calculators.calculator import Calculator, all_changes
@@ -29,6 +29,21 @@ def _stress_from_nep_compute_virial(virial9, atoms):
     return full_3x3_to_voigt_6_stress(stress_matrix)
 
 
+def _spin_state_changed(previous, atoms):
+    return previous is not None and not np.array_equal(
+        _structure_spins(previous, required=False),
+        _structure_spins(atoms, required=False),
+    )
+
+
+class _SpinSinglePointCalculator(SinglePointCalculator):
+    def check_state(self, atoms, tol=1e-15):
+        changes = super().check_state(atoms, tol)
+        if _spin_state_changed(self.atoms, atoms):
+            changes.append("spins")
+        return changes
+
+
 class NepAseCalculator(Calculator):
     implemented_properties = [
         "energy",
@@ -42,6 +57,12 @@ class NepAseCalculator(Calculator):
     def __init__(self, model_file="nep.txt", backend="cpu", **kwargs):
         super().__init__(**kwargs)
         self._calc = NEPCalculator(model_file, backend=backend)
+
+    def check_state(self, atoms, tol=1e-15):
+        changes = super().check_state(atoms, tol)
+        if self._calc.model_info.model_type == "spin" and _spin_state_changed(self.atoms, atoms):
+            changes.append("spins")
+        return changes
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         if properties is None:
@@ -75,8 +96,9 @@ def attach_single_point(atoms_or_list, calculator: NEPCalculator, calc_descripto
     else:
         prediction = calculator.predict_structures(atoms_list)
     force_blocks = prediction.force_blocks()
+    single_point = _SpinSinglePointCalculator if isinstance(prediction, SpinPrediction) else SinglePointCalculator
     for index, atoms in enumerate(atoms_list):
-        spc = SinglePointCalculator(
+        spc = single_point(
             atoms,
             energy=float(prediction.energy[index]),
             forces=force_blocks[index],

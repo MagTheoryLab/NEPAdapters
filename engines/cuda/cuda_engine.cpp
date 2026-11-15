@@ -1,5 +1,6 @@
 #include "nep_adapters/engine.hpp"
 #include "nep_adapters/engines/cuda.hpp"
+#include "nep_adapters/detail/structure_batch.hpp"
 
 #include "device_operations.hpp"
 #include "device_model.hpp"
@@ -26,13 +27,6 @@
 #include <cuda_runtime.h>
 
 namespace {
-
-bool valid_batch(const NepaStructureBatch& batch) {
-  return batch.num_structures > 0 && batch.total_atoms > 0 &&
-         batch.atom_counts != nullptr && batch.atom_offsets != nullptr &&
-         batch.types != nullptr && batch.positions_aos3 != nullptr &&
-         batch.boxes_row_major9 != nullptr;
-}
 
 std::size_t max_structure_atom_count(const NepaStructureBatch& batch) {
   std::size_t maximum = 0;
@@ -977,21 +971,13 @@ class CudaModel : public nep_adapters::Model {
       const NepaStructureBatch& batch,
       NepaFindForceResult& result,
       bool allow_periodic_expansion = true) {
-    if (!valid_batch(batch) || result.energy_per_structure == nullptr ||
+    if (!nep_adapters::detail::valid_structure_batch(batch, protocol_.num_types) ||
+        result.energy_per_structure == nullptr ||
         result.forces_aos3 == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     if (is_cancelled()) {
       return NEPA_STATUS_CANCELLED;
-    }
-
-    for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
-      const std::int32_t atom_count = batch.atom_counts[structure];
-      const std::int32_t atom_offset = batch.atom_offsets[structure];
-      if (atom_count <= 0 || atom_offset < 0 ||
-          atom_offset + atom_count > batch.total_atoms) {
-        return NEPA_STATUS_INVALID_ARGUMENT;
-      }
     }
 
     try {
@@ -1042,18 +1028,11 @@ class CudaModel : public nep_adapters::Model {
               result.spin_transfer_per_atom_row_major9 != nullptr);
 
       if (multi_box_execution) {
-        nep_adapters::cuda_backend::stage_batch_on_device(
-            batch, protocol_.num_types, workspace);
+        stage_and_build_internal_neighbors(batch, workspace);
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
-        nep_adapters::cuda_backend::build_internal_neighbors_batched(
-            protocol_,
-            batch.num_structures,
-            batch.total_atoms,
-            workspace,
-            nep_adapters::cuda_backend::batch_boxes_are_orthorhombic(batch));
         const auto force_request = make_force_evaluation_request(
             nep_adapters::cuda_backend::
                 ForceNeighborTopology::batched_multi_box,
@@ -1094,9 +1073,7 @@ class CudaModel : public nep_adapters::Model {
         if (!make_simulation_box(single.batch, box)) {
           return NEPA_STATUS_UNSUPPORTED;
         }
-        nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, protocol_.num_types, workspace,
-            protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
+        stage_and_build_internal_neighbors(single.batch, workspace, &box);
         const auto view = workspace.view();
         clear_device_doubles(view.potential, view.atom_capacity);
         clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
@@ -1104,11 +1081,6 @@ class CudaModel : public nep_adapters::Model {
           clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
         }
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
-        nep_adapters::cuda_backend::build_internal_neighbors_on_device(
-            protocol_,
-            single.atom_count,
-            box,
-            workspace);
         const bool has_angular = needs_angular_terms(protocol_);
         if (protocol_.spin_mode != 0 || protocol_.charge_mode == 0) {
           const auto force_request = make_force_evaluation_request(
@@ -1231,7 +1203,8 @@ class CudaModel : public nep_adapters::Model {
   NepaStatus find_descriptors(
       const NepaStructureBatch& batch,
       NepaFindDescriptorResult& result) override {
-    if (!valid_batch(batch) || result.descriptors == nullptr) {
+    if (!nep_adapters::detail::valid_structure_batch(batch, protocol_.num_types) ||
+        result.descriptors == nullptr) {
       return NEPA_STATUS_INVALID_ARGUMENT;
     }
     if (is_cancelled()) {
@@ -1292,14 +1265,7 @@ class CudaModel : public nep_adapters::Model {
         if (!make_simulation_box(single.batch, box)) {
           return NEPA_STATUS_UNSUPPORTED;
         }
-        nep_adapters::cuda_backend::stage_batch_on_device(
-            single.batch, protocol_.num_types, workspace,
-            protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
-        nep_adapters::cuda_backend::build_internal_neighbors_on_device(
-            protocol_,
-            single.atom_count,
-            box,
-            workspace);
+        stage_and_build_internal_neighbors(single.batch, workspace, &box);
         nep_adapters::cuda_backend::build_descriptor_core_from_positions_on_device(
             protocol_,
             single.atom_count,
@@ -1752,6 +1718,58 @@ class CudaModel : public nep_adapters::Model {
   }
 
  private:
+  void stage_and_build_internal_neighbors(
+      const NepaStructureBatch& batch,
+      nep_adapters::cuda_backend::DeviceWorkspace& workspace,
+      const nep_adapters::cuda_backend::SimulationBox* box = nullptr) {
+    using namespace nep_adapters::cuda_backend;
+    while (true) {
+      stage_batch_on_device(
+          batch, protocol_.num_types, workspace,
+          protocol_.spin_type_semantics ? device_.view().spin_dof_type_active : nullptr);
+      try {
+        if (box != nullptr) {
+          build_internal_neighbors_on_device(
+              protocol_, batch.total_atoms, *box, workspace);
+        } else {
+          build_internal_neighbors_batched(
+              protocol_, batch.num_structures, batch.total_atoms, workspace,
+              batch_boxes_are_orthorhombic(batch));
+        }
+        return;
+      } catch (const NeighborCapacityExceeded& needed) {
+        ModelProtocol grown = protocol_;
+        // Keep headroom for later frames, without exceeding the integer layout.
+        const auto grow = [](int current, int required) {
+          if (required <= current) {
+            return current;
+          }
+          const std::int64_t padded =
+              static_cast<std::int64_t>(required) + (required + 3LL) / 4;
+          return static_cast<int>(std::min<std::int64_t>(
+              padded, std::numeric_limits<int>::max()));
+        };
+        grown.neighbor_capacity_radial =
+            grow(protocol_.neighbor_capacity_radial, needed.radial);
+        grown.neighbor_capacity_angular =
+            grow(protocol_.neighbor_capacity_angular, needed.angular);
+        if (grown.neighbor_capacity_radial == protocol_.neighbor_capacity_radial &&
+            grown.neighbor_capacity_angular == protocol_.neighbor_capacity_angular) {
+          throw;
+        }
+        const auto view = workspace.view();
+        DeviceWorkspace replacement(make_internal_neighbor_workspace_plan(
+            grown, view.atom_capacity, view.structure_capacity,
+            view.spin_transfer_soa9 != nullptr));
+        // Preserve the workspace object's address, and only publish capacities
+        // after allocation succeeds. The next pass restores all staged inputs.
+        workspace = std::move(replacement);
+        protocol_.neighbor_capacity_radial = grown.neighbor_capacity_radial;
+        protocol_.neighbor_capacity_angular = grown.neighbor_capacity_angular;
+      }
+    }
+  }
+
   nep_adapters::cuda_backend::DeviceWorkspace& batch_workspace(
       std::size_t atom_capacity,
       std::size_t structure_capacity,
