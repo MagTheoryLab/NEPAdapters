@@ -22,3 +22,5 @@ cmake -S "$work/source/runtimes" -B "$work/build" \
   -DLIBOMP_INSTALL_ALIASES=OFF
 cmake --build "$work/build" --parallel 3
 cmake --install "$work/build"
+# Delocate must find the runtime before wheel-local library IDs are normalized.
+install_name_tool -id "$work/install/lib/libomp.dylib" "$work/install/lib/libomp.dylib"
