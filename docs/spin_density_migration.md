@@ -28,7 +28,8 @@ NEPAdapters 的 spin 后端对齐 GPUMD-MagTheoryLab `c516` 的
 
 范围与 c516 对齐：`spin_compress=1..9`、`spin_l_max=0..4`、
 `spin_order=1..4`、`spin_basis_size=basis_size_angular=0..12`；
-spin 维数不超过 96，总维数不超过 199。`spin_cutoff` 可以统一指定或按元素
+不再单独限制 spin 维数，总维数不超过 339（结构最多 103、spin 最多 236）。
+`spin_cutoff` 可以统一指定或按元素
 指定，pair cutoff 取平均，且每个值不能超过结构 radial cutoff。
 结构角向 cutoff 至少为 3，结构 `l_max` 至少为 2；spin 不支持 flexible ZBL。
 

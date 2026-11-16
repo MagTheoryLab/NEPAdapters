@@ -19,6 +19,7 @@
 
 namespace {
 int g_descriptor_dim = 0;
+int g_structural_dim = 30;
 bool g_spin_type_semantics = true;
 std::vector<int> g_active;
 
@@ -48,6 +49,11 @@ std::vector<Case> read_oracle(const std::string& path) {
   if (token != "descriptor_dim" || descriptor_dim < 1) throw std::runtime_error("bad dimension");
   g_descriptor_dim = descriptor_dim;
   input >> token;
+  if (token == "structural_dim") {
+    input >> g_structural_dim >> token;
+    if (g_structural_dim < 1 || g_structural_dim >= descriptor_dim)
+      throw std::runtime_error("bad structural dimension");
+  }
   if (token != "active") throw std::runtime_error("missing active mask");
   g_active.resize(3);
   for (auto& v : g_active) input >> v;
@@ -354,7 +360,7 @@ bool check_case(NepaModel* model, const Case& item, bool) {
   double descriptor = 0;
   if (!item.descriptor.empty())
     for (int a = 0; a < item.atoms; ++a)
-      for (int d = 30; d < g_descriptor_dim; ++d)
+      for (int d = g_structural_dim; d < g_descriptor_dim; ++d)
         descriptor = std::max(descriptor, std::abs(out.descriptor[a*g_descriptor_dim+d] - item.descriptor[a*g_descriptor_dim+d]));
   const double reuse = std::max({max_abs(out.forces, steady.forces), max_abs(out.mforces, steady.mforces),
     max_abs(out.potential, steady.potential)});

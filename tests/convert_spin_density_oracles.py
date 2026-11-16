@@ -13,8 +13,11 @@ def convert(root):
         assert hashlib.sha256(model.read_bytes()).hexdigest() == record['model_sha256']
         active = record.get('active', [True, False, False])
         lines = ['spin_density_oracle_v1', 'model_sha256 ' + record['model_sha256'],
-                 'descriptor_dim ' + str(record['dimension']),
-                 'active ' + ' '.join(str(int(v)) for v in active)]
+                 'descriptor_dim ' + str(record['dimension'])]
+        structural_dim = record.get('structural_dimension', 30)
+        if structural_dim != 30:
+            lines.append('structural_dim ' + str(structural_dim))
+        lines.append('active ' + ' '.join(str(int(v)) for v in active))
         cases = record['cases']
         cases = cases.items() if isinstance(cases, dict) else ((c['name'], c) for c in cases)
         for name, case in cases:
@@ -28,10 +31,10 @@ def convert(root):
                     values = case[source]
                     if values and isinstance(values[0], list): values = sum(values, [])
                 elif key == 'descriptor' and 'descriptor' in case:
-                    scalers = record['scaler'][30:]
+                    scalers = record['scaler'][structural_dim:]
                     values = []
                     for row in case['descriptor']:
-                        values.extend([0.] * 30 + [v*s for v, s in zip(row, scalers)])
+                        values.extend([0.] * structural_dim + [v*s for v, s in zip(row, scalers)])
                 else:
                     values = []
                 lines.append(' '.join([key, str(len(values)), *(format(v, '.17g') for v in values)]))

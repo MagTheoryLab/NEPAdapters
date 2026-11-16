@@ -208,7 +208,6 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
       fail("spin_basis_size must equal the structural angular basis_size");
     const spin_density::Layout layout(c, l, order, soc);
     spin_dim = layout.dimension;
-    if (spin_dim > 96) fail("spin descriptor dimension exceeds 96");
     spin_parameter_count = layout.parameter_count(na + 1);
     const auto& cutoff = doc.field("spin_cutoff", 1, types);
     if (cutoff.size() != 1 && cutoff.size() != types) fail("invalid spin_cutoff count");
@@ -272,7 +271,7 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
   if (spin && doc.integer("l_max", 1, 2) == 1)
     fail("NEP-spin requires the q222 flag to be 0 or 2");
   const int dim = nr + 1 + (na + 1) * channels + spin_dim;
-  if ((na + 1) * channels > 90 || dim > (spin ? 199 : 103)) fail("descriptor dimension exceeds supported range");
+  if ((na + 1) * channels > 90 || dim > (spin ? 339 : 103)) fail("descriptor dimension exceeds supported range");
   const int h1 = doc.integer("ann", 0, 120), h2 = doc.integer("ann", 1, 120);
   if (!h1 || (h2 && model != "nep")) fail("unsupported ANN shape");
   std::size_t ann_count = h2 ? (dim + 1) * h1 + (h1 + 2) * h2 : (dim + 2 + charge) * h1;
