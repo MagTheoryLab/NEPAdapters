@@ -16,8 +16,10 @@ from pathlib import Path
 
 
 class Oracle:
-    def __init__(self, channels, lmax, order, active=(True, False, False)):
+    def __init__(self, channels, lmax, order, active=(True, False, False), maximal_structure=False):
         self.C, self.L, self.S = channels, lmax, order
+        self.nr, self.na = (12, 8) if maximal_structure else (4, 4)
+        self.struct_dim = 103 if maximal_structure else 30
         self.active = active
         self.cutoffs = np.array([6., 5., 4.])
         self.primitives = [(d, j) for d in range(order+1)
@@ -27,15 +29,15 @@ class Oracle:
                       for p, (d, rank) in enumerate(self.primitives) if rank == j
                       for site in range(2 if d else 1)]
         local = sum(d > 0 and j == 0 for d, j in self.primitives)
-        self.dim = 30 + local + channels*(len(self.sectors)+1)
+        self.dim = self.struct_dim + local + channels*(len(self.sectors)+1)
         self.H = 6
         rng = np.random.default_rng(3401+channels+10*lmax+100*order)
         f32 = lambda x: np.asarray(x, dtype=np.float32).astype(np.float64)
-        self.mix = f32(rng.uniform(.08, .3, (5, channels)))
+        self.mix = f32(rng.uniform(.08, .3, (self.na+1, channels)))
         self.weight = f32(rng.uniform(-.5, .5, (len(self.paths), channels)))
         self.center = f32(rng.uniform(-.3, .3, (len(self.primitives)-1, channels)))
         self.W = f32(rng.uniform(-.18, .18, (3, self.H, self.dim)))
-        self.W[:, :, :30] = 0  # Isolate spin derivatives; shared lattice tested separately.
+        self.W[:, :, :self.struct_dim] = 0  # Isolate spin derivatives; shared lattice tested separately.
         self.b = f32(rng.uniform(-.07, .07, (3, self.H)))
         self.v = f32(rng.uniform(-.3, .3, (3, self.H)))
         self.b1 = float(f32(.021))
@@ -114,7 +116,7 @@ class Oracle:
                 norms = (sp*sp).sum(axis=1)
                 gram = self.legendre(g, np.einsum('ai,bi->ab', direction, direction))*self.legendre(j, np.einsum('ai,bi->ab', sp, sp), norms[:, None]*norms[None, :])
                 row.extend(np.einsum('ac,ab,bc->c', amp, gram, amp))
-            features.append(np.r_[np.zeros(30), row])
+            features.append(np.r_[np.zeros(self.struct_dim), row])
         q = np.array(features)
         hidden = np.tanh(np.einsum('nhd,nd->nh', self.W[types], q*self.scaler)-self.b[types])
         potential = (hidden*self.v[types]).sum(axis=1)-self.b1
@@ -140,7 +142,7 @@ class Oracle:
                 plus, minus = np.eye(3)+strain, np.eye(3)-strain
                 virial[a, b] = -(energy(r@plus, spin, cell@plus)-energy(r@minus, spin, cell@minus))/(2*step)
         result.update(energy=float(potential.sum()), potential=potential.tolist(),
-                      descriptor=q[:, 30:].tolist(), force=force.tolist(), mforce=mforce.tolist(),
+                      descriptor=q[:, self.struct_dim:].tolist(), force=force.tolist(), mforce=mforce.tolist(),
                       virial=virial.flatten().tolist())
         return result
 
@@ -148,7 +150,7 @@ class Oracle:
         parameters = []
         for t in range(3):
             parameters.extend(self.W[t].flatten()); parameters.extend(self.b[t]); parameters.extend(self.v[t])
-        parameters += [self.b1]+[0.]*405+[self.coefficient]*405
+        parameters += [self.b1]+[0.]*(9*(self.nr+1)*9)+[self.coefficient]*(9*(self.na+1)*9)
         for array in (self.mix, self.weight, self.center):
             parameters.extend(array.flatten())
         text = f'''nep 3 Fe Bi O
@@ -156,9 +158,9 @@ format_version 1
 model nep_spin
 spin_version 1
 cutoff 6 5 128 128
-n_max 4 4
+n_max {self.nr} {self.na}
 basis_size 8 8
-l_max 4 2 0
+l_max {'8 2 1' if self.struct_dim == 103 else '4 2 0'}
 ann {self.H} 0
 spin_basis_size 8
 spin_l_max {self.L}
@@ -187,9 +189,9 @@ def generate(directory):
     for C, L, S, active in [(3,2,2,(True,False,False)), (2,1,4,(True,False,False)),
                            (1,3,2,(True,False,False)), (1,4,4,(True,False,False)),
                            (1,0,2,(True,False,False)), (3,2,2,(True,True,False)),
-                           (3,4,4,(True,True,False))]:
+                           (3,4,4,(True,True,False)), (9,4,4,(True,True,False))]:
         name = f'c{C}l{L}s{S}'+('-Bi' if active[1] else '')
-        oracle = Oracle(C,L,S,active)
+        oracle = Oracle(C,L,S,active,maximal_structure=C==9)
         cases = [oracle.case('large',r,spins,cell), oracle.case('zero',r,np.zeros_like(spins),cell)]
         if (C,L,S) in ((3,2,2), (3,4,4)):
             cases += [oracle.case('triclinic',r,spins,np.array([[4.4,0,0],[.7,4.8,0],[.2,.6,4.5]])),
@@ -206,7 +208,7 @@ def generate(directory):
             case['force']=(np.array(case['force'])@R.T).tolist();case['mforce']=(np.array(case['mforce'])@Q.T).tolist();case['virial']=(R@np.array(case['virial']).reshape(3,3)@R.T).flatten().tolist()
             got,q=oracle.evaluate(np.array(case['positions']),np.array(case['spins']),np.array(case['cell']).reshape(3,3),np.array([0,0,1,2]),oracle.edges(case))
             assert np.max(np.abs(got-np.array(case['potential'])))<1e-11
-            assert np.max(np.abs(q[:,30:]-np.array(case['descriptor'])))<1e-10
+            assert np.max(np.abs(q[:,oracle.struct_dim:]-np.array(case['descriptor'])))<1e-10
             cases.append(case)
         if L>=1:
             changed=spins.copy();changed[0]=changed[0]@spin_rot.T
@@ -219,6 +221,8 @@ def generate(directory):
         model=oracle.model();(directory/(name+'.nep')).write_text(model)
         record=dict(C=C,L=L,S=S,neurons=oracle.H,dimension=oracle.dim,scaler=oracle.scaler.tolist(),active=list(active),cases=cases,
                     model_sha256=hashlib.sha256(model.encode()).hexdigest(),fd_step_check=float(fd_error))
+        if oracle.struct_dim != 30:
+            record['structural_dimension'] = oracle.struct_dim
         (directory/(name+'.json')).write_text(json.dumps(record,indent=2,allow_nan=False)+'\n')
         print(name,oracle.dim,len(cases),'FD consistency',fd_error,flush=True)
 
