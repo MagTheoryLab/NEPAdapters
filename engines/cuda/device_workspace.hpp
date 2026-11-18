@@ -118,6 +118,9 @@ struct DeviceWorkspaceView {
   float* f12z = nullptr;
   float* per_atom_virial_float_soa9 = nullptr;
   float* spin_moments = nullptr;
+  void* spin_radial_cache = nullptr;
+  int* spin_nn = nullptr;
+  int* spin_nl = nullptr;
 };
 
 class DeviceWorkspace {

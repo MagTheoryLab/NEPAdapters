@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model_protocol.hpp"
+#include "spin_md_projection.hpp"
 
 #include <cstddef>
 #include <string>
@@ -74,7 +75,9 @@ struct DeviceModelUploadSummary {
 
 struct DeviceModelView {
   spin_density::View spin_layout{};
-  const int* spin_reverse_index = nullptr;
+  spin_density::ProjectionView spin_forward{}, spin_transpose{};
+  const int* spin_md_adjoint_order = nullptr;
+  const double* spin_radial_coefficients_wide = nullptr;
   const float* spin_radial_coefficients = nullptr;
   const float* ann_type_major = nullptr;
   const float* ann_type_major_qscaled = nullptr;

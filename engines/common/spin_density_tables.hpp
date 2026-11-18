@@ -2059,7 +2059,7 @@ static const Coupling couplings[] = {
   {4, 4, 4, 8, 8, 4, 0.31289310938737191},
 };
 struct Harmonic { int component, x, y, z; double value; };
-static const Harmonic harmonics[] = {
+static constexpr Harmonic harmonics[] = {
   {0, 0, 0, 0, 0.99999999999999944},
   {3, 0, 0, 1, 1.7320508075688763},
   {2, 0, 1, 0, 1.732050807568877},
