@@ -22,8 +22,16 @@ target_sources(nep_adapters_cuda PRIVATE
   radial_force.cu
   runtime_probe.cu
   spin_density.cu
-  spin_density_kernels.cuh
-  spin_density_md_layouts.cuh
+  spin_md_l0.cu
+  spin_md_l1.cu
+  spin_md_l2.cu
+  spin_md_l3.cu
+  spin_md_l4.cu
+  spin_md_kernels.cuh
+  spin_md_launch.cuh
+  spin_md_quadratic.cuh
+  spin_md_quadratic_kernels.cuh
+  spin_md_projection.hpp
   zbl_force.cu
 )
 set_source_files_properties(
@@ -39,6 +47,11 @@ set_source_files_properties(
   radial_force.cu
   runtime_probe.cu
   spin_density.cu
+  spin_md_l0.cu
+  spin_md_l1.cu
+  spin_md_l2.cu
+  spin_md_l3.cu
+  spin_md_l4.cu
   zbl_force.cu
   PROPERTIES LANGUAGE CUDA)
 target_include_directories(

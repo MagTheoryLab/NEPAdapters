@@ -151,40 +151,70 @@ DeviceModel::DeviceModel(const HostModelParameters& host) {
       const auto t = append(layout.terms.data(), layout.terms.size());
       const auto c = append(layout.centers.data(), layout.centers.size());
       const auto h = append(spin_density::harmonics, std::size(spin_density::harmonics));
-      std::vector<int> reverse_index;
-      if (!host.protocol.spin_soc && host.protocol.spin_l_max == 4 &&
-          host.protocol.spin_order == 4) {
-        const int geometry = (layout.lmax + 1) * (layout.lmax + 1);
-        const int groups = geometry + layout.spin_components;
-        reverse_index.resize(groups + 1 + layout.terms.size(), 0);
-        for (const auto& term : layout.terms) {
-          const int group = term.neighbor ? geometry + term.spin : term.geometry;
-          ++reverse_index[group + 1];
-        }
-        for (int g = 0; g < groups; ++g)
-          reverse_index[g + 1] += reverse_index[g];
-        std::vector<int> cursor(reverse_index.begin(), reverse_index.begin() + groups);
-        for (int k = 0; k < static_cast<int>(layout.terms.size()); ++k) {
-          const auto& term = layout.terms[k];
-          const int group = term.neighbor ? geometry + term.spin : term.geometry;
-          reverse_index[groups + 1 + cursor[group]++] = k;
-        }
-        const int footer = groups + 1 + layout.terms.size();
-        reverse_index.resize(footer + 26 + std::size(spin_density::harmonics), 0);
-        for (const auto& harmonic : spin_density::harmonics)
-          ++reverse_index[footer + harmonic.component + 1];
-        for (int g = 0; g < 25; ++g)
-          reverse_index[footer + g + 1] += reverse_index[footer + g];
-        cursor.assign(reverse_index.begin() + footer, reverse_index.begin() + footer + 25);
-        for (int k = 0; k < static_cast<int>(std::size(spin_density::harmonics)); ++k)
-          reverse_index[footer + 26 + cursor[spin_density::harmonics[k].component]++] = k;
+      const int harmonics = (layout.lmax+1)*(layout.lmax+1);
+      const int lanes = spin_density::md_force_lanes(layout.lmax,layout.order);
+      const bool wide = spin_density::md_wide(layout.lmax,layout.order,host.protocol.spin_soc);
+      const bool forward_projected = spin_density::md_warp_density(harmonics,layout.spin_components);
+      const bool paired = spin_density::md_paired(layout,host.protocol.spin_soc);
+      const float* weights = host.spin_parameters.data() + (host.protocol.n_max_angular+1)*layout.channels;
+      std::size_t forward_rows = 0, forward_terms = 0, transpose_rows = 0;
+      std::size_t transpose_terms = 0, transpose_neighbors = 0;
+      if (forward_projected) {
+        const spin_density::SpinProjection forward(layout,weights,false);
+        forward_rows = append(forward.rows.data(),forward.rows.size());
+        forward_terms = append(forward.packed.data(),forward.packed.size());
       }
-      const auto r = append(reverse_index.data(), reverse_index.size());
+      const bool has_transpose = paired || lanes == spin_density::SpinProjection::width;
+      bool single_term_rows = false;
+      if (has_transpose) {
+        const spin_density::SpinProjection transpose(layout,weights,true,paired);
+        single_term_rows = paired && std::all_of(transpose.rows.begin(),transpose.rows.end(),
+          [](const spin_density::ProjectionRow& row) { return row.count == 1; });
+        if (!single_term_rows)
+          transpose_rows = append(transpose.rows.data(),transpose.rows.size());
+        transpose_terms = append(transpose.packed.data(),transpose.packed.size());
+        transpose_neighbors = append(transpose.neighbor_weights.data(),transpose.neighbor_weights.size());
+      }
+      std::vector<int> adjoint_order;
+      if (!paired && lanes > 1 && lanes != spin_density::SpinProjection::width) {
+        adjoint_order.resize(lanes+1);
+        for (int lane = 0; lane < lanes; ++lane) {
+          adjoint_order[lane] = static_cast<int>(adjoint_order.size());
+          for (int term = 0; term < static_cast<int>(layout.terms.size()); ++term)
+            if (layout.terms[term].geometry % lanes == lane) adjoint_order.push_back(term);
+        }
+        adjoint_order[lanes] = static_cast<int>(adjoint_order.size());
+      }
+      const auto md_order = append(adjoint_order.data(),adjoint_order.size());
+      std::size_t wide_radial = 0;
+      if (wide) {
+        const int channels = layout.channels, types = host.protocol.num_types;
+        const int basis = host.protocol.spin_basis_size+1, na = host.protocol.n_max_angular+1;
+        const float* angular = host.descriptor_coefficients_type_pair_major.data() +
+          host.descriptor_layout.angular_offset;
+        std::vector<double> coeffs(static_cast<std::size_t>(types)*types*channels*basis,0);
+        for (int pair = 0; pair < types*types; ++pair)
+          for (int c = 0; c < channels; ++c)
+            for (int k = 0; k < basis; ++k)
+              for (int a = 0; a < na; ++a)
+                coeffs[(pair*channels+c)*basis+k] +=
+                  static_cast<double>(angular[(pair*na+a)*basis+k])*host.spin_parameters[a*channels+c];
+        wide_radial = append(coeffs.data(),coeffs.size());
+      }
       check_cuda(cudaMalloc(&spin_layout_device_, bytes.size()), "allocate density layout");
       check_cuda(cudaMemcpy(spin_layout_device_, bytes.data(), bytes.size(), cudaMemcpyHostToDevice), "upload density layout");
       const auto* base = static_cast<const unsigned char*>(spin_layout_device_);
-      view_.spin_reverse_index = reverse_index.empty() ? nullptr :
-        reinterpret_cast<const int*>(base+r);
+      if (forward_projected)
+        view_.spin_forward = {reinterpret_cast<const spin_density::ProjectionRow*>(base+forward_rows),
+          reinterpret_cast<const spin_density::ProjectionTerm*>(base+forward_terms), nullptr};
+      if (has_transpose)
+        view_.spin_transpose = {
+          single_term_rows ? nullptr : reinterpret_cast<const spin_density::ProjectionRow*>(base+transpose_rows),
+          reinterpret_cast<const spin_density::ProjectionTerm*>(base+transpose_terms),
+          paired ? reinterpret_cast<const float*>(base+transpose_neighbors) : nullptr};
+      view_.spin_md_adjoint_order = adjoint_order.empty() ? nullptr :
+        reinterpret_cast<const int*>(base+md_order);
+      view_.spin_radial_coefficients_wide = wide ? reinterpret_cast<const double*>(base+wide_radial) : nullptr;
       view_.spin_layout = {layout.channels, layout.order, layout.lmax,
         static_cast<int>(layout.primitives.size()), layout.spin_components, layout.components,
         static_cast<int>(layout.sectors.size()), static_cast<int>(layout.terms.size()),

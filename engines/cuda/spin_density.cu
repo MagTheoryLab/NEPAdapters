@@ -1,95 +1,104 @@
 #include "device_operations.hpp"
-#include "spin_density_kernels.cuh"
-#include "spin_density_md_layouts.cuh"
+#include "simulation_box_device.cuh"
+#include "spin_md_projection.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
 
+namespace nep_adapters::spin_density::md {
+bool prefer_ghost_coordinates(const View& layout) {
+  const int ranks = layout.lmax + 1;
+  // Keep the existing launch for scalar single-channel work and large matrices.
+  return (ranks > 1 || layout.channels > 1) &&
+    ranks * ranks * layout.spin_components <= 10 * SpinProjection::width;
+}
+}  // namespace nep_adapters::spin_density::md
+
 namespace nep_adapters::cuda_backend {
+void launch_spin_md_L0(const ModelProtocol&, int, const SimulationBox&,
+    const DeviceModelView&, const DeviceWorkspaceView&, bool, int, bool);
+void launch_spin_md_L1(const ModelProtocol&, int, const SimulationBox&,
+    const DeviceModelView&, const DeviceWorkspaceView&, bool, int, bool);
+void launch_spin_md_L2(const ModelProtocol&, int, const SimulationBox&,
+    const DeviceModelView&, const DeviceWorkspaceView&, bool, int, bool);
+void launch_spin_md_L3(const ModelProtocol&, int, const SimulationBox&,
+    const DeviceModelView&, const DeviceWorkspaceView&, bool, int, bool);
+void launch_spin_md_L4(const ModelProtocol&, int, const SimulationBox&,
+    const DeviceModelView&, const DeviceWorkspaceView&, bool, int, bool);
+
 namespace {
 void check_launch() {
   const auto status = cudaGetLastError();
   if (status != cudaSuccess) throw std::runtime_error(std::string("density spin kernel: ") + cudaGetErrorString(status));
 }
-template<bool FactorCenter = false, bool CenterVirial = false, class Layout>
-void launch(Layout layout, const ModelProtocol& p, int count, const SimulationBox& box,
-            const DeviceModelView& m, const DeviceWorkspaceView& w, bool backward,
-            VirialTarget target = VirialTarget::none, bool transfer = false) {
-  const int stride = static_cast<int>(w.atom_capacity);
-  const int plane = stride * p.neighbor_capacity_radial;
-  spin_density::Geometry geometry{box, w.neighbor_source, w.atom_to_structure,
-    w.boxes_row_major9, w.box_inverse_row_major9, w.pbc_flags3};
-  const int blocks = (count * p.spin_compress * Layout::tile + 127) / 128;
-  if (!blocks) return;
-  const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
-    target == VirialTarget::neighbor_atom ? 2 : 3;
-  if constexpr (Layout::tile == 1 && Layout::component_capacity == 625 &&
-                Layout::spin_capacity == 35) {
-    if (!p.spin_soc && p.spin_l_max == 4 && p.spin_order == 4) {
-      const int warp_blocks = (count * p.spin_compress * 32 + 127) / 128;
-      if (!backward) {
-        spin_density::descriptors_components<<<warp_blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
-          p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
-          w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
-          w.nn_radial, w.nl_radial_slot_major, plane, m.spin_cutoff_pair,
-          m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.descriptors,
-          m.spin_reverse_index);
-      } else {
-        spin_density::forces_components<Layout, CenterVirial><<<warp_blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
-          p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
-          w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
-          w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
-          m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.fp,
-          w.force_soa3, w.mforce_soa3, w.virial_soa9, mode, w.per_atom_virial_float_soa9,
-          transfer ? w.spin_transfer_soa9 : nullptr, m.spin_reverse_index);
-      }
-      check_launch();
-      return;
+// The structural radial list includes edges between the spin and structural cutoffs.
+template<class Real>
+__global__ void compact_spin_neighbors(int count, int n, int types, SimulationBox default_box,
+    int neighbor_source, const int* atom_to_structure, const double* boxes, const double* inverses,
+    const int* pbc, const double* x, const int* type, const float* cutoff, const int* nn,
+    const int* nl, int* spin_nn, int* spin_nl) {
+  constexpr unsigned mask = 0xffffffffu;
+  const int thread = blockIdx.x*blockDim.x+threadIdx.x;
+  const int i = thread/32, lane = thread%32;
+  if (i >= count) return;
+
+  SimulationBox box = default_box;
+  if (neighbor_source == 0 && atom_to_structure && boxes)
+    box = load_structure_box(atom_to_structure[i],boxes,inverses,pbc);
+  const int num = nn[i], pair = type[i]*types;
+  const double xi = x[i], yi = x[n+i], zi = x[2*n+i];
+  int written = 0;
+  for (int start = 0; start < num; start += 32) {
+    int j = 0;
+    bool keep = false;
+    if (start+lane < num) {
+      j = nl[(start+lane)*n+i];
+      const double dx = x[j]-xi, dy = x[n+j]-yi, dz = x[2*n+j]-zi;
+      Real rx = dx, ry = dy, rz = dz;
+      if (neighbor_source == 0) minimum_image_delta(box,dx,dy,dz,rx,ry,rz);
+      const Real r = sqrt(rx*rx+ry*ry+rz*rz);
+      keep = r > Real(1e-12) && r < cutoff[pair+type[j]];
     }
+    const unsigned accepted = __ballot_sync(mask,keep);
+    if (keep) {
+      const unsigned lower = (1u<<lane)-1u;
+      spin_nl[(written+__popc(accepted & lower))*n+i] = j;
+    }
+    written += __popc(accepted);
   }
-  if (!backward) {
-    spin_density::descriptors<Layout, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
-      p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
-      w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
-      w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
-      m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.descriptors);
-  } else {
-    spin_density::forces<Layout, CenterVirial, FactorCenter><<<blocks, 128>>>(layout, count, stride, p.struct_descriptor_dim,
-      p.num_types, p.n_max_angular, p.spin_basis_size, geometry,
-      w.types, m.spin_dof_type_active, w.positions_soa3, w.spins_soa3,
-      w.nn_radial, w.nl_radial_slot_major, nullptr, plane, m.spin_cutoff_pair,
-      m.spin_radial_coefficients, m.spin_parameters, w.spin_moments, w.fp,
-      w.force_soa3, w.mforce_soa3, w.virial_soa9, mode, w.per_atom_virial_float_soa9,
-      transfer ? w.spin_transfer_soa9 : nullptr);
-  }
-  check_launch();
+  if (lane == 0) spin_nn[i] = written;
 }
-template<bool CenterVirial = false>
+
 void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
               const DeviceModel& model, DeviceWorkspace& workspace, bool backward,
               VirialTarget target = VirialTarget::none, bool transfer = false) {
   const auto m = model.view();
-  const auto w = workspace.view();
+  auto w = workspace.view();
   if (!p.spin_mode || !supports_cuda_spin_shape(p) || !w.spin_moments ||
       count < 0 || static_cast<std::size_t>(count) > w.atom_capacity)
     throw std::runtime_error("invalid density spin workspace or protocol");
-  if (p.spin_compress == 3 && p.spin_l_max == 2 && p.spin_order == 2) {
-    if (p.spin_soc) launch<true, CenterVirial>(spin_density::MDLayoutSOC<4>{}, p, count, box, m, w, backward, target, transfer);
-    else launch<false, CenterVirial>(spin_density::MDLayoutNoSOC<4>{}, p, count, box, m, w, backward, target, transfer);
-  } else if (p.spin_l_max == 0) {
-    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 3, 1>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
-  } else if (p.spin_l_max == 1) {
-    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 9, 4>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
-  } else if (m.spin_layout.spin_components == 10) {
-    if (m.spin_layout.components <= 100)
-      launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true, 10>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
-    else
-      launch<false, CenterVirial>(spin_density::RuntimeLayout<625, true, 10>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
-  } else if (m.spin_layout.components <= 100) {
-    launch<false, CenterVirial>(spin_density::RuntimeLayout<100, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
-  } else {
-    launch<false, CenterVirial>(spin_density::RuntimeLayout<625, true>(m.spin_layout), p, count, box, m, w, backward, target, transfer);
+  if (!count) return;
+  if (w.spin_nn) {
+    if (!backward) {
+      const int stride = static_cast<int>(w.atom_capacity);
+      auto compact = [&](auto precision) {
+        compact_spin_neighbors<decltype(precision)><<<(count+3)/4,128>>>(count,stride,p.num_types,box,
+          w.neighbor_source,w.atom_to_structure,w.boxes_row_major9,w.box_inverse_row_major9,w.pbc_flags3,
+          w.positions_soa3,w.types,m.spin_cutoff_pair,w.nn_radial,w.nl_radial_slot_major,w.spin_nn,w.spin_nl);
+      };
+      if (m.spin_radial_coefficients_wide) compact(double{});
+      else compact(float{});
+      check_launch();
+    }
+    w.nn_radial = w.spin_nn;
+    w.nl_radial_slot_major = w.spin_nl;
   }
+  const int mode = target == VirialTarget::none ? 0 : target == VirialTarget::center_atom ? 1 :
+    target == VirialTarget::neighbor_atom ? 2 : 3;
+  constexpr decltype(&launch_spin_md_L0) launchers[] = {
+    launch_spin_md_L0, launch_spin_md_L1, launch_spin_md_L2, launch_spin_md_L3, launch_spin_md_L4};
+  launchers[p.spin_l_max](p,count,box,m,w,backward,mode,transfer);
+  check_launch();
 }
 }  // namespace
 void build_spin_descriptors_on_device(const ModelProtocol& p, int count,
@@ -110,11 +119,7 @@ void accumulate_spin_forces_on_device(const ModelProtocol& p, int count,
   }
   cudaEvent_t start = nullptr, end = nullptr;
   if (timings) { cudaEventCreate(&start); cudaEventCreate(&end); cudaEventRecord(start); }
-  if (target == VirialTarget::center_atom ||
-      target == VirialTarget::center_and_neighbor_float_sink)
-    dispatch<true>(p, count, box, m, w, true, target, transfer);
-  else
-    dispatch(p, count, box, m, w, true, target, transfer);
+  dispatch(p, count, box, m, w, true, target, transfer);
   if (timings) {
     cudaEventRecord(end); cudaEventSynchronize(end);
     cudaEventElapsedTime(&timings->density_ms, start, end);

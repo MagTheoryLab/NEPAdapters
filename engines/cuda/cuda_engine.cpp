@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1011,63 +1012,56 @@ class CudaModel : public nep_adapters::Model {
           return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
         }
       }
-      const bool multi_box_execution =
-          protocol_.charge_mode == 0 &&
-          (protocol_.spin_mode == 0 || batch.num_structures > 1);
-      const std::size_t workspace_atom_capacity =
-          multi_box_execution
-              ? static_cast<std::size_t>(batch.total_atoms)
-              : max_structure_atom_count(batch);
-      const std::size_t workspace_structure_capacity =
-          multi_box_execution
-              ? static_cast<std::size_t>(batch.num_structures)
-              : 1;
-      nep_adapters::cuda_backend::DeviceWorkspace& workspace =
-          batch_workspace(
-              workspace_atom_capacity,
-              workspace_structure_capacity,
-              result.spin_transfer_per_atom_row_major9 != nullptr);
-
+      const bool spin_model = protocol_.spin_mode != 0;
+      const bool spin_transfer = result.spin_transfer_per_atom_row_major9 != nullptr;
+      const std::size_t max_frame_atoms = max_structure_atom_count(batch);
+      // Slot-major kernels use int indices. Allow room for neighbor-list growth.
+      const auto batch_index_stride = std::max({
+          max_frame_atoms + (max_frame_atoms + 3) / 4,
+          static_cast<std::size_t>(protocol_.neighbor_capacity_radial),
+          static_cast<std::size_t>(protocol_.neighbor_capacity_angular),
+          static_cast<std::size_t>(protocol_.descriptor_dim),
+          static_cast<std::size_t>(protocol_.spin_compress) * 32,
+          std::size_t{9}});
+      const bool spin_batch_fits = batch.num_structures > 1 &&
+          static_cast<std::size_t>(batch.total_atoms) <=
+              std::numeric_limits<int>::max() / batch_index_stride;
+      const bool multi_box_execution = protocol_.charge_mode == 0 &&
+          (!spin_model || spin_batch_fits);
       if (multi_box_execution) {
-        stage_and_build_internal_neighbors(batch, workspace);
-        const auto view = workspace.view();
-        clear_device_doubles(view.potential, view.atom_capacity);
-        clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
-        if (view.mforce_soa3 != nullptr) {
-          clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+        try {
+          auto& workspace = batch_workspace(batch.total_atoms, batch.num_structures, spin_transfer);
+          stage_and_build_internal_neighbors(batch, workspace);
+          const auto view = workspace.view();
+          clear_device_doubles(view.potential, view.atom_capacity);
+          clear_device_doubles(view.force_soa3, view.atom_capacity * 3);
+          if (spin_model) {
+            clear_device_doubles(view.mforce_soa3, view.atom_capacity * 3);
+          }
+          clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
+          const auto force_request = make_force_evaluation_request(
+              nep_adapters::cuda_backend::ForceNeighborTopology::batched_multi_box,
+              true,
+              true,
+              result.virials_per_atom_row_major9 != nullptr,
+              spin_transfer);
+          nep_adapters::cuda_backend::run_force_pipeline(
+              protocol_, force_request, batch.total_atoms,
+              nep_adapters::cuda_backend::SimulationBox{}, device_, workspace);
+          nep_adapters::cuda_backend::prepare_batched_outputs(
+              batch.num_structures, batch.total_atoms, workspace);
+          copy_prepared_batch_results_to_host(
+              view, batch.num_structures, batch.total_atoms, 0, 0, spin_model, false, result);
+          return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
+        } catch (const std::bad_alloc&) {
+          if (!spin_model) {
+            throw;
+          }
+          batch_workspace_.reset();
         }
-        clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
-        const auto force_request = make_force_evaluation_request(
-            nep_adapters::cuda_backend::
-                ForceNeighborTopology::batched_multi_box,
-            true,
-            true,
-            result.virials_per_atom_row_major9 != nullptr,
-            result.spin_transfer_per_atom_row_major9 != nullptr);
-        nep_adapters::cuda_backend::run_force_pipeline(
-            protocol_,
-            force_request,
-            batch.total_atoms,
-            nep_adapters::cuda_backend::SimulationBox{},
-            device_,
-            workspace);
-
-        nep_adapters::cuda_backend::prepare_batched_outputs(
-            batch.num_structures,
-            batch.total_atoms,
-            workspace);
-        copy_prepared_batch_results_to_host(
-            view,
-            batch.num_structures,
-            batch.total_atoms,
-            0,
-            0,
-            protocol_.spin_mode != 0,
-            false,
-            result);
-        return is_cancelled() ? NEPA_STATUS_CANCELLED : NEPA_STATUS_OK;
       }
 
+      auto& workspace = batch_workspace(max_frame_atoms, 1, spin_transfer);
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;

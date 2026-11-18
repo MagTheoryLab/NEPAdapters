@@ -59,18 +59,19 @@ __device__ __forceinline__ int fractional_component_to_cell(
   return cell;
 }
 
+template<class Real>
 __device__ __forceinline__ void minimum_image_delta(
     const SimulationBox& box,
     double dx,
     double dy,
     double dz,
-    float& x12,
-    float& y12,
-    float& z12) {
+    Real& x12,
+    Real& y12,
+    Real& z12) {
   if (!box.pbc[0] && !box.pbc[1] && !box.pbc[2]) {
-    x12 = static_cast<float>(dx);
-    y12 = static_cast<float>(dy);
-    z12 = static_cast<float>(dz);
+    x12 = static_cast<Real>(dx);
+    y12 = static_cast<Real>(dy);
+    z12 = static_cast<Real>(dz);
     return;
   }
   double sx = fractional_component(box, 0, dx, dy, dz);
@@ -85,15 +86,15 @@ __device__ __forceinline__ void minimum_image_delta(
   if (box.pbc[2]) {
     sz -= nearbyint(sz);
   }
-  x12 = static_cast<float>(
+  x12 = static_cast<Real>(
       box.frac_to_cart[0] * sx +
       box.frac_to_cart[1] * sy +
       box.frac_to_cart[2] * sz);
-  y12 = static_cast<float>(
+  y12 = static_cast<Real>(
       box.frac_to_cart[3] * sx +
       box.frac_to_cart[4] * sy +
       box.frac_to_cart[5] * sz);
-  z12 = static_cast<float>(
+  z12 = static_cast<Real>(
       box.frac_to_cart[6] * sx +
       box.frac_to_cart[7] * sy +
       box.frac_to_cart[8] * sz);

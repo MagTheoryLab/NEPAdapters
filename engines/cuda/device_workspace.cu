@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,6 +16,16 @@ void check_cuda(cudaError_t status, const char* action) {
         std::string(action) + ": " + cudaGetErrorString(status));
   }
 }
+
+class WorkspaceAllocationFailure : public std::bad_alloc {
+ public:
+  explicit WorkspaceAllocationFailure(const std::string& name)
+      : message_(name + ": " + cudaGetErrorString(cudaErrorMemoryAllocation)) {}
+  const char* what() const noexcept override { return message_.c_str(); }
+
+ private:
+  std::string message_;
+};
 
 void set_view_pointer(
     DeviceWorkspaceView& view,
@@ -118,6 +129,12 @@ void set_view_pointer(
     view.per_atom_virial_float_soa9 = static_cast<float*>(device);
   } else if (name == "spin_moments") {
     view.spin_moments = static_cast<float*>(device);
+  } else if (name == "spin_nn") {
+    view.spin_nn = static_cast<int*>(device);
+  } else if (name == "spin_nl") {
+    view.spin_nl = static_cast<int*>(device);
+  } else if (name == "spin_radial_cache") {
+    view.spin_radial_cache = device;
   }
 }
 
@@ -132,7 +149,6 @@ DeviceWorkspace::DeviceWorkspace(const WorkspacePlan& plan) {
   view_.atom_capacity = plan.atom_capacity;
   view_.active_atom_capacity = plan.active_atom_capacity;
   view_.structure_capacity = plan.structure_capacity;
-  summary_.array_count = plan.arrays.size();
 
   try {
     allocations_.reserve(plan.arrays.size());
@@ -149,12 +165,24 @@ DeviceWorkspace::DeviceWorkspace(const WorkspacePlan& plan) {
           allocation.async_allocated = true;
         } else {
           cudaGetLastError();
-          check_cuda(cudaMalloc(&allocation.device, bytes), array.name.c_str());
+          const bool optional_cache = array.name == "spin_radial_cache" &&
+            (status == cudaErrorMemoryAllocation || status == cudaErrorNotSupported);
+          status = cudaMalloc(&allocation.device, bytes);
+          if (optional_cache && status == cudaErrorMemoryAllocation) {
+            cudaGetLastError();
+            continue;
+          }
+          if (status == cudaErrorMemoryAllocation) {
+            cudaGetLastError();
+            throw WorkspaceAllocationFailure(array.name);
+          }
+          check_cuda(status, array.name.c_str());
         }
         summary_.total_bytes += bytes;
       }
       set_view_pointer(view_, allocation.name, allocation.device);
       allocations_.push_back(std::move(allocation));
+      ++summary_.array_count;
     }
   } catch (...) {
     release();

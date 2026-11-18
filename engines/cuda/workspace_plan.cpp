@@ -1,4 +1,5 @@
 #include "device_workspace.hpp"
+#include "spin_md_projection.hpp"
 
 #include <stdexcept>
 
@@ -43,13 +44,24 @@ void add_spin_arrays(WorkspacePlan& plan, const ModelProtocol& protocol) {
   add_array(plan, "spins_soa3", ScalarType::float64, plan.atom_capacity * 3);
   add_array(plan, "mforce_soa3", ScalarType::float64, plan.atom_capacity * 3);
   const auto layout = make_spin_density_layout(protocol);
-  // The compiled SOC forward pass also retains its geometric moments for
-  // the center-spin pullback. Other layouts store only descriptor moments.
-  const int geometric_components = protocol.spin_soc && protocol.spin_compress == 3 &&
-    protocol.spin_l_max == 2 && protocol.spin_order == 2 ? 9 : 0;
+  using namespace spin_density;
+  const bool quadratic_l2 = layout.lmax == 2 && layout.order == 2;
+  if (protocol.spin_cutoff_radial < protocol.cutoff_radial) {
+    add_array(plan,"spin_nn",ScalarType::int32,plan.atom_capacity);
+    add_array(plan,"spin_nl",ScalarType::int32,plan.atom_capacity*protocol.neighbor_capacity_radial);
+  }
+  const bool cache_geometry = md_paired(layout,protocol.spin_soc) || (quadratic_l2 && protocol.spin_soc);
+  const int geometric_components = cache_geometry ? (layout.lmax+1)*(layout.lmax+1) : 0;
   add_array(plan, "spin_moments", ScalarType::float32,
     plan.atom_capacity * static_cast<std::size_t>(
       layout.channels * (layout.components + geometric_components)));
+  // Required workspace comes first so it can still fit when the cache cannot.
+  if (!quadratic_l2) {
+    const bool wide = md_wide(layout.lmax,layout.order,protocol.spin_soc);
+    add_array(plan, "spin_radial_cache", wide ? ScalarType::float64 : ScalarType::float32,
+      plan.atom_capacity * md_radial_slots(layout.lmax,layout.order,protocol.neighbor_capacity_radial)
+        * layout.channels * 2);
+  }
 }
 
 void add_slot_major_neighbor_arrays(
@@ -196,7 +208,6 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
   plan.structure_capacity = structure_capacity;
 
   add_common_atom_arrays(plan);
-  add_spin_arrays(plan, protocol);
   if (include_spin_transfer) {
     if (protocol.spin_mode == 0) {
       throw std::runtime_error("spin-transfer output requires a spin model");
@@ -233,6 +244,7 @@ WorkspacePlan make_internal_neighbor_workspace_plan(
   add_array(plan, "structure_cell_offsets", ScalarType::int32, structure_capacity + 1);
   add_array(plan, "structure_cell_dims4", ScalarType::int32, structure_capacity * 4);
   add_execution_scratch(plan, protocol);
+  add_spin_arrays(plan, protocol);
 
   return plan;
 }
@@ -257,7 +269,6 @@ WorkspacePlan make_external_neighbor_workspace_plan(
   plan.structure_capacity = 0;
 
   add_common_atom_arrays(plan);
-  add_spin_arrays(plan, protocol);
   if (include_spin_transfer) {
     if (protocol.spin_mode == 0) {
       throw std::runtime_error("spin-transfer output requires a spin model");
@@ -281,6 +292,7 @@ WorkspacePlan make_external_neighbor_workspace_plan(
   if (include_per_atom_virial_sink) {
     add_per_atom_virial_sink_scratch(plan);
   }
+  add_spin_arrays(plan, protocol);
 
   return plan;
 }
