@@ -4258,15 +4258,19 @@ void fill_spin_batch_descriptor(
   const double* y12,
   const double* z12,
   const double* spins_soa3,
-  double* descriptor_soa)
+  double* descriptor_soa,
+  std::vector<nep_adapters::cpu_spin::Value>& primitives,
+  std::vector<double>* saved_moments = nullptr)
 {
   const auto layout = nep_adapters::spin_density::Layout(paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc);
-  std::vector<double> spins_aos3(static_cast<std::size_t>(atom_count) * 3);
+  const std::size_t moment_count = layout.channels * layout.components;
+  if (saved_moments) saved_moments->resize(static_cast<std::size_t>(atom_count) * moment_count);
+  primitives.resize(static_cast<std::size_t>(atom_count) * layout.spin_components);
   for (int atom = 0; atom < atom_count; ++atom) {
-    for (int d = 0; d < 3; ++d) {
-      spins_aos3[static_cast<std::size_t>(atom) * 3 + d] =
-        spins_soa3[static_cast<std::size_t>(d) * atom_count + atom];
-    }
+    double s[3];
+    for (int d = 0; d < 3; ++d) s[d] = spins_soa3[static_cast<std::size_t>(d) * atom_count + atom];
+    nep_adapters::cpu_spin::primitives_at(layout, s,
+      primitives.data() + static_cast<std::size_t>(atom) * layout.spin_components);
   }
   std::vector<nep_adapters::cpu_spin::Edge> edges;
   nep_adapters::cpu_spin::CenterScratch scratch;
@@ -4277,10 +4281,12 @@ void fill_spin_batch_descriptor(
       make_spin_batch_edges(
         paramb, annmb, atom_count, atom, neighbor_count, neighbors, types,
         x12, y12, z12, edges);
-      const double* center_spin = spins_aos3.data() + static_cast<std::size_t>(atom) * 3;
-      nep_adapters::cpu_spin::forward(layout, center_spin, spins_aos3.data(),
+      nep_adapters::cpu_spin::forward(layout, atom, primitives.data(),
         annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges, scratch, raw.data());
     }
+    if (saved_moments)
+      std::copy_n(scratch.moments.data(), moment_count,
+                  saved_moments->data() + static_cast<std::size_t>(atom) * moment_count);
     for (int d = 0; d < layout.dimension; ++d) {
       descriptor_soa[
         static_cast<std::size_t>(paramb.struct_dim + d) * atom_count + atom] =
@@ -4299,35 +4305,32 @@ void add_spin_batch_gradient(
   const double* x12,
   const double* y12,
   const double* z12,
-  const double* spins_soa3,
   const double* descriptor_gradient,
   double* force_soa3,
   double* virial_soa9,
   double* mforce_soa3,
-  double* spin_transfer_soa9)
+  double* spin_transfer_soa9,
+  const std::vector<double>& saved_moments,
+  const std::vector<nep_adapters::cpu_spin::Value>& primitives)
 {
   const auto layout = nep_adapters::spin_density::Layout(paramb.spin_compress, paramb.spin_l_max, paramb.spin_order, paramb.spin_soc);
-  std::vector<double> spins_aos3(static_cast<std::size_t>(atom_count) * 3);
+  const std::size_t moment_count = layout.channels * layout.components;
+  if (saved_moments.size() != static_cast<std::size_t>(atom_count) * moment_count)
+    throw std::logic_error("spin forward moment cache size mismatch");
+  if (primitives.size() != static_cast<std::size_t>(atom_count) * layout.spin_components)
+    throw std::logic_error("spin primitive cache size mismatch");
   std::vector<double> spin_gradient(static_cast<std::size_t>(atom_count) * 3, 0.0);
-  for (int atom = 0; atom < atom_count; ++atom) {
-    for (int d = 0; d < 3; ++d) {
-      spins_aos3[static_cast<std::size_t>(atom) * 3 + d] =
-        spins_soa3[static_cast<std::size_t>(d) * atom_count + atom];
-    }
-  }
   std::vector<nep_adapters::cpu_spin::Edge> edges;
   nep_adapters::cpu_spin::CenterScratch scratch;
   for (int atom = 0; atom < atom_count; ++atom) {
     make_spin_batch_edges(
       paramb, annmb, atom_count, atom, neighbor_count, neighbors, types,
       x12, y12, z12, edges);
-    const double* center_spin = spins_aos3.data() + static_cast<std::size_t>(atom) * 3;
-    std::vector<double> raw(layout.dimension);
-    nep_adapters::cpu_spin::forward(layout, center_spin, spins_aos3.data(),
-      annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges, scratch, raw.data());
+    const double* moments = saved_moments.data() + static_cast<std::size_t>(atom) * moment_count;
+    scratch.moments.assign(moments, moments + moment_count);
     double center_spin_gradient[3] = {};
     nep_adapters::cpu_spin::gradients(
-      layout, center_spin, spins_aos3.data(), annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges,
+      layout, atom, primitives.data(), annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges,
       descriptor_gradient + static_cast<std::size_t>(atom) * annmb.dim + paramb.struct_dim,
       scratch, center_spin_gradient);
     for (int d = 0; d < 3; ++d) {
@@ -4398,6 +4401,9 @@ bool compute_spin_lammps_centers(
   const bool use_parallel = false;
 #endif
   double reduced_potential = 0.0;
+  // Rebuild from masked spins each call, including ghosts, then share read-only.
+  std::vector<nep_adapters::cpu_spin::Value> primitives(
+    static_cast<std::size_t>(atom_capacity) * layout.spin_components);
 #if defined(_OPENMP)
 #pragma omp parallel num_threads(num_threads) if(use_parallel) reduction(+:reduced_potential)
 #endif
@@ -4427,6 +4433,12 @@ bool compute_spin_lammps_centers(
     std::vector<nep_adapters::cpu_spin::Edge> edges;
     nep_adapters::cpu_spin::CenterScratch scratch;
     std::vector<double> raw(static_cast<std::size_t>(layout.dimension));
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+    for (int atom = 0; atom < atom_capacity; ++atom)
+      nep_adapters::cpu_spin::primitives_at(layout, spins_aos3 + static_cast<std::size_t>(atom) * 3,
+        primitives.data() + static_cast<std::size_t>(atom) * layout.spin_components);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
@@ -4464,10 +4476,9 @@ bool compute_spin_lammps_centers(
           edges.push_back(edge);
         }
       }
-      const double* center_spin = spins_aos3 + static_cast<std::size_t>(atom) * 3;
       std::fill(raw.begin(), raw.end(), 0.0);
       if (active) {
-        nep_adapters::cpu_spin::forward(layout, center_spin, spins_aos3,
+        nep_adapters::cpu_spin::forward(layout, atom, primitives.data(),
           annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges, scratch, raw.data());
       }
       double* q = descriptor_aos + static_cast<std::size_t>(ii) * annmb.dim;
@@ -4491,7 +4502,7 @@ bool compute_spin_lammps_centers(
       }
       double center_spin_gradient[3] = {};
       nep_adapters::cpu_spin::gradients(
-        layout, center_spin, spins_aos3, annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges,
+        layout, atom, primitives.data(), annmb.c_spin + (paramb.n_max_angular + 1) * paramb.spin_compress, edges,
         Fp + static_cast<std::size_t>(atom) * annmb.dim + paramb.struct_dim,
         scratch, center_spin_gradient);
       for (int d = 0; d < 3; ++d) {
@@ -5540,10 +5551,11 @@ void NEP::find_descriptor(
 #endif
     Fp.data(), sum_fxyz.data(), nullptr, descriptor.data(), nullptr, nullptr, false, nullptr,
     ann_q_group, ann_hidden, ann_coeff, ann_fp_group);
+  std::vector<nep_adapters::cpu_spin::Value> spin_primitives;
   fill_spin_batch_descriptor(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
-      descriptor.data());
+      descriptor.data(), spin_primitives);
 }
 
 void NEP::compute(
@@ -5621,10 +5633,13 @@ void NEP::compute(
     phase_descriptor = nep_phase_elapsed(phase_mark);
   }
 
+  // Reuse the unscaled forward moments instead of evaluating forward again for forces.
+  std::vector<double> saved_spin_moments;
+  std::vector<nep_adapters::cpu_spin::Value> spin_primitives;
   fill_spin_batch_descriptor(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
-      descriptor.data());
+      descriptor.data(), spin_primitives, &saved_spin_moments);
   if (phase_timing) {
     phase_mark = NepPhaseClock::now();
   }
@@ -5680,9 +5695,9 @@ void NEP::compute(
   }
   add_spin_batch_gradient(
       paramb, annmb, static_cast<int>(N), NN_radial.data(), NL_radial.data(), type.data(),
-      r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2, spins.data(),
+      r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2,
       Fp.data(), force.data(), virial.data(), mforce.data(),
-      spin_transfer ? spin_transfer->data() : nullptr);
+      spin_transfer ? spin_transfer->data() : nullptr, saved_spin_moments, spin_primitives);
   if (phase_timing) {
     phase_spin_gradient = nep_phase_elapsed(phase_mark);
     NepPhaseTotals& totals = nep_phase_timer_state().batch;

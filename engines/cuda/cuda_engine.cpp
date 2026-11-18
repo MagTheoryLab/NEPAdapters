@@ -1014,10 +1014,20 @@ class CudaModel : public nep_adapters::Model {
       }
       const bool spin_model = protocol_.spin_mode != 0;
       const bool spin_transfer = result.spin_transfer_per_atom_row_major9 != nullptr;
-      // Bound the slot-major workspace for spin and preserve single-box throughput.
-      constexpr int kMaxSpinBatchAtoms = 32 * 1024;
+      const std::size_t max_frame_atoms = max_structure_atom_count(batch);
+      // Slot-major kernels use int indices. Allow room for neighbor-list growth.
+      const auto batch_index_stride = std::max({
+          max_frame_atoms + (max_frame_atoms + 3) / 4,
+          static_cast<std::size_t>(protocol_.neighbor_capacity_radial),
+          static_cast<std::size_t>(protocol_.neighbor_capacity_angular),
+          static_cast<std::size_t>(protocol_.descriptor_dim),
+          static_cast<std::size_t>(protocol_.spin_compress) * 32,
+          std::size_t{9}});
+      const bool spin_batch_fits = batch.num_structures > 1 &&
+          static_cast<std::size_t>(batch.total_atoms) <=
+              std::numeric_limits<int>::max() / batch_index_stride;
       const bool multi_box_execution = protocol_.charge_mode == 0 &&
-          (!spin_model || (batch.num_structures > 1 && batch.total_atoms <= kMaxSpinBatchAtoms));
+          (!spin_model || spin_batch_fits);
       if (multi_box_execution) {
         try {
           auto& workspace = batch_workspace(batch.total_atoms, batch.num_structures, spin_transfer);
@@ -1051,7 +1061,7 @@ class CudaModel : public nep_adapters::Model {
         }
       }
 
-      auto& workspace = batch_workspace(max_structure_atom_count(batch), 1, spin_transfer);
+      auto& workspace = batch_workspace(max_frame_atoms, 1, spin_transfer);
       for (std::int32_t structure = 0; structure < batch.num_structures; ++structure) {
         if (is_cancelled()) {
           return NEPA_STATUS_CANCELLED;

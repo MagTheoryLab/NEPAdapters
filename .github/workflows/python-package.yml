@@ -103,7 +103,7 @@ jobs:
             label: macos-x86_64
             archs: x86_64
             macos_target: "14.0"
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64
             archs: arm64
             macos_target: "14.0"
@@ -120,9 +120,10 @@ jobs:
         env:
           CIBW_ENVIRONMENT: NEP_CUDA=0
           CIBW_ARCHS: ${{ matrix.archs }}
-          CIBW_BEFORE_ALL_MACOS: brew install libomp
+          CIBW_BEFORE_ALL_MACOS: bash {project}/tools/build_macos_openmp.sh
           CIBW_ENVIRONMENT_MACOS: >-
             MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}
+            CMAKE_ARGS="-DOpenMP_ROOT=${{ github.workspace }}/.build/wheel-openmp/install"
           CIBW_REPAIR_WHEEL_COMMAND_MACOS: >-
             delocate-wheel --require-archs {delocate_archs} -w {dest_dir} {wheel} &&
             python {project}/tools/normalize_macos_openmp.py {dest_dir}/*.whl
