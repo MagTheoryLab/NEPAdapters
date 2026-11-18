@@ -156,6 +156,59 @@ Evaluation evaluate(
 }
 
 #if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+bool check_multibox(NepaModel* model, const Case& first, const Case& second) {
+  const int counts[] = {first.atoms, second.atoms};
+  const int offsets[] = {0, first.atoms};
+  const int pbc[] = {1, 1, 1, 1, 1, 1};
+  const int atoms = first.atoms + second.atoms;
+  auto join = [](auto a, const auto& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+  };
+  const auto types = join(first.types, second.types);
+  const auto positions = join(first.positions, second.positions);
+  const auto spins = join(first.spins, second.spins);
+  const auto cells = join(first.cell, second.cell);
+  NepaStructureBatch batch{2, atoms, counts, offsets, types.data(),
+    positions.data(), spins.data(), cells.data(), pbc};
+  Evaluation out;
+  out.potential.resize(atoms);
+  out.forces.resize(3 * atoms);
+  out.mforces.resize(3 * atoms);
+  out.virial.resize(18);
+  out.atom_virial.resize(9 * atoms);
+  out.transfer.resize(9 * atoms);
+  std::vector<double> energy(2);
+  NepaFindForceResult result{};
+  result.energy_per_structure = energy.data();
+  result.potential_per_atom = out.potential.data();
+  result.forces_aos3 = out.forces.data();
+  result.mforces_aos3 = out.mforces.data();
+  result.virials_row_major9 = out.virial.data();
+  result.virials_per_atom_row_major9 = out.atom_virial.data();
+  result.spin_transfer_per_atom_row_major9 = out.transfer.data();
+  if (nepa_find_force_batch(model, &batch, &result) != NEPA_STATUS_OK) {
+    throw std::runtime_error(nepa_last_error_message());
+  }
+  const auto a = evaluate(model, first, false);
+  const auto b = evaluate(model, second, false);
+  auto check = [&](const char* name, const auto& actual, const auto& expected) {
+    if (std::all_of(actual.begin(), actual.end(), [](double v) { return std::isfinite(v); }) &&
+        within_tolerance(actual, expected, 5e-5, 5e-5)) return true;
+    std::cerr << "spin multibox " << name << " max error " << max_abs(actual, expected) << '\n';
+    return false;
+  };
+  return check("energy", energy, std::vector<double>{a.energy, b.energy}) &&
+      check("potential", out.potential, join(a.potential, b.potential)) &&
+      check("force", out.forces, join(a.forces, b.forces)) &&
+      check("mforce", out.mforces, join(a.mforces, b.mforces)) &&
+      check("virial", out.virial, join(a.virial, b.virial)) &&
+      check("per-atom virial", out.atom_virial, join(a.atom_virial, b.atom_virial)) &&
+      check("spin transfer", out.transfer, join(a.transfer, b.transfer));
+}
+#endif
+
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
 template<class T> struct DeviceBuffer {
   T* data = nullptr;
   explicit DeviceBuffer(const std::vector<T>& host) {
@@ -438,6 +491,11 @@ int main(int argc, char** argv) {
         if (g_spin_type_semantics) ok = check_spin_type_lammps(model, item) && ok;
       }
     }
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+    if (!forward_only && cases.size() > 1) {
+      ok = check_multibox(model, cases.front(), cases.back()) && ok;
+    }
+#endif
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n'; ok = false;
   }

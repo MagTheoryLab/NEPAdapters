@@ -97,11 +97,6 @@ void execute_force_pipeline(
       timings == nullptr ? ignored_timings : *timings;
   PhaseTimer timer(timings != nullptr);
 
-  if (request.topology == ForceNeighborTopology::batched_multi_box && spin_model) {
-    throw std::invalid_argument(
-        "spin execution pipeline does not support batched neighbor topology");
-  }
-
   const DescriptorCoreTopology descriptor_topology =
       request.topology == ForceNeighborTopology::batched_multi_box
           ? DescriptorCoreTopology::batched_multi_box

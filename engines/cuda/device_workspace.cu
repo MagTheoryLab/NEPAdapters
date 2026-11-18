@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,6 +16,16 @@ void check_cuda(cudaError_t status, const char* action) {
         std::string(action) + ": " + cudaGetErrorString(status));
   }
 }
+
+class WorkspaceAllocationFailure : public std::bad_alloc {
+ public:
+  explicit WorkspaceAllocationFailure(const std::string& name)
+      : message_(name + ": " + cudaGetErrorString(cudaErrorMemoryAllocation)) {}
+  const char* what() const noexcept override { return message_.c_str(); }
+
+ private:
+  std::string message_;
+};
 
 void set_view_pointer(
     DeviceWorkspaceView& view,
@@ -160,6 +171,10 @@ DeviceWorkspace::DeviceWorkspace(const WorkspacePlan& plan) {
           if (optional_cache && status == cudaErrorMemoryAllocation) {
             cudaGetLastError();
             continue;
+          }
+          if (status == cudaErrorMemoryAllocation) {
+            cudaGetLastError();
+            throw WorkspaceAllocationFailure(array.name);
           }
           check_cuda(status, array.name.c_str());
         }
