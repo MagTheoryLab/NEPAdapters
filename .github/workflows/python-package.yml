@@ -205,23 +205,21 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install CUDA 12.4
+      - name: Install CUDA 12.9
         id: cuda-toolkit
         uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
-          cuda: "12.4.1"
+          cuda: "12.9.1"
           method: network
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
       - name: Build combined wheel
         uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084 # v3.4.1
         env:
           CIBW_ARCHS_WINDOWS: AMD64
-          CIBW_BUILD: >-
-            ${{ inputs.windows_cuda_only &&
-            'cp310-win_amd64' ||
-            'cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64' }}
+          CIBW_BUILD: cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64
           CIBW_ENVIRONMENT_WINDOWS: >-
             CMAKE_GENERATOR="Visual Studio 17 2022"
+            SKBUILD_BUILD_DIR=.build/windows-wheel
             CUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
             CMAKE_ARGS="-DNEP_ADAPTERS_CUDA_ENABLE_QNEP_PPPM=OFF
             -DCMAKE_CUDA_ARCHITECTURES=60-real;89-real;60-virtual"
