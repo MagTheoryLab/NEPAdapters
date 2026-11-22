@@ -499,15 +499,15 @@ void check_spin_wall(const char* engine, const char* model_path, const char* var
       for (int d = 0; d < 3; ++d) expected_mforce[3 * atom + d] += mforce[3 * atom + d];
     }
     constexpr double tolerance = 1e-10;
-    // CUDA spin transfer uses FP32 atomic sums whose order can vary between launches.
-    const double transfer_tolerance = std::string_view(engine) == "cuda" ? 1e-6 : tolerance;
+    // CUDA per-atom virial and spin transfer can use unordered FP32 atomic sums.
+    const double atomic_tolerance = std::string_view(engine) == "cuda" ? 1e-6 : tolerance;
     if (!within_tolerance(after.energy, total, tolerance, 0.0) ||
         !within_tolerance(after.potential, expected_energy, tolerance, 0.0) ||
         !within_tolerance(after.mforces, expected_mforce, tolerance, 0.0) ||
         !within_tolerance(after.forces, before.forces, tolerance, 0.0) ||
         !within_tolerance(after.virial, before.virial, tolerance, 0.0) ||
-        !within_tolerance(after.atom_virial, before.atom_virial, tolerance, 0.0) ||
-        !within_tolerance(after.transfer, before.transfer, transfer_tolerance, 0.0) ||
+        !within_tolerance(after.atom_virial, before.atom_virial, atomic_tolerance, 0.0) ||
+        !within_tolerance(after.transfer, before.transfer, atomic_tolerance, 0.0) ||
         after.descriptor != before.descriptor) {
       std::cerr << path << " wall errors: energy=" << std::abs(after.energy - total)
                 << " potential=" << max_abs(after.potential, expected_energy)
