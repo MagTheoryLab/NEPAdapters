@@ -1388,13 +1388,15 @@ class CudaModel : public nep_adapters::Model {
         }
       }
       profiler.split(clear_wall_ms);
-      const auto force_request = make_force_evaluation_request(
+      auto force_request = make_force_evaluation_request(
           nep_adapters::cuda_backend::
               ForceNeighborTopology::single_box_symmetric,
           true,
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr,
           result.spin_transfer_per_atom_row_major9 != nullptr);
+      force_request.indexed_centers = view.active_atom_indices;
+      force_request.indexed_center_count = input.inum;
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
       nep_adapters::cuda_backend::run_force_pipeline(
           protocol_,
@@ -1661,12 +1663,14 @@ class CudaModel : public nep_adapters::Model {
         clear_device_doubles(view.virial_soa9, view.atom_capacity * 9);
       }
       profiler.split(clear_ms);
-      const auto force_request = make_force_evaluation_request(
+      auto force_request = make_force_evaluation_request(
           nep_adapters::cuda_backend::ForceNeighborTopology::external_full,
           store_potential,
           result.total_virial6 != nullptr,
           result.virials_per_atom9 != nullptr,
           needs_spin_transfer);
+      force_request.indexed_centers = input.ilist;
+      force_request.indexed_center_count = input.inum;
       nep_adapters::cuda_backend::ForcePipelineTimings pipeline_timings;
       nep_adapters::cuda_backend::run_force_pipeline(
           external_protocol,

@@ -69,6 +69,13 @@ double number(const std::string& token, const std::string& name, bool as_float =
   return value;
 }
 
+double wall_number(const std::string& token) {
+  const double value = number(token, "spin_wall");
+  if (value == 0.0 && token.find_first_of("123456789") < token.find_first_of("eE"))
+    fail("decimal underflow in spin_wall");
+  return value;
+}
+
 struct Document {
   Tokens elements;
   std::map<std::string, Tokens> fields, blocks;
@@ -154,7 +161,8 @@ Document read_document(std::istream& input) {
 // Syntax/layout contract: GPUMD c516 cd6ed6b9, NEP_Spin_Model_File.
 // Only structural coefficients transpose; magnetic and ANN parameters retain
 // their original order. Token strings preserve the CPU engine's FP64 inputs.
-std::string normalize(Document& doc, std::vector<double>& reference) {
+std::string normalize(Document& doc, std::vector<double>& reference,
+                      std::vector<SpinWall>& spin_walls) {
   if (doc.field("format_version", 1, 1)[0] != "1") fail("unsupported format_version (expected 1)");
   const auto model = lower(doc.field("model", 1, 1)[0]);
   const bool spin = model == "nep_spin";
@@ -219,16 +227,39 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
       if (number(value, "spin_cutoff") <= 0 || number(value, "spin_cutoff") > radial)
         fail("spin_cutoff must be positive and not exceed the structural radial cutoff");
     emit("spin_cutoff", cutoff);
+    std::set<std::string> active_types;
     if (selected) {
       auto values = doc.field("spin_type", 1, types);
-      std::set<std::string> seen;
       for (auto& value : values) {
         auto found = std::find_if(doc.elements.begin(), doc.elements.end(),
           [&](const auto& element) { return lower(element) == lower(value); });
-        if (found == doc.elements.end() || !seen.insert(*found).second) fail("invalid spin_type");
+        if (found == doc.elements.end() || !active_types.insert(*found).second) fail("invalid spin_type");
         value = *found;
       }
       emit("spin_type", values);
+    }
+    if (doc.fields.count("spin_wall")) {
+      const auto& values = doc.field("spin_wall", 4 * types, 4 * types);
+      bool any_enabled = false;
+      for (std::size_t t = 0; t < types; ++t) {
+        const SpinWall wall{
+            wall_number(values[4 * t]), wall_number(values[4 * t + 1]),
+            wall_number(values[4 * t + 2]), wall_number(values[4 * t + 3])};
+        if (wall.low_threshold < 0 || wall.high_threshold < 0 ||
+            wall.low_stiffness < 0 || wall.high_stiffness < 0)
+          fail("spin_wall requires non-negative thresholds and stiffnesses");
+        if ((wall.low_stiffness > 0 && wall.low_threshold == 0) ||
+            (wall.high_stiffness > 0 && wall.high_threshold == 0))
+          fail("spin_wall requires a positive threshold for each enabled wall");
+        if (wall.enabled() && selected && !active_types.count(doc.elements[t]))
+          fail("spin_wall can only be enabled for active spin types");
+        if (wall.low_stiffness > 0 && wall.high_stiffness > 0 &&
+            wall.low_threshold >= wall.high_threshold)
+          fail("spin_wall lower threshold must be below the upper threshold");
+        any_enabled |= wall.enabled();
+        spin_walls.push_back(wall);
+      }
+      if (!any_enabled) spin_walls.clear();
     }
   }
 
@@ -305,7 +336,11 @@ std::string normalize(Document& doc, std::vector<double>& reference) {
 }
 }  // namespace
 
-ModelInput::ModelInput(const std::string& path) : file_(open_model_input(path)) {
+ModelInput::ModelInput(const std::string& path) : ModelInput(path, nullptr) {}
+
+ModelInput::ModelInput(const std::string& path, std::vector<SpinWall>* spin_walls)
+    : file_(open_model_input(path)) {
+  std::vector<SpinWall> walls;
   if (!file_.is_open()) throw std::runtime_error("failed to open NEP model: " + path);
   std::string token;
   file_ >> token;
@@ -316,8 +351,9 @@ ModelInput::ModelInput(const std::string& path) : file_(open_model_input(path)) 
   block_format_ = lower(token) == "nep";
   if (block_format_) {
     auto doc = read_document(file_);
-    converted_.str(normalize(doc, reference_));
+    converted_.str(normalize(doc, reference_, walls));
     spin_type_semantics_ = lower(doc.fields.at("model")[0]) == "nep_spin";
   }
+  if (spin_walls) spin_walls->swap(walls);
 }
 }  // namespace nep_adapters::detail

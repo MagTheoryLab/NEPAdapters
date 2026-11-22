@@ -770,6 +770,12 @@ foreach(backend cpu cuda)
     else()
       target_link_libraries(nep_adapters_${backend}_spin_density_test PRIVATE CUDA::cudart)
     endif()
+    add_test(NAME nep_adapters_${backend}_spin_wall_test
+      COMMAND nep_adapters_${backend}_spin_density_test
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/soc/c3l2s2.nep"
+        "${CMAKE_CURRENT_BINARY_DIR}/spin_wall_${backend}_variant.nep" --spin-wall)
+    set_tests_properties(nep_adapters_${backend}_spin_wall_test PROPERTIES
+      LABELS "contract;oracle;${backend};spin;lammps" ENVIRONMENT "OMP_NUM_THREADS=4")
     file(GLOB density_oracles "${PROJECT_SOURCE_DIR}/tests/fixtures/spin_density/*/*.dat")
     foreach(oracle ${density_oracles})
       get_filename_component(shape "${oracle}" NAME_WE)

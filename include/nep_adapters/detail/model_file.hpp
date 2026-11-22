@@ -7,6 +7,7 @@
 #include <sstream>
 #include <vector>
 #include "nep_adapters/api.h"
+#include "nep_adapters/detail/spin_wall.hpp"
 
 #if defined(_WIN32)
 #include <filesystem>
@@ -32,6 +33,7 @@ inline std::ifstream open_model_input(
 class NEP_ADAPTERS_API ModelInput {
  public:
   explicit ModelInput(const std::string& path);
+  ModelInput(const std::string& path, std::vector<SpinWall>* spin_walls);
   std::istream& stream() {
     return block_format_ ? static_cast<std::istream&>(converted_) : file_;
   }

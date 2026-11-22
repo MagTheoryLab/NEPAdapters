@@ -222,6 +222,12 @@ void execute_force_pipeline(
         request.spin_transfer_per_atom,
         false,
         timings == nullptr ? nullptr : &spin_timings);
+    if (!protocol.spin_walls.empty()) {
+      accumulate_spin_wall_on_device(
+          atom_count, protocol.num_types, request.indexed_centers,
+          request.indexed_centers ? request.indexed_center_count : atom_count,
+          model.view().spin_walls, workspace.view(), request.store_potential);
+    }
     measured.spin_onsite_ms = spin_timings.onsite_ms;
     measured.spin_density_ms = spin_timings.density_ms;
     measured.spin_density_pull_ms = spin_timings.density_pull_ms;

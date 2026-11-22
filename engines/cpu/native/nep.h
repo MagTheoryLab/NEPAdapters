@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include "ewald_nep.h"
+#include "nep_adapters/detail/spin_wall.hpp"
 
 class NEP
 {
@@ -306,6 +307,7 @@ public:
   std::vector<double> parameters;
   std::vector<double> spin_baseline;
   std::vector<double> energy_reference;
+  std::vector<nep_adapters::detail::SpinWall> spin_walls;
   std::vector<std::string> element_list;
   std::vector<double> lammps_force_private;
   std::vector<double> lammps_mforce_private;

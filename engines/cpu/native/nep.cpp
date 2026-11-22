@@ -4380,6 +4380,7 @@ bool compute_spin_lammps_centers(
   double** positions,
   const double* spins_aos3,
   const std::vector<double>& spin_baseline,
+  const std::vector<nep_adapters::detail::SpinWall>& spin_walls,
   double* descriptor_aos,
   double* Fp,
   double& total_potential,
@@ -4491,6 +4492,18 @@ bool compute_spin_lammps_centers(
       double latent[MAX_NEURON] = {};
       apply_ann_model(annmb, spin_types[atom], q, energy, fp_local, latent);
       energy += spin_baseline[static_cast<std::size_t>(spin_types[atom])];
+      if (!spin_walls.empty() && spin_walls[spin_types[atom]].enabled()) {
+        const double* center_spin = spins_aos3 + 3 * static_cast<std::size_t>(atom);
+        double field[3];
+        energy += evaluate_spin_wall(spin_walls[spin_types[atom]], center_spin, field);
+        for (int d = 0; d < 3; ++d) {
+          if (use_private) {
+            local_mforce[lammps_vector_index(atom, d, force_rows)] -= field[d];
+          } else {
+            mforce[atom][d] += field[d];
+          }
+        }
+      }
       reduced_potential += energy;
       if (potential) potential[atom] += energy;
       for (int d = 0; d < annmb.dim; ++d) {
@@ -4592,7 +4605,7 @@ NEP::NEP(const std::string& potential_filename) { init_from_file(potential_filen
 
 void NEP::init_from_file(const std::string& potential_filename, const bool is_rank_0)
 {
-  nep_adapters::detail::ModelInput model_input(potential_filename);
+  nep_adapters::detail::ModelInput model_input(potential_filename, &spin_walls);
   std::istream& input = model_input.stream();
   energy_reference = model_input.energy_reference();
   paramb.spin_type_semantics = model_input.spin_type_semantics();
@@ -5698,6 +5711,18 @@ void NEP::compute(
       r12.data(), r12.data() + size_x12, r12.data() + size_x12 * 2,
       Fp.data(), force.data(), virial.data(), mforce.data(),
       spin_transfer ? spin_transfer->data() : nullptr, saved_spin_moments, spin_primitives);
+  if (!spin_walls.empty()) {
+    for (std::size_t atom = 0; atom < N; ++atom) {
+      const auto& wall = spin_walls[type[atom]];
+      if (!wall.enabled()) continue;
+      double field[3];
+      const double spin[3] = {spins[atom], spins[N + atom], spins[2 * N + atom]};
+      potential[atom] += evaluate_spin_wall(wall, spin, field);
+      for (int d = 0; d < 3; ++d) {
+        mforce[d * N + atom] += field[d];
+      }
+    }
+  }
   if (phase_timing) {
     phase_spin_gradient = nep_phase_elapsed(phase_mark);
     NepPhaseTotals& totals = nep_phase_timer_state().batch;
@@ -6712,7 +6737,7 @@ void NEP::compute_for_lammps(
 
   compute_spin_lammps_centers(
     paramb, annmb, atom_capacity, inum, ilist, NN, NL,
-    lammps_spin_types.data(), pos, lammps_spin_spins_aos.data(), spin_baseline,
+    lammps_spin_types.data(), pos, lammps_spin_spins_aos.data(), spin_baseline, spin_walls,
     lammps_spin_descriptor.data(), Fp.data(), total_potential, potential,
     force, mforce, total_virial, virial, spin_transfer, &lammps_scratch);
 

@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -102,8 +104,8 @@ bool within_tolerance(const std::vector<double>& actual,
   if (actual.size() != expected.size()) return false;
   for (std::size_t i = 0; i < actual.size(); ++i) {
     const double scale = std::max(std::abs(actual[i]), std::abs(expected[i]));
-    if (std::abs(actual[i] - expected[i]) >
-        absolute_tolerance + relative_tolerance * scale) {
+    if (!(std::abs(actual[i] - expected[i]) <=
+        absolute_tolerance + relative_tolerance * scale)) {
       return false;
     }
   }
@@ -436,6 +438,97 @@ bool check_spin_type_lammps(NepaModel* model, const Case& item) {
   return true;
 }
 
+void check_spin_wall(const char* engine, const char* model_path, const char* variant_path) {
+  std::ifstream file(model_path);
+  std::string model_text((std::istreambuf_iterator<char>(file)), {});
+  const auto insertion = model_text.find("@ parameters ");
+  if (insertion == std::string::npos) throw std::runtime_error("missing test model parameters");
+  auto load = [&](const std::string& records, bool valid = true) {
+    std::ofstream variant(variant_path);
+    variant << model_text.substr(0, insertion) << records << model_text.substr(insertion);
+    variant.close();
+    if (!variant) throw std::runtime_error("cannot write wall model variant");
+    NepaModel* handle = nullptr;
+    const auto status = nepa_load_model(engine, variant_path, &handle);
+    std::unique_ptr<NepaModel, decltype(&nepa_free_model)> model(handle, nepa_free_model);
+    if (valid ? status != NEPA_STATUS_OK || !model
+              : status == NEPA_STATUS_OK || model ||
+                  std::string(nepa_last_error_message()).find("spin_wall") == std::string::npos)
+      throw std::runtime_error("unexpected load result for " + records + nepa_last_error_message());
+    return model;
+  };
+
+  const auto base = load("");
+  const auto disabled = load("spin_wall 100 0 1 0  0 0 0 0  0 0 0 0\n");
+  const auto walled = load("spin_wall 2 1.5 4 3  0 0 0 0  0 0 0 0\n");
+  for (const auto* invalid : {
+      "2 1.5 4 3", "2 1.5 4 3 0 0 0 0 0 0 0 0 0",
+      "2 auto 4 3 0 0 0 0 0 0 0 0", "2 nan 4 3 0 0 0 0 0 0 0 0",
+      "2 inf 4 3 0 0 0 0 0 0 0 0", "2 1e-999 4 3 0 0 0 0 0 0 0 0",
+      "-2 0 4 3 0 0 0 0 0 0 0 0", "2 -1 4 3 0 0 0 0 0 0 0 0",
+      "0 1.5 4 3 0 0 0 0 0 0 0 0", "4 1.5 4 3 0 0 0 0 0 0 0 0",
+      "5 1.5 4 3 0 0 0 0 0 0 0 0", "2 1.5 4 3 1 1 0 0 0 0 0 0",
+      "2 1.5 4 3 0 0 0 0 0 0 0 0\nspin_wall 2 1.5 4 3 0 0 0 0 0 0 0 0"}) {
+    load(std::string("spin_wall ") + invalid + '\n', false);
+  }
+
+  Case item;
+  item.atoms = 7;
+  item.types = {0, 0, 0, 1, 0, 0, 0};
+  item.cell = {24, 0, 0, 0, 24, 0, 0, 0, 24};
+  item.positions = {1,1,1, 3,2,1, 2,1,2, 1,2,1, 3,1,2, 2,3,1, 2,2,3};
+  item.spins = {3,4,0, 0,1,0, 0,0,0, 3,4,0, 0,0,2, 0,0,-4, 0,0,3};
+  NepaModelInfo info{};
+  if (nepa_model_info(base.get(), &info) != NEPA_STATUS_OK)
+    throw std::runtime_error(nepa_last_error_message());
+  g_descriptor_dim = info.descriptor_dim;
+
+  // Independent analytic increments at |S| = 5, 1, 0, 5 (excluded), 2, 4, 3.
+  const double low_deficit = 1.0 - 1.0 / 4.0;
+  const std::vector<double> energy{1, std::pow(low_deficit, 3), 1, 0, 0, 0, 0};
+  const std::vector<double> mforce{
+      -1.8, -2.4, 0, 0, 1.5 * low_deficit * low_deficit, 0, 0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0};
+  auto check = [&](const Evaluation& before, const Evaluation& after, int centers, bool enabled, const char* path) {
+    auto expected_energy = before.potential;
+    auto expected_mforce = before.mforces;
+    double total = before.energy;
+    for (int atom = 0; enabled && atom < centers; ++atom) {
+      total += energy[atom];
+      expected_energy[atom] += energy[atom];
+      for (int d = 0; d < 3; ++d) expected_mforce[3 * atom + d] += mforce[3 * atom + d];
+    }
+    constexpr double tolerance = 1e-10;
+    if (!within_tolerance(after.energy, total, tolerance, 0.0) ||
+        !within_tolerance(after.potential, expected_energy, tolerance, 0.0) ||
+        !within_tolerance(after.mforces, expected_mforce, tolerance, 0.0) ||
+        !within_tolerance(after.forces, before.forces, tolerance, 0.0) ||
+        !within_tolerance(after.virial, before.virial, tolerance, 0.0) ||
+        !within_tolerance(after.atom_virial, before.atom_virial, tolerance, 0.0) ||
+        !within_tolerance(after.transfer, before.transfer, tolerance, 0.0) ||
+        after.descriptor != before.descriptor) {
+      std::cerr << path << " wall errors: energy=" << std::abs(after.energy - total)
+                << " potential=" << max_abs(after.potential, expected_energy)
+                << " mforce=" << max_abs(after.mforces, expected_mforce)
+                << " force=" << max_abs(after.forces, before.forces)
+                << " virial=" << max_abs(after.virial, before.virial)
+                << " atom_virial=" << max_abs(after.atom_virial, before.atom_virial)
+                << " spin_transfer=" << max_abs(after.transfer, before.transfer)
+                << " descriptor=" << max_abs(after.descriptor, before.descriptor) << '\n';
+      throw std::runtime_error("unexpected spin_wall output");
+    }
+  };
+  const auto before = evaluate(base.get(), item);
+  check(before, evaluate(disabled.get(), item), item.atoms, false, "disabled batch");
+  check(before, evaluate(walled.get(), item), item.atoms, true, "batch");
+  check(evaluate_lammps(base.get(), item), evaluate_lammps(walled.get(), item), item.atoms, true, "LAMMPS host");
+#if !defined(NEP_ADAPTERS_TEST_CPU_ENGINE)
+  for (int local : {item.atoms, 1}) {
+    check(evaluate_lammps(base.get(), item, true, local),
+          evaluate_lammps(walled.get(), item, true, local), local, true, "LAMMPS device");
+  }
+#endif
+}
+
 bool finite_difference(NepaModel* model, const Case& reference) {
   constexpr double step = 2e-3;
   const Evaluation base = evaluate(model, reference, false);
@@ -497,7 +590,8 @@ bool finite_difference(NepaModel* model, const Case& reference) {
 
 int main(int argc, char** argv) {
   if (argc < 3 || argc > 4) {
-    std::cerr << "usage: test_spin_density_oracle MODEL ORACLE [--forward-only]\n";
+    std::cerr << "usage: test_spin_density_oracle MODEL ORACLE [--forward-only]\n"
+                 "   or: test_spin_density_oracle MODEL VARIANT_PATH --spin-wall\n";
     return EXIT_FAILURE;
   }
   const bool forward_only = argc == 4 && std::string(argv[3]) == "--forward-only";
@@ -508,6 +602,15 @@ int main(int argc, char** argv) {
   if (!nep_adapters::register_cuda_engine()) return EXIT_FAILURE;
   const char* engine = "cuda";
   #endif
+  if (argc == 4 && std::string(argv[3]) == "--spin-wall") {
+    try {
+      check_spin_wall(engine, argv[1], argv[2]);
+      return EXIT_SUCCESS;
+    } catch (const std::exception& error) {
+      std::cerr << error.what() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
   NepaModel* model = nullptr;
   if (nepa_load_model(engine, argv[1], &model) != NEPA_STATUS_OK) {
     std::cerr << nepa_last_error_message() << '\n'; return EXIT_FAILURE;
