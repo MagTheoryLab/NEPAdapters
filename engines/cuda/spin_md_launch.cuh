@@ -94,7 +94,8 @@ void launch(Layout layout, const cuda_backend::ModelProtocol& p, int count,
       constexpr bool fused = decltype(fuse)::value, paired = decltype(cached)::value;
       constexpr int batch = fused ? 3 : 1;
       const int batches = (p.spin_compress+batch-1)/batch;
-      forces<Layout,true,Quadratic,fused,paired,UseRadialCache,!ghost_coordinates>
+      // NVCC/MSVC can capture an enclosing constexpr as a closure member here.
+      forces<Layout,true,Quadratic,fused,paired,UseRadialCache,!std::is_same_v<Coordinates,GhostCoordinates>>
         <<<(count*batches*Layout::tile+63)/64,64>>>(
           layout,count,n,p.struct_descriptor_dim,p.num_types,p.n_max_angular,p.spin_basis_size,
           geometry,w.types,m.spin_dof_type_active,w.positions_soa3,w.spins_soa3,w.nn_radial,
