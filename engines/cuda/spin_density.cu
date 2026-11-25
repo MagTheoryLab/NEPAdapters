@@ -31,6 +31,25 @@ void check_launch() {
   const auto status = cudaGetLastError();
   if (status != cudaSuccess) throw std::runtime_error(std::string("density spin kernel: ") + cudaGetErrorString(status));
 }
+
+__global__ void add_spin_wall(int count, int atom_count, int stride, int num_types,
+    const int* centers, const int* types, const double* spins,
+    const detail::SpinWall* walls, double* potential, double* mforce) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  const int atom = centers ? centers[i] : i;
+  if (atom < 0 || atom >= atom_count) return;
+  const int type = types[atom];
+  if (type < 0 || type >= num_types) return;
+  const auto& wall = walls[type];
+  if (!wall.enabled()) return;
+  const double spin[3] = {spins[atom], spins[stride + atom], spins[2 * stride + atom]};
+  double field[3];
+  const double energy = evaluate_spin_wall(wall, spin, field);
+  if (potential) potential[atom] += energy;
+  for (int d = 0; d < 3; ++d) mforce[d * stride + atom] += field[d];
+}
+
 // The structural radial list includes edges between the spin and structural cutoffs.
 template<class Real>
 __global__ void compact_spin_neighbors(int count, int n, int types, SimulationBox default_box,
@@ -101,6 +120,18 @@ void dispatch(const ModelProtocol& p, int count, const SimulationBox& box,
   check_launch();
 }
 }  // namespace
+void accumulate_spin_wall_on_device(
+    int atom_count, int num_types, const int* centers, int center_count,
+    const detail::SpinWall* walls,
+    const DeviceWorkspaceView& workspace, bool store_potential) {
+  if (!center_count) return;
+  add_spin_wall<<<(center_count + 127) / 128, 128>>>(
+      center_count, atom_count, static_cast<int>(workspace.atom_capacity), num_types, centers,
+      workspace.types, workspace.spins_soa3, walls,
+      store_potential ? workspace.potential : nullptr, workspace.mforce_soa3);
+  check_launch();
+}
+
 void build_spin_descriptors_on_device(const ModelProtocol& p, int count,
   const SimulationBox& box, const DeviceModel& m, DeviceWorkspace& w) {
   dispatch(p, count, box, m, w, false);

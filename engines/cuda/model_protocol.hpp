@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "../common/spin_density_layout.hpp"
+#include "nep_adapters/detail/spin_wall.hpp"
 
 namespace nep_adapters::cuda_backend {
 
@@ -75,6 +76,7 @@ struct ModelProtocol {
   std::vector<double> cutoff_angular_by_type;
   std::vector<double> spin_cutoff_by_type;
   std::vector<double> spin_baseline;
+  std::vector<detail::SpinWall> spin_walls;
   std::vector<double> energy_reference;
   std::vector<int> spin_dof_type_active;
   BodyChannelConfig body_channels;

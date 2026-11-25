@@ -216,6 +216,20 @@ Spin 已切换到 GPUMD-MagTheoryLab `c516@cd6ed6b9` 的密度描述符，统一
 并贡献能量与原子力。输入的原始自旋不被改写，省略 `spin_type` 时默认所有元素可磁。
 旧 `spin_dof_type` / `spin_env_type` 字段不再接受。
 `energy_reference` 按元素以双精度加回能量一次，不改变力、virial、磁力或描述符。
+
+NEP-Spin 势文件可包含一行 `spin_wall`。按文件首行的元素顺序，每个元素写四个数值，
+依次为 `low_threshold low_stiffness high_threshold high_stiffness`。下面一行为 `nep 3 Fe Bi O`
+模型中的 Fe 启用两侧 wall，适用于 `spin_type Fe`。
+
+```text
+spin_wall 2 1.5 4 3  0 0 0 0  0 0 0 0
+```
+
+阈值单位为 μB，下壁和上壁的刚度单位分别为 eV/μB 和 eV/μB³。省略整行时两侧均关闭，
+刚度为零时关闭对应一侧。所有数值须有限且非负。启用侧要求阈值大于零，双侧启用时下阈值须小于上阈值。
+只有 `spin_type` 选中的元素可启用。势文件只接受训练导出的数值。
+
+wall 增加每原子能量和纵向磁力。零磁矩处仍有下壁能量，磁力为零。原子力、virial 和自旋转矩均无直接 wall 项。
 这些规则共用于 CPU/CUDA、Python/ASE 和 LAMMPS；自旋积分和热浴选择由 MD 程序负责。
 
 未知版本、重复字段、未知字段/块和参数计数不匹配会报错。支持的模型尺寸和后端能力仍受下表限制；

@@ -25,6 +25,9 @@ struct ForceEvaluationRequest {
   VirialOutputMode virial = VirialOutputMode::total_only;
   bool store_potential = true;
   bool spin_transfer_per_atom = false;
+  // LAMMPS supplies an ilist of centers in device memory.
+  const int* indexed_centers = nullptr;
+  int indexed_center_count = 0;
 };
 
 constexpr bool requests_per_atom_virial(

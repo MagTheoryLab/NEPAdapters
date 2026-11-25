@@ -415,6 +415,11 @@ void build_spin_descriptors_on_device(
     const DeviceModel& model,
     DeviceWorkspace& workspace);
 
+void accumulate_spin_wall_on_device(
+    int atom_count, int num_types, const int* centers, int center_count,
+    const detail::SpinWall* walls,
+    const DeviceWorkspaceView& workspace, bool store_potential);
+
 struct SpinForceTimings {
   float onsite_ms = 0.0f;
   float density_ms = 0.0f;

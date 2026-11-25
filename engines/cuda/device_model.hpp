@@ -68,6 +68,7 @@ struct DeviceModelUploadSummary {
   std::size_t spin_cutoff_pair_bytes = 0;
   std::size_t zbl_parameters_pair_bytes = 0;
   std::size_t spin_baseline_bytes = 0;
+  std::size_t spin_wall_bytes = 0;
   std::size_t spin_dof_type_active_bytes = 0;
   std::size_t atomic_numbers_bytes = 0;
   std::size_t total_bytes = 0;
@@ -91,6 +92,7 @@ struct DeviceModelView {
   const float* spin_cutoff_pair = nullptr;
   const float* zbl_parameters_pair = nullptr;
   const double* spin_baseline = nullptr;
+  const detail::SpinWall* spin_walls = nullptr;
   const int* spin_dof_type_active = nullptr;
   const int* atomic_numbers = nullptr;
   std::size_t ann_type_major_count = 0;
@@ -139,6 +141,7 @@ class DeviceModel {
   float* spin_cutoff_pair_device_ = nullptr;
   float* zbl_parameters_pair_device_ = nullptr;
   double* spin_baseline_device_ = nullptr;
+  detail::SpinWall* spin_walls_device_ = nullptr;
   int* spin_dof_type_active_device_ = nullptr;
   int* atomic_numbers_device_ = nullptr;
   DeviceModelView view_{};

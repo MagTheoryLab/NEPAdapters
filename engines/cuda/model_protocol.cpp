@@ -509,19 +509,22 @@ int BodyChannelConfig::abc_count() const {
 }
 
 ModelProtocol parse_model_protocol(const std::string& model_path) {
-  nep_adapters::detail::ModelInput model_input(model_path);
-  std::istream& input = model_input.stream();
-  ModelProtocol protocol = parse_model_header(input);
+  std::vector<detail::SpinWall> walls;
+  detail::ModelInput model_input(model_path, &walls);
+  ModelProtocol protocol = parse_model_header(model_input.stream());
+  protocol.spin_walls.swap(walls);
   protocol.energy_reference = model_input.energy_reference();
   protocol.spin_type_semantics = model_input.spin_type_semantics();
   return protocol;
 }
 
 ParsedModelFile parse_model_file(const std::string& model_path) {
-  nep_adapters::detail::ModelInput model_input(model_path);
+  std::vector<detail::SpinWall> walls;
+  detail::ModelInput model_input(model_path, &walls);
   std::istream& input = model_input.stream();
   ParsedModelFile parsed;
   parsed.protocol = parse_model_header(input);
+  parsed.protocol.spin_walls.swap(walls);
   parsed.protocol.energy_reference = model_input.energy_reference();
   parsed.protocol.spin_type_semantics = model_input.spin_type_semantics();
   parsed.parameters_and_q_scaler = read_scalar_lines(
