@@ -120,40 +120,53 @@ void launch(Layout layout, const cuda_backend::ModelProtocol& p, int count,
   }
 }
 
+// NVCC with MSVC cannot instantiate the nested generic lambdas in this dispatch.
+template<int L, int O, class Real>
+void launch_order_with_coefficients(
+    const cuda_backend::ModelProtocol& p, int count, const Geometry& geometry,
+    const cuda_backend::DeviceModelView& m, const cuda_backend::DeviceWorkspaceView& w,
+    bool backward, int mode, bool transfer, const Real* coefficients) {
+  using Layout = MDPolynomialLayout<L,O>;
+  const Layout layout(m.spin_layout);
+  constexpr bool quadratic = md_quadratic(L,O);
+  if (!w.spin_radial_cache)
+    launch<false,Layout,quadratic>(layout,p,count,geometry,m,w,backward,mode,transfer,coefficients);
+  // MD can use the narrower force kernel when only center virial is requested.
+  else if (w.neighbor_source == 1 && (!backward || (mode < 2 && !transfer)) &&
+           prefer_ghost_coordinates(m.spin_layout))
+    launch<true,Layout,quadratic>(layout,p,count,GhostCoordinates{},m,w,backward,mode,transfer,coefficients);
+  else
+    launch<true,Layout,quadratic>(layout,p,count,geometry,m,w,backward,mode,transfer,coefficients);
+}
+
+template<int L, int O>
+void launch_order(const cuda_backend::ModelProtocol& p, int count, const Geometry& geometry,
+                  const cuda_backend::DeviceModelView& m, const cuda_backend::DeviceWorkspaceView& w,
+                  bool backward, int mode, bool transfer) {
+  if constexpr (md_wide(L,O,false)) {
+    if (!p.spin_soc) {
+      launch_order_with_coefficients<L,O>(
+        p,count,geometry,m,w,backward,mode,transfer,m.spin_radial_coefficients_wide);
+      return;
+    }
+  }
+  launch_order_with_coefficients<L,O>(
+    p,count,geometry,m,w,backward,mode,transfer,m.spin_radial_coefficients);
+}
+
 template<int L>
 void launch_order(const cuda_backend::ModelProtocol& p, int count,
                   const cuda_backend::SimulationBox& box, const cuda_backend::DeviceModelView& m,
                   const cuda_backend::DeviceWorkspaceView& w, bool backward, int mode, bool transfer) {
   const Geometry geometry{box, w.neighbor_source, w.atom_to_structure,
     w.boxes_row_major9, w.box_inverse_row_major9, w.pbc_flags3};
-  auto poll = [&](auto order) {
-    constexpr int O = decltype(order)::value;
-    MDPolynomialLayout<L,O> layout(m.spin_layout);
-    auto run = [&](const auto* coefficients) {
-      constexpr bool quadratic = md_quadratic(L,O);
-      if (!w.spin_radial_cache)
-        launch<false,decltype(layout),quadratic>(layout,p,count,geometry,m,w,backward,mode,transfer,coefficients);
-      // MD can use the narrower force kernel when only center virial is requested.
-      else if (w.neighbor_source == 1 && (!backward || (mode < 2 && !transfer)) &&
-               prefer_ghost_coordinates(m.spin_layout))
-        launch<true,decltype(layout),quadratic>(layout,p,count,GhostCoordinates{},m,w,backward,mode,transfer,coefficients);
-      else
-        launch<true,decltype(layout),quadratic>(layout,p,count,geometry,m,w,backward,mode,transfer,coefficients);
-    };
-    if constexpr (md_wide(L,O,false))
-      if (!p.spin_soc) {
-        run(m.spin_radial_coefficients_wide);
-        return;
-      }
-    run(m.spin_radial_coefficients);
-  };
   switch (p.spin_order) {
-    case 1: poll(std::integral_constant<int,1>{}); break;
+    case 1: launch_order<L,1>(p,count,geometry,m,w,backward,mode,transfer); break;
     case 2:
-      if constexpr (L != 2) poll(std::integral_constant<int,2>{});
+      if constexpr (L != 2) launch_order<L,2>(p,count,geometry,m,w,backward,mode,transfer);
       break;
-    case 3: poll(std::integral_constant<int,3>{}); break;
-    case 4: poll(std::integral_constant<int,4>{}); break;
+    case 3: launch_order<L,3>(p,count,geometry,m,w,backward,mode,transfer); break;
+    case 4: launch_order<L,4>(p,count,geometry,m,w,backward,mode,transfer); break;
   }
 }
 } // namespace nep_adapters::spin_density::md
